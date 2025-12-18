@@ -6,7 +6,7 @@ Build an automated market-making bot for Polymarket BTC 15-minute Up/Down market
 
 ## Phases
 
-- [ ] **Phase 1: Foundation** - Environment, API credentials, wallet setup
+- [ ] **Phase 1: Foundation** - Environment, API credentials, wallet setup, network failover
 - [ ] **Phase 2: Market Intelligence** - Data fetching, orderbook parsing, opportunity detection
 - [ ] **Phase 3: Trading Core** - Order execution, position tracking, balance management
 - [ ] **Phase 4: Dry Run** - Paper trading simulation, strategy validation
@@ -15,13 +15,14 @@ Build an automated market-making bot for Polymarket BTC 15-minute Up/Down market
 ## Phase Details
 
 ### Phase 1: Foundation
-**Goal**: Working Python environment connected to Polymarket API
+**Goal**: Working Python environment connected to Polymarket API with network resilience
 **Depends on**: Nothing (first phase)
-**Plans**: 2 plans
+**Plans**: 3 plans
 
 Plans:
 - [ ] 01-01: Python environment setup (venv, dependencies, project structure)
 - [ ] 01-02: Polymarket API authentication (wallet, credentials, connection test)
+- [ ] 01-03: Network failover (monitor WiFi, auto-switch to backups, 15s polling to return to primary)
 
 ### Phase 2: Market Intelligence
 **Goal**: Fetch and analyze BTC Up/Down markets, identify trading opportunities
@@ -64,7 +65,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 0/2 | Not started | - |
+| 1. Foundation | 0/3 | Not started | - |
 | 2. Market Intelligence | 0/2 | Not started | - |
 | 3. Trading Core | 0/3 | Not started | - |
 | 4. Dry Run | 0/2 | Not started | - |
