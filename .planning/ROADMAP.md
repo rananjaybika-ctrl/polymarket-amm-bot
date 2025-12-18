@@ -7,8 +7,8 @@ Build an automated market-making bot for Polymarket BTC 15-minute Up/Down market
 ## Phases
 
 - [x] **Phase 1: Foundation** - Environment, API credentials, network failover, Discord setup
-- [ ] **Phase 2: Market Intelligence** - Data fetching, orderbook parsing, market rotation
-- [ ] **Phase 3: Trading Core** - Order execution, position tracking, balance management, WebSockets
+- [x] **Phase 2: Market Intelligence** - Data fetching, orderbook parsing, market rotation
+- [x] **Phase 3: Trading Core** - Order execution, position tracking, balance management, WebSockets
 - [ ] **Phase 4: Dry Run** - Paper trading simulation, strategy validation
 - [ ] **Phase 5: Live Trading** - Real execution, risk management, auto-claim, monitoring
 
@@ -31,9 +31,9 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 02-01: Market data fetching (list markets, filter 15-min BTC, parse responses)
-- [ ] 02-02: Orderbook analysis (best bid/ask, spread calculation, pair cost detection)
-- [ ] 02-03: Market rotation (auto-advance to next 15-min market, enforce 60-min window limit)
+- [x] 02-01: Market data fetching (list markets, filter 15-min BTC, parse responses)
+- [x] 02-02: Orderbook analysis (best bid/ask, spread calculation, pair cost detection)
+- [x] 02-03: Market rotation (auto-advance to next 15-min market, enforce 60-min window limit)
 
 ### Phase 3: Trading Core
 **Goal**: Execute orders, track positions, manage balance, real-time data via WebSockets
@@ -41,11 +41,11 @@ Plans:
 **Plans**: 5 plans
 
 Plans:
-- [ ] 03-01: Order placement (limit orders, parallel execution for Up/Down to prevent legging)
-- [ ] 03-02: Position tracking (inventory, average prices, P&L calculation)
-- [ ] 03-03: Balance management (imbalance detection, recovery logic)
-- [ ] 03-04: Trade logging (CSV export with timestamps, prices, quantities, P&L for analysis)
-- [ ] 03-05: WebSocket integration (real-time orderbook streaming, instant fills, auto-reconnect)
+- [x] 03-01: Order placement (limit orders, parallel execution for Up/Down to prevent legging)
+- [x] 03-02: Position tracking (inventory, average prices, P&L calculation)
+- [x] 03-03: Balance management (imbalance detection, recovery logic)
+- [x] 03-04: Trade logging (CSV export with timestamps, prices, quantities, P&L for analysis)
+- [x] 03-05: WebSocket integration (real-time orderbook streaming, instant fills, auto-reconnect)
 
 ### Phase 4: Dry Run
 **Goal**: Paper trading mode to validate strategy without risking capital
@@ -73,12 +73,12 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation | 4/4 | Complete | Dec 18, 2025 |
-| 2. Market Intelligence | 0/3 | Not started | - |
-| 3. Trading Core | 0/5 | Not started | - |
+| 2. Market Intelligence | 3/3 | Complete | Dec 19, 2025 |
+| 3. Trading Core | 5/5 | Complete | Dec 19, 2025 |
 | 4. Dry Run | 0/2 | Not started | - |
 | 5. Live Trading | 0/5 | Not started | - |
 
-**Total: 19 plans across 5 phases (4 complete)**
+**Total: 19 plans across 5 phases (12 complete)**
 
 ## v1.1 (Future)
 - Multi-market concurrent trading

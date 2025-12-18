@@ -20,16 +20,25 @@ Usage:
 """
 
 import asyncio
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
     ApiCreds,
     BalanceAllowanceParams,
     AssetType,
     BookParams,
+    OrderArgs,
+    OrderType,
+    PartialCreateOrderOptions,
+    PostOrdersArgs,
+    OpenOrderParams,
 )
 
 from src.config import Config
+
+
+# Type alias for tick sizes
+TickSize = Literal["0.1", "0.01", "0.001", "0.0001"]
 
 
 class PolymarketClientError(Exception):
@@ -337,6 +346,225 @@ class PolymarketClient:
             return account.address
         except Exception as e:
             raise PolymarketClientError(f"Failed to get wallet address: {e}")
+
+    # ==================== Order Methods ====================
+
+    def get_tick_size(self, token_id: str) -> TickSize:
+        """
+        Get the tick size (price precision) for a token.
+
+        Args:
+            token_id: The token ID
+
+        Returns:
+            Tick size as string ("0.1", "0.01", "0.001", or "0.0001")
+        """
+        self._ensure_connected()
+        return self._client.get_tick_size(token_id)
+
+    def get_neg_risk(self, token_id: str) -> bool:
+        """
+        Check if a token is a negative risk market.
+
+        Args:
+            token_id: The token ID
+
+        Returns:
+            True if negative risk market
+        """
+        self._ensure_connected()
+        return self._client.get_neg_risk(token_id)
+
+    def round_price(self, price: float, tick_size: TickSize) -> float:
+        """
+        Round a price to valid tick size.
+
+        Args:
+            price: The price to round
+            tick_size: The tick size for the market
+
+        Returns:
+            Price rounded to nearest valid tick
+        """
+        tick = float(tick_size)
+        return round(round(price / tick) * tick, 4)
+
+    def create_order(
+        self,
+        token_id: str,
+        side: str,
+        price: float,
+        size: float,
+        fee_rate_bps: int = 0,
+    ) -> Any:
+        """
+        Create a signed order (does not submit).
+
+        Args:
+            token_id: Token to trade
+            side: "BUY" or "SELL"
+            price: Order price (0-1)
+            size: Number of shares
+            fee_rate_bps: Fee rate in basis points (default 0)
+
+        Returns:
+            Signed order object ready for submission
+        """
+        self._ensure_connected()
+
+        # Get market parameters
+        tick_size = self.get_tick_size(token_id)
+        neg_risk = self.get_neg_risk(token_id)
+
+        # Round price to valid tick
+        rounded_price = self.round_price(price, tick_size)
+
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=rounded_price,
+            size=size,
+            side=side.upper(),
+            fee_rate_bps=fee_rate_bps,
+        )
+
+        options = PartialCreateOrderOptions(
+            tick_size=tick_size,
+            neg_risk=neg_risk,
+        )
+
+        return self._client.create_order(order_args, options)
+
+    async def place_order(
+        self,
+        token_id: str,
+        side: str,
+        price: float,
+        size: float,
+        order_type: OrderType = OrderType.GTC,
+    ) -> Dict[str, Any]:
+        """
+        Create and submit a single order.
+
+        Args:
+            token_id: Token to trade
+            side: "BUY" or "SELL"
+            price: Order price (0-1)
+            size: Number of shares
+            order_type: GTC, FOK, FAK, or GTD
+
+        Returns:
+            Order response with order_id and status
+        """
+        self._ensure_connected()
+
+        try:
+            order = self.create_order(token_id, side, price, size)
+            result = self._client.post_order(order, order_type)
+            return result
+        except Exception as e:
+            raise PolymarketClientError(f"Failed to place order: {e}")
+
+    async def place_orders(
+        self,
+        orders: List[Any],
+        order_type: OrderType = OrderType.GTC,
+    ) -> List[Dict[str, Any]]:
+        """
+        Submit multiple orders in a single batch (atomic).
+
+        Use this for pair trading to prevent legging risk.
+
+        Args:
+            orders: List of signed orders from create_order()
+            order_type: GTC, FOK, FAK, or GTD
+
+        Returns:
+            List of order responses
+        """
+        self._ensure_connected()
+
+        try:
+            args = [PostOrdersArgs(order=o, orderType=order_type) for o in orders]
+            result = self._client.post_orders(args)
+            return result
+        except Exception as e:
+            raise PolymarketClientError(f"Failed to place orders: {e}")
+
+    async def cancel_order(self, order_id: str) -> Dict[str, Any]:
+        """
+        Cancel a single order.
+
+        Args:
+            order_id: The order ID to cancel
+
+        Returns:
+            Cancellation response
+        """
+        self._ensure_connected()
+
+        try:
+            result = self._client.cancel_orders([order_id])
+            return result
+        except Exception as e:
+            raise PolymarketClientError(f"Failed to cancel order: {e}")
+
+    async def cancel_orders(self, order_ids: List[str]) -> Dict[str, Any]:
+        """
+        Cancel multiple orders.
+
+        Args:
+            order_ids: List of order IDs to cancel
+
+        Returns:
+            Cancellation response
+        """
+        self._ensure_connected()
+
+        try:
+            result = self._client.cancel_orders(order_ids)
+            return result
+        except Exception as e:
+            raise PolymarketClientError(f"Failed to cancel orders: {e}")
+
+    async def get_open_orders(
+        self,
+        market: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all open orders, optionally filtered by market.
+
+        Args:
+            market: Optional market/condition ID to filter by
+
+        Returns:
+            List of open orders
+        """
+        self._ensure_connected()
+
+        try:
+            params = OpenOrderParams(market=market) if market else None
+            result = self._client.get_orders(params)
+            return result
+        except Exception as e:
+            raise PolymarketClientError(f"Failed to get open orders: {e}")
+
+    async def get_order(self, order_id: str) -> Dict[str, Any]:
+        """
+        Get details for a specific order.
+
+        Args:
+            order_id: The order ID
+
+        Returns:
+            Order details
+        """
+        self._ensure_connected()
+
+        try:
+            result = self._client.get_order(order_id)
+            return result
+        except Exception as e:
+            raise PolymarketClientError(f"Failed to get order: {e}")
 
     async def disconnect(self) -> None:
         """

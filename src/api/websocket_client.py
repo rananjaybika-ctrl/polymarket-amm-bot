@@ -1,0 +1,424 @@
+"""
+WebSocket client for Polymarket real-time data streaming.
+
+Provides real-time orderbook updates and price changes via
+Polymarket's CLOB WebSocket API.
+"""
+
+import asyncio
+import json
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Optional, List, Callable, Dict, Any, Set
+from enum import Enum
+
+import websockets
+from websockets.exceptions import ConnectionClosed
+
+from src.models.orderbook import Order, Orderbook
+
+
+logger = logging.getLogger(__name__)
+
+
+# WebSocket endpoints
+WS_MARKET_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+WS_USER_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
+
+
+class MessageType(Enum):
+    """WebSocket message types."""
+    BOOK = "book"
+    PRICE_CHANGE = "price_change"
+    LAST_TRADE_PRICE = "last_trade_price"
+
+
+@dataclass
+class BookUpdate:
+    """Order book update message."""
+    token_id: str
+    bids: List[Order] = field(default_factory=list)
+    asks: List[Order] = field(default_factory=list)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    hash: str = ""
+
+    @classmethod
+    def from_message(cls, data: dict) -> "BookUpdate":
+        """Create from WebSocket message."""
+        token_id = data.get("asset_id", "")
+
+        bids = []
+        asks = []
+
+        # Bids and asks are at top level, not nested in "market"
+        for bid in data.get("bids", []):
+            bids.append(Order(
+                price=float(bid.get("price", 0)),
+                size=float(bid.get("size", 0)),
+            ))
+        for ask in data.get("asks", []):
+            asks.append(Order(
+                price=float(ask.get("price", 0)),
+                size=float(ask.get("size", 0)),
+            ))
+
+        return cls(
+            token_id=token_id,
+            bids=sorted(bids, key=lambda o: -o.price),  # Highest first
+            asks=sorted(asks, key=lambda o: o.price),   # Lowest first
+            hash=data.get("hash", ""),
+        )
+
+    @property
+    def best_bid(self) -> Optional[float]:
+        """Best bid price."""
+        return self.bids[0].price if self.bids else None
+
+    @property
+    def best_ask(self) -> Optional[float]:
+        """Best ask price."""
+        return self.asks[0].price if self.asks else None
+
+    @property
+    def spread(self) -> Optional[float]:
+        """Bid-ask spread."""
+        if self.best_bid and self.best_ask:
+            return self.best_ask - self.best_bid
+        return None
+
+
+@dataclass
+class PriceChange:
+    """Price change notification."""
+    token_id: str
+    best_bid: Optional[float] = None
+    best_ask: Optional[float] = None
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @classmethod
+    def from_message(cls, data: dict) -> "PriceChange":
+        """Create from WebSocket message."""
+        changes = data.get("changes", [])
+
+        if not changes:
+            return cls(token_id=data.get("asset_id", ""))
+
+        change = changes[0]  # Usually one change per message
+        return cls(
+            token_id=change.get("asset_id", ""),
+            best_bid=float(change["price"]) if change.get("side") == "BUY" else None,
+            best_ask=float(change["price"]) if change.get("side") == "SELL" else None,
+        )
+
+
+@dataclass
+class TradeUpdate:
+    """Trade execution notification."""
+    token_id: str
+    price: float
+    size: float
+    side: str  # "BUY" or "SELL"
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @classmethod
+    def from_message(cls, data: dict) -> "TradeUpdate":
+        """Create from WebSocket message."""
+        return cls(
+            token_id=data.get("asset_id", ""),
+            price=float(data.get("price", 0)),
+            size=float(data.get("size", 0)),
+            side=data.get("side", ""),
+        )
+
+
+# Callback type aliases
+BookCallback = Callable[[BookUpdate], None]
+PriceCallback = Callable[[PriceChange], None]
+TradeCallback = Callable[[TradeUpdate], None]
+
+
+class WebSocketClient:
+    """
+    WebSocket client for Polymarket real-time data.
+
+    Provides streaming orderbook updates with auto-reconnect.
+
+    Example:
+        client = WebSocketClient()
+
+        # Register callbacks
+        client.on_book_update(lambda update: print(update))
+
+        # Connect and subscribe
+        await client.connect()
+        await client.subscribe([up_token_id, down_token_id])
+
+        # Run event loop
+        await client.run()
+    """
+
+    DEFAULT_RECONNECT_DELAY = 1.0
+    MAX_RECONNECT_DELAY = 60.0
+
+    def __init__(
+        self,
+        url: str = WS_MARKET_URL,
+        auto_reconnect: bool = True,
+    ):
+        """
+        Initialize WebSocket client.
+
+        Args:
+            url: WebSocket endpoint URL
+            auto_reconnect: Whether to auto-reconnect on disconnect
+        """
+        self.url = url
+        self.auto_reconnect = auto_reconnect
+
+        self._ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._connected = False
+        self._running = False
+        self._subscribed_tokens: Set[str] = set()
+
+        # Callbacks
+        self._book_callbacks: List[BookCallback] = []
+        self._price_callbacks: List[PriceCallback] = []
+        self._trade_callbacks: List[TradeCallback] = []
+
+        # Reconnect state
+        self._reconnect_delay = self.DEFAULT_RECONNECT_DELAY
+        self._reconnect_task: Optional[asyncio.Task] = None
+
+    @property
+    def connected(self) -> bool:
+        """Whether WebSocket is connected."""
+        return self._connected and self._ws is not None
+
+    def on_book_update(self, callback: BookCallback) -> None:
+        """Register callback for book updates."""
+        self._book_callbacks.append(callback)
+
+    def on_price_change(self, callback: PriceCallback) -> None:
+        """Register callback for price changes."""
+        self._price_callbacks.append(callback)
+
+    def on_trade(self, callback: TradeCallback) -> None:
+        """Register callback for trade updates."""
+        self._trade_callbacks.append(callback)
+
+    async def connect(self) -> bool:
+        """
+        Connect to WebSocket server.
+
+        Returns:
+            True if connected successfully
+        """
+        try:
+            logger.info(f"Connecting to {self.url}")
+            self._ws = await websockets.connect(self.url)
+            self._connected = True
+            self._reconnect_delay = self.DEFAULT_RECONNECT_DELAY
+
+            logger.info("WebSocket connected")
+            return True
+
+        except Exception as e:
+            logger.error(f"WebSocket connection failed: {e}")
+            self._connected = False
+            return False
+
+    async def disconnect(self) -> None:
+        """Disconnect from WebSocket server."""
+        self._running = False
+        self._connected = False
+
+        if self._reconnect_task:
+            self._reconnect_task.cancel()
+            self._reconnect_task = None
+
+        if self._ws:
+            await self._ws.close()
+            self._ws = None
+
+        logger.info("WebSocket disconnected")
+
+    async def subscribe(self, token_ids: List[str]) -> bool:
+        """
+        Subscribe to market updates for tokens.
+
+        Args:
+            token_ids: List of token IDs to subscribe to
+
+        Returns:
+            True if subscription sent successfully
+        """
+        if not self.connected:
+            logger.warning("Cannot subscribe: not connected")
+            return False
+
+        # Build subscription message
+        message = {
+            "type": "market",
+            "assets_ids": token_ids,
+        }
+
+        try:
+            await self._ws.send(json.dumps(message))
+            self._subscribed_tokens.update(token_ids)
+
+            logger.info(f"Subscribed to {len(token_ids)} tokens")
+            return True
+
+        except Exception as e:
+            logger.error(f"Subscription failed: {e}")
+            return False
+
+    async def unsubscribe(self, token_ids: List[str]) -> bool:
+        """
+        Unsubscribe from market updates.
+
+        Args:
+            token_ids: Token IDs to unsubscribe from
+
+        Returns:
+            True if unsubscription sent
+        """
+        if not self.connected:
+            return False
+
+        # Remove from tracked set
+        for tid in token_ids:
+            self._subscribed_tokens.discard(tid)
+
+        # Re-subscribe to remaining (Polymarket replaces subscription)
+        if self._subscribed_tokens:
+            return await self.subscribe(list(self._subscribed_tokens))
+
+        return True
+
+    async def run(self) -> None:
+        """
+        Run the WebSocket event loop.
+
+        Processes incoming messages until disconnect.
+        """
+        self._running = True
+
+        while self._running:
+            try:
+                if not self.connected:
+                    if self.auto_reconnect:
+                        await self._reconnect()
+                    else:
+                        break
+
+                # Receive message
+                message = await self._ws.recv()
+                await self._handle_message(message)
+
+            except ConnectionClosed as e:
+                logger.warning(f"WebSocket closed: {e}")
+                self._connected = False
+
+                if self.auto_reconnect and self._running:
+                    await self._reconnect()
+                else:
+                    break
+
+            except Exception as e:
+                logger.error(f"Error in WebSocket loop: {e}")
+
+                if not self._running:
+                    break
+
+    async def _reconnect(self) -> None:
+        """Handle reconnection with exponential backoff."""
+        logger.info(f"Reconnecting in {self._reconnect_delay:.1f}s...")
+        await asyncio.sleep(self._reconnect_delay)
+
+        # Exponential backoff
+        self._reconnect_delay = min(
+            self._reconnect_delay * 2,
+            self.MAX_RECONNECT_DELAY,
+        )
+
+        if await self.connect():
+            # Re-subscribe to previous tokens
+            if self._subscribed_tokens:
+                await self.subscribe(list(self._subscribed_tokens))
+
+    async def _handle_message(self, raw_message: str) -> None:
+        """Process incoming WebSocket message."""
+        try:
+            data = json.loads(raw_message)
+
+            # Handle list of messages (initial snapshot)
+            if isinstance(data, list):
+                for item in data:
+                    await self._process_single_message(item)
+            else:
+                await self._process_single_message(data)
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Invalid JSON message: {e}")
+
+        except Exception as e:
+            logger.error(f"Error handling message: {e}")
+
+    async def _process_single_message(self, data: dict) -> None:
+        """Process a single message (not a list)."""
+        try:
+            # Book update - has bids/asks
+            if "bids" in data or "asks" in data:
+                update = BookUpdate.from_message(data)
+                for callback in self._book_callbacks:
+                    try:
+                        callback(update)
+                    except Exception as e:
+                        logger.error(f"Book callback error: {e}")
+
+            # Price change - has changes array
+            elif "changes" in data:
+                update = PriceChange.from_message(data)
+                for callback in self._price_callbacks:
+                    try:
+                        callback(update)
+                    except Exception as e:
+                        logger.error(f"Price callback error: {e}")
+
+            # Trade update
+            elif data.get("event_type") == "last_trade_price":
+                update = TradeUpdate.from_message(data)
+                for callback in self._trade_callbacks:
+                    try:
+                        callback(update)
+                    except Exception as e:
+                        logger.error(f"Trade callback error: {e}")
+
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
+
+    async def run_for_duration(self, seconds: float) -> None:
+        """
+        Run the event loop for a specified duration.
+
+        Args:
+            seconds: Duration to run
+        """
+        task = asyncio.create_task(self.run())
+
+        try:
+            await asyncio.sleep(seconds)
+        finally:
+            self._running = False
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    def __repr__(self) -> str:
+        """String representation."""
+        status = "connected" if self.connected else "disconnected"
+        return f"WebSocketClient({status}, subs={len(self._subscribed_tokens)})"
