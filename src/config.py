@@ -63,6 +63,15 @@ class Config:
         )
         self.chain_id: int = int(os.getenv("CHAIN_ID", "137"))  # Polygon mainnet
 
+        # === WALLET TYPE ===
+        # "eoa" = standard MetaMask/hardware wallet (default)
+        # "magic" = email login (Magic wallet) - requires FUNDER_ADDRESS
+        self.wallet_type: str = os.getenv("WALLET_TYPE", "eoa").lower()
+
+        # For Magic wallets: your actual Polymarket account address
+        # Find this on Polymarket.com after logging in (top right corner)
+        self.funder_address: str = os.getenv("FUNDER_ADDRESS", "")
+
         # === TRADING PARAMETERS ===
         # Capital limits (in USD)
         self.max_total_cost: float = float(os.getenv("MAX_TOTAL_COST", "20.0"))
@@ -184,6 +193,18 @@ class Config:
                     "WALLET_PRIVATE_KEY should be a 64-character hex string, "
                     "optionally prefixed with '0x'"
                 )
+
+        # Validate wallet type
+        if self.wallet_type not in ("eoa", "magic"):
+            raise ConfigError(
+                "WALLET_TYPE must be 'eoa' (MetaMask) or 'magic' (email login)"
+            )
+
+        if self.wallet_type == "magic" and not self.funder_address:
+            raise ConfigError(
+                "FUNDER_ADDRESS is required for Magic wallets. "
+                "This is your Polymarket account address (shown on polymarket.com)"
+            )
 
         # Validate risk parameters
         if not 0 < self.max_imbalance <= 1:
