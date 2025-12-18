@@ -7,10 +7,10 @@ Build an automated market-making bot for Polymarket BTC 15-minute Up/Down market
 ## Phases
 
 - [ ] **Phase 1: Foundation** - Environment, API credentials, network failover, Discord setup
-- [ ] **Phase 2: Market Intelligence** - Data fetching, orderbook parsing, opportunity detection
-- [ ] **Phase 3: Trading Core** - Order execution, position tracking, balance management, logging
+- [ ] **Phase 2: Market Intelligence** - Data fetching, orderbook parsing, market rotation
+- [ ] **Phase 3: Trading Core** - Order execution, position tracking, balance management, WebSockets
 - [ ] **Phase 4: Dry Run** - Paper trading simulation, strategy validation
-- [ ] **Phase 5: Live Trading** - Real execution, risk management, notifications, monitoring
+- [ ] **Phase 5: Live Trading** - Real execution, risk management, auto-claim, monitoring
 
 ## Phase Details
 
@@ -20,30 +20,32 @@ Build an automated market-making bot for Polymarket BTC 15-minute Up/Down market
 **Plans**: 4 plans
 
 Plans:
-- [ ] 01-01: Python environment + config system (venv, dependencies, wallet-agnostic config for easy switching)
+- [x] 01-01: Python environment + config system (venv, dependencies, wallet-agnostic config for easy switching)
 - [ ] 01-02: Polymarket API authentication (wallet setup, credentials, connection test)
 - [ ] 01-03: Network failover (monitor WiFi, auto-switch to 2 backups, 15s polling to return to primary)
 - [ ] 01-04: Discord bot setup (create 3 channels: #pnl-summary, #losses, #outages with webhook config)
 
 ### Phase 2: Market Intelligence
-**Goal**: Fetch and analyze BTC Up/Down markets, identify trading opportunities
+**Goal**: Fetch and analyze BTC Up/Down markets, identify opportunities, handle market rotation
 **Depends on**: Phase 1
-**Plans**: 2 plans
+**Plans**: 3 plans
 
 Plans:
 - [ ] 02-01: Market data fetching (list markets, filter 15-min BTC, parse responses)
 - [ ] 02-02: Orderbook analysis (best bid/ask, spread calculation, pair cost detection)
+- [ ] 02-03: Market rotation (auto-advance to next 15-min market, enforce 60-min window limit)
 
 ### Phase 3: Trading Core
-**Goal**: Execute orders, track positions, manage balance, and log all trades
+**Goal**: Execute orders, track positions, manage balance, real-time data via WebSockets
 **Depends on**: Phase 2
-**Plans**: 4 plans
+**Plans**: 5 plans
 
 Plans:
 - [ ] 03-01: Order placement (limit orders, parallel execution for Up/Down to prevent legging)
 - [ ] 03-02: Position tracking (inventory, average prices, P&L calculation)
 - [ ] 03-03: Balance management (imbalance detection, recovery logic)
 - [ ] 03-04: Trade logging (CSV export with timestamps, prices, quantities, P&L for analysis)
+- [ ] 03-05: WebSocket integration (real-time orderbook streaming, instant fills, auto-reconnect)
 
 ### Phase 4: Dry Run
 **Goal**: Paper trading mode to validate strategy without risking capital
@@ -55,27 +57,28 @@ Plans:
 - [ ] 04-02: Strategy validation (run 3+ market cycles, verify profitability, test edge cases)
 
 ### Phase 5: Live Trading
-**Goal**: Production-ready bot with real money execution, comprehensive safety, and monitoring
+**Goal**: Production-ready bot with real money execution, auto-claim, and comprehensive monitoring
 **Depends on**: Phase 4
-**Plans**: 4 plans
+**Plans**: 5 plans
 
 Plans:
 - [ ] 05-01: Live execution (real orders, position sync, error handling, graceful recovery)
 - [ ] 05-02: Risk management (daily loss limits, position size limits, auto-pause on consecutive losses)
 - [ ] 05-03: Discord notifications (PNL summaries to #pnl-summary, losses @mention to #losses, outages @mention to #outages)
 - [ ] 05-04: Terminal dashboard + performance metrics (real-time display, ROI tracking, win rate)
+- [ ] 05-05: Auto-claim winnings (check resolution every 5 mins, claim winning positions to USDC)
 
 ## Progress
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 0/4 | Not started | - |
-| 2. Market Intelligence | 0/2 | Not started | - |
-| 3. Trading Core | 0/4 | Not started | - |
+| 1. Foundation | 1/4 | In progress | - |
+| 2. Market Intelligence | 0/3 | Not started | - |
+| 3. Trading Core | 0/5 | Not started | - |
 | 4. Dry Run | 0/2 | Not started | - |
-| 5. Live Trading | 0/4 | Not started | - |
+| 5. Live Trading | 0/5 | Not started | - |
 
-**Total: 16 plans across 5 phases**
+**Total: 19 plans across 5 phases**
 
 ## v1.1 (Future)
 - Multi-market concurrent trading

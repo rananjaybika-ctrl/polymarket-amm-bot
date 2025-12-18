@@ -17,6 +17,9 @@ How we know it worked:
 - [ ] Maintains position imbalance < 20% throughout operation
 - [ ] Discord notifications working (PNL summaries, loss alerts, outage alerts)
 - [ ] Network failover successfully switches to backup WiFi on disconnect
+- [ ] Market rotation works (auto-advance through up to 4 consecutive 15-min markets)
+- [ ] Auto-claim successfully claims winning positions after market resolution
+- [ ] WebSocket connection provides real-time orderbook updates
 
 ## Constraints
 
@@ -41,6 +44,27 @@ Server channels for notifications:
 - Backup network 1 (first fallback)
 - Backup network 2 (second fallback)
 - Poll every 15 seconds to return to primary when available
+
+## Market Rotation
+
+- Automatically advance to next 15-minute market when current market closes
+- Maximum 60-minute trading window (4 consecutive 15-min markets)
+- Smooth transition between markets without manual intervention
+- Respects time window limits from Gabagool strategy
+
+## Auto-Claim Winnings
+
+- Check for resolved markets every 5 minutes
+- Automatically claim winning positions (Up or Down tokens → USDC)
+- Log claimed amounts to Discord #pnl-summary
+- Handle partial claims and network errors gracefully
+
+## Real-Time Data (WebSockets)
+
+- WebSocket connection to Polymarket for live orderbook updates
+- Instant fill notifications for faster response
+- Auto-reconnect on connection drops
+- Fallback to HTTP polling if WebSocket unavailable
 
 ## Out of Scope
 
