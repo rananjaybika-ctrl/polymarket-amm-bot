@@ -15,6 +15,8 @@ How we know it worked:
 - [ ] Achieves 3+ profitable market cycles in dry-run mode
 - [ ] Completes 1 successful live trade with $5-10 capital
 - [ ] Maintains position imbalance < 20% throughout operation
+- [ ] Discord notifications working (PNL summaries, loss alerts, outage alerts)
+- [ ] Network failover successfully switches to backup WiFi on disconnect
 
 ## Constraints
 
@@ -23,14 +25,30 @@ How we know it worked:
 - **Deployment**: Local Mac machine (no cloud initially)
 - **API**: Polymarket credentials not yet set up (Phase 1 includes setup)
 - **Strategy focus**: Balanced inventory first, pair cost optimization second
+- **Wallet design**: Wallet-agnostic config (easy switch from test to main account)
+- **Test account**: Separate $100 Polygon wallet for learning phase, switch to main later
+
+## Discord Integration
+
+Server channels for notifications:
+- `#pnl-summary` - Trade completions, daily P&L summaries (no mention)
+- `#losses` - Loss events, losing trades (@mention for alerts)
+- `#outages` - Network disconnects, API errors, website issues (@mention for alerts)
+
+## Network Resilience
+
+- Primary WiFi network (main connection)
+- Backup network 1 (first fallback)
+- Backup network 2 (second fallback)
+- Poll every 15 seconds to return to primary when available
 
 ## Out of Scope
 
 What we're NOT building in v1.0:
 
 - Directional trading strategies (betting on outcome)
-- Multi-market concurrent trading
+- Multi-market concurrent trading (deferred to v1.1)
 - Complex grid systems (keep it simple: 1 level)
 - Cloud deployment or 24/7 operation
-- GUI/dashboard (CLI monitoring only)
+- GUI/dashboard (terminal dashboard only)
 - Backtesting framework
