@@ -576,6 +576,242 @@ class PolymarketClient:
         self._api_creds = None
         self.connected = False
 
+    # ==================== Claiming / Redemption Methods ====================
+
+    async def get_market_info(self, condition_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get market information including resolution status.
+
+        Args:
+            condition_id: The market's condition ID
+
+        Returns:
+            Market info dict with 'closed', 'resolved', 'winning_token_id' etc.
+            None if market not found
+        """
+        self._ensure_connected()
+
+        try:
+            # Fetch market from Gamma API
+            import aiohttp
+            url = f"https://gamma-api.polymarket.com/markets/{condition_id}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    if response.status == 200:
+                        return await response.json()
+                    return None
+        except Exception as e:
+            raise PolymarketClientError(f"Failed to get market info: {e}")
+
+    async def is_market_resolved(self, condition_id: str) -> bool:
+        """
+        Check if a market has been resolved.
+
+        Args:
+            condition_id: The market's condition ID
+
+        Returns:
+            True if market is resolved and claimable
+        """
+        market = await self.get_market_info(condition_id)
+        if not market:
+            return False
+
+        # Check various resolution indicators
+        return (
+            market.get("resolved", False) or
+            market.get("closed", False) or
+            market.get("active", True) is False
+        )
+
+    async def get_winning_token(self, condition_id: str) -> Optional[str]:
+        """
+        Get the winning token ID for a resolved market.
+
+        For BTC Up/Down markets:
+        - If BTC went UP: UP token wins (pays $1)
+        - If BTC went DOWN: DOWN token wins (pays $1)
+
+        Args:
+            condition_id: The market's condition ID
+
+        Returns:
+            Token ID of the winning outcome, or None if not resolved
+        """
+        market = await self.get_market_info(condition_id)
+        if not market:
+            return None
+
+        # Check if resolved
+        if not market.get("resolved", False):
+            return None
+
+        # Get tokens and outcomes
+        tokens = market.get("tokens", [])
+        if len(tokens) < 2:
+            return None
+
+        # Find the winning token (winner field or price == 1)
+        for token in tokens:
+            if token.get("winner", False):
+                return token.get("token_id")
+            # Also check if price is 1 (indicating winner)
+            if float(token.get("price", 0)) >= 0.99:
+                return token.get("token_id")
+
+        return None
+
+    async def get_claimable_positions(self) -> List[Dict[str, Any]]:
+        """
+        Get all positions that are in resolved markets and can be claimed.
+
+        Returns:
+            List of dicts with:
+            - token_id: The token ID
+            - condition_id: The market condition ID
+            - balance: Number of shares held
+            - is_winning: Whether this is the winning token
+            - estimated_value: Estimated USDC value ($1 per winning share)
+        """
+        self._ensure_connected()
+
+        claimable = []
+
+        try:
+            # Get all positions from Gamma API
+            import aiohttp
+            wallet = self.get_wallet_address()
+            url = f"https://gamma-api.polymarket.com/positions?user={wallet}"
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                    if response.status != 200:
+                        return []
+                    positions = await response.json()
+
+            # Filter for resolved markets with balance
+            for pos in positions:
+                balance = float(pos.get("size", 0))
+                if balance <= 0:
+                    continue
+
+                condition_id = pos.get("conditionId") or pos.get("condition_id", "")
+                token_id = pos.get("tokenId") or pos.get("token_id", "")
+
+                if not condition_id or not token_id:
+                    continue
+
+                # Check if market is resolved
+                is_resolved = await self.is_market_resolved(condition_id)
+                if not is_resolved:
+                    continue
+
+                # Check if this is winning token
+                winning_token = await self.get_winning_token(condition_id)
+                is_winning = (winning_token == token_id)
+
+                claimable.append({
+                    "token_id": token_id,
+                    "condition_id": condition_id,
+                    "balance": balance,
+                    "is_winning": is_winning,
+                    "estimated_value": balance if is_winning else 0,
+                    "outcome": pos.get("outcome", ""),
+                })
+
+            return claimable
+
+        except Exception as e:
+            raise PolymarketClientError(f"Failed to get claimable positions: {e}")
+
+    async def claim_winnings_via_sell(
+        self,
+        token_id: str,
+        amount: float,
+        min_price: float = 0.99,
+    ) -> Dict[str, Any]:
+        """
+        Claim winnings by selling winning tokens at market price.
+
+        This is the workaround for the lack of native redeem API.
+        After market resolution, winning tokens trade at ~$0.99-1.00.
+        Selling at 0.99 recovers 99% of the value.
+
+        Args:
+            token_id: The winning token to sell
+            amount: Number of shares to sell
+            min_price: Minimum sell price (default 0.99)
+
+        Returns:
+            Order result dict
+        """
+        self._ensure_connected()
+
+        try:
+            # Create and submit sell order
+            result = await self.place_order(
+                token_id=token_id,
+                side="SELL",
+                price=min_price,
+                size=amount,
+                order_type=OrderType.GTC,
+            )
+            return result
+        except Exception as e:
+            raise PolymarketClientError(f"Failed to claim via sell: {e}")
+
+    async def claim_all_winnings(
+        self,
+        dry_run: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """
+        Claim all available winning positions.
+
+        Args:
+            dry_run: If True, only simulate (don't execute trades)
+
+        Returns:
+            List of claim results
+        """
+        results = []
+        claimable = await self.get_claimable_positions()
+
+        for pos in claimable:
+            if not pos["is_winning"]:
+                continue  # Skip losing positions
+
+            if pos["balance"] <= 0:
+                continue
+
+            result = {
+                "token_id": pos["token_id"],
+                "condition_id": pos["condition_id"],
+                "balance": pos["balance"],
+                "estimated_value": pos["estimated_value"],
+                "outcome": pos["outcome"],
+                "dry_run": dry_run,
+            }
+
+            if dry_run:
+                result["status"] = "simulated"
+                result["message"] = f"Would sell {pos['balance']} shares at $0.99"
+            else:
+                try:
+                    order_result = await self.claim_winnings_via_sell(
+                        token_id=pos["token_id"],
+                        amount=pos["balance"],
+                        min_price=0.99,
+                    )
+                    result["status"] = "success"
+                    result["order"] = order_result
+                except Exception as e:
+                    result["status"] = "error"
+                    result["error"] = str(e)
+
+            results.append(result)
+
+        return results
+
     def __repr__(self) -> str:
         """String representation showing connection status."""
         status = "connected" if self.connected else "disconnected"
