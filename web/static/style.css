@@ -1,0 +1,721 @@
+/* ============================================
+   PolyBot - HyperLiquid-Inspired Minimalist Theme
+   Single accent color: Blue #2563eb
+   ============================================ */
+
+:root {
+    /* Backgrounds - Very dark, near black */
+    --bg-dark: #0a0a0f;
+    --bg-card: #12121a;
+    --bg-hover: #1a1a24;
+    --border-color: #252530;
+
+    /* Text - Monochrome grays */
+    --text-primary: #f0f0f5;
+    --text-secondary: #8888a0;
+    --text-muted: #55556a;
+
+    /* Single accent - Darker blue than Polymarket */
+    --accent: #2563eb;
+    --accent-dim: #1d4ed8;
+    --accent-bg: rgba(37, 99, 235, 0.15);
+
+    /* Status colors - Simplified */
+    --stopped-color: #55556a;
+    --paper-color: #2563eb;
+    --live-color: #2563eb;
+
+    /* Accent colors - Green/Red for UP/DOWN */
+    --up-color: #3fb950;
+    --down-color: #f85149;
+    --bullish-color: #3fb950;
+    --bearish-color: #f85149;
+    --profit-color: #3fb950;
+    --loss-color: #f85149;
+
+    /* Button colors */
+    --btn-start: #2563eb;
+    --btn-start-hover: #1d4ed8;
+    --btn-stop: #1a1a24;
+    --btn-stop-hover: #252530;
+    --btn-nuke: #dc2626;
+    --btn-nuke-hover: #b91c1c;
+
+    /* Spacing */
+    --gap: 12px;
+    --radius: 4px;
+
+    /* Font for numbers */
+    --font-numeric: 'Roboto', -apple-system, sans-serif;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background-color: var(--bg-dark);
+    color: var(--text-primary);
+    line-height: 1.5;
+    min-height: 100vh;
+}
+
+/* ============================================
+   Dashboard Layout
+   ============================================ */
+
+.dashboard {
+    max-width: 1386px;
+    margin: 0 auto;
+    padding: var(--gap);
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap);
+    min-height: 100vh;
+}
+
+/* ============================================
+   Header
+   ============================================ */
+
+.dashboard-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+}
+
+.dashboard-header h1 {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: 0.02em;
+}
+
+.ws-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+}
+
+.ws-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    transition: background-color 0.3s;
+}
+
+.ws-status.connected .ws-dot {
+    background: var(--accent);
+}
+
+.ws-status.disconnected .ws-dot {
+    background: var(--stopped-color);
+}
+
+/* ============================================
+   Cards Container
+   ============================================ */
+
+.cards-container {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--gap);
+}
+
+@media (max-width: 1200px) {
+    .cards-container {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 800px) {
+    .cards-container {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ============================================
+   Mode Card
+   ============================================ */
+
+.mode-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.mode-card:hover {
+    border-color: var(--text-muted);
+}
+
+/* Card Header */
+.card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.card-header h2 {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: 0.05em;
+}
+
+/* Status Badge */
+.status-badge {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-size: 0.6rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    position: relative;
+    cursor: default;
+}
+
+.status-badge .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+}
+
+.status-badge.stopped {
+    background: rgba(85, 85, 106, 0.2);
+    color: var(--stopped-color);
+}
+
+.status-badge.stopped .status-dot {
+    background: var(--stopped-color);
+}
+
+.status-badge.paper,
+.status-badge.running {
+    background: var(--accent-bg);
+    color: var(--accent);
+}
+
+.status-badge.paper .status-dot,
+.status-badge.running .status-dot {
+    background: var(--accent);
+    animation: pulse 2s infinite;
+}
+
+.status-badge.live {
+    background: var(--accent-bg);
+    color: var(--accent);
+}
+
+.status-badge.live .status-dot {
+    background: var(--accent);
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* ============================================
+   Live Data Section
+   ============================================ */
+
+.card-live-data {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+/* Market Row */
+.market-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.875rem;
+}
+
+.market-label {
+    color: var(--text-secondary);
+}
+
+.market-value {
+    font-weight: 500;
+    color: var(--text-primary);
+    flex: 1;
+    font-family: var(--font-numeric);
+}
+
+.time-remaining {
+    font-family: var(--font-numeric);
+    background: var(--bg-hover);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+}
+
+/* Position Table */
+.position-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 12px;
+    font-family: var(--font-numeric);
+    font-size: 0.85rem;
+}
+
+.position-table thead th {
+    text-align: left;
+    padding: 6px 10px;
+    color: var(--text-muted);
+    font-weight: 400;
+    font-size: 0.75rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.position-table thead th:first-child {
+    width: 50px;
+}
+
+.position-table tbody td {
+    padding: 8px 10px;
+}
+
+.position-table .side-label {
+    font-weight: 500;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+
+/* UP row styling - blue theme */
+.position-table .avg-price.up,
+.position-table .qty.up {
+    color: #58a6ff;
+    background: rgba(88, 166, 255, 0.1);
+}
+
+/* DOWN row styling - red theme */
+.position-table .avg-price.down,
+.position-table .qty.down {
+    color: var(--down-color);
+    background: rgba(248, 81, 73, 0.1);
+}
+
+/* Cost cells - grey theme with white font */
+.position-table .cost {
+    color: #ffffff;
+    background: rgba(139, 148, 158, 0.25);
+    font-weight: 500;
+}
+
+/* Metrics Row - 4 columns: Hedged Pairs | Locked PNL | Range PNL | Balance */
+.metrics-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+}
+
+.metric {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 8px;
+    background: var(--bg-hover);
+    border-radius: 4px;
+}
+
+/* Pairs metric - shows "X @ $0.XXX" format */
+.metric.pairs {
+    flex-direction: row;
+    justify-content: center;
+    gap: 4px;
+}
+
+.metric.pairs .value {
+    font-size: 1rem;
+    font-weight: 700;
+}
+
+.metric.pairs .label {
+    font-size: 0.8rem;
+    text-transform: none;
+}
+
+.metric .label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    letter-spacing: 0.05em;
+}
+
+/* Smaller labels for Locked PNL and Range PNL (2nd and 3rd metrics) */
+.metrics-row .metric:nth-child(2) .label,
+.metrics-row .metric:nth-child(3) .label {
+    font-size: 0.55rem;
+}
+
+.metric .value {
+    font-size: 0.9rem;
+    font-weight: 600;
+    font-family: var(--font-numeric);
+}
+
+.metric .value.pnl.profit {
+    color: var(--profit-color);
+}
+
+.metric .value.pnl.loss {
+    color: var(--loss-color);
+}
+
+/* Bias Indicator (Directional) */
+.bias-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg-hover);
+    border-radius: 6px;
+}
+
+.bias-label {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.bias-value {
+    font-weight: 700;
+    font-size: 1rem;
+}
+
+.bias-value.bullish {
+    color: var(--bullish-color);
+}
+
+.bias-value.bearish {
+    color: var(--bearish-color);
+}
+
+.flip-count {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-left: auto;
+    font-family: var(--font-numeric);
+}
+
+/* ============================================
+   Config Section
+   ============================================ */
+
+.card-config {
+    border-top: 1px solid var(--border-color);
+}
+
+.config-toggle {
+    width: 100%;
+    padding: 8px 12px;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: background-color 0.2s;
+}
+
+.config-toggle:hover {
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+}
+
+.toggle-icon {
+    font-size: 0.7rem;
+    transition: transform 0.2s;
+}
+
+.config-toggle.expanded .toggle-icon {
+    transform: rotate(180deg);
+}
+
+.config-content {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease-out;
+}
+
+.config-content.expanded {
+    max-height: 600px;
+    padding: 0 12px 12px;
+}
+
+/* Config Row */
+.config-row {
+    margin-bottom: 8px;
+}
+
+/* Mode Toggle (Paper/Live) */
+.toggle-group {
+    display: flex;
+    background: var(--bg-dark);
+    border-radius: 6px;
+    padding: 2px;
+    gap: 2px;
+}
+
+.toggle-option {
+    flex: 1;
+    text-align: center;
+}
+
+.toggle-option input {
+    display: none;
+}
+
+.toggle-option span {
+    display: block;
+    padding: 5px 10px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    color: var(--text-muted);
+}
+
+.toggle-option input:checked + span {
+    background: var(--bg-card);
+    color: var(--text-primary);
+}
+
+.toggle-option.live-option input:checked + span {
+    background: var(--btn-nuke);
+    color: white;
+}
+
+/* Bias Toggle */
+.bias-toggle .toggle-option span.bullish {
+    color: var(--bullish-color);
+}
+
+.bias-toggle .toggle-option span.bearish {
+    color: var(--bearish-color);
+}
+
+.bias-toggle .toggle-option input:checked + span.bullish {
+    background: rgba(63, 185, 80, 0.2);
+}
+
+.bias-toggle .toggle-option input:checked + span.bearish {
+    background: rgba(248, 81, 73, 0.2);
+}
+
+/* Config Grid */
+.config-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+}
+
+.config-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.config-field label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    letter-spacing: 0.03em;
+}
+
+.config-field input {
+    padding: 5px 8px;
+    background: var(--bg-dark);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    color: var(--text-primary);
+    font-size: 0.7rem;
+    font-family: inherit;
+}
+
+.config-field input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.config-field input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.config-field input[type="number"] {
+    font-family: var(--font-numeric);
+}
+
+/* Status badge tooltip */
+.status-badge[title]:hover::after {
+    content: attr(title);
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 8px;
+    padding: 12px 16px;
+    background: var(--bg-dark);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: normal;
+    white-space: pre-line;
+    line-height: 1.6;
+    min-width: 180px;
+    max-width: 280px;
+    z-index: 100;
+    color: var(--text-primary);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+/* ============================================
+   Action Buttons
+   ============================================ */
+
+.card-actions {
+    display: flex;
+    gap: 6px;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border-color);
+}
+
+.btn {
+    flex: 1;
+    padding: 7px 12px;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.btn-start {
+    background: var(--btn-start);
+    color: white;
+}
+
+.btn-start:hover:not(:disabled) {
+    background: var(--btn-start-hover);
+}
+
+.btn-stop {
+    background: var(--btn-stop);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+}
+
+.btn-stop:hover:not(:disabled) {
+    background: var(--btn-stop-hover);
+    color: var(--text-primary);
+}
+
+.btn-nuke {
+    background: var(--btn-nuke);
+    color: white;
+    flex: 0.6;
+}
+
+.btn-nuke:hover:not(:disabled) {
+    background: var(--btn-nuke-hover);
+}
+
+/* Card Error */
+.card-error {
+    padding: 8px 16px;
+    background: rgba(220, 38, 38, 0.15);
+    color: var(--btn-nuke);
+    font-size: 0.8rem;
+    border-top: 1px solid var(--btn-nuke);
+}
+
+.card-error.hidden {
+    display: none;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+    width: 4px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg-dark);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--text-muted);
+}
+
+/* ============================================
+   Footer
+   ============================================ */
+
+.dashboard-footer {
+    padding: 12px 16px;
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.dashboard-footer a {
+    color: var(--text-secondary);
+    text-decoration: none;
+}
+
+.dashboard-footer a:hover {
+    color: var(--text-primary);
+    text-decoration: underline;
+}
+
+/* ============================================
+   Utility Classes
+   ============================================ */
+
+.hidden {
+    display: none !important;
+}
+
+/* Trade log entry - hidden by filter */
+.log-entry.filtered {
+    display: none;
+}

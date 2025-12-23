@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PolyBot</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦾</text></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -37,35 +40,41 @@
                         <span class="market-value" id="standard-market">--</span>
                         <span class="time-remaining" id="standard-time">--:--</span>
                     </div>
-                    <div class="position-row">
-                        <div class="position-side up">
-                            <span class="side-label">UP</span>
-                            <span class="qty" id="standard-up-qty">--</span>
-                            <span class="price">@ <span id="standard-up-avg">--</span></span>
-                            <span class="cost">Cost: <span id="standard-up-cost">--</span></span>
-                        </div>
-                        <div class="position-side down">
-                            <span class="side-label">DOWN</span>
-                            <span class="qty" id="standard-down-qty">--</span>
-                            <span class="price">@ <span id="standard-down-avg">--</span></span>
-                            <span class="cost">Cost: <span id="standard-down-cost">--</span></span>
-                        </div>
-                    </div>
+                    <table class="position-table">
+                        <thead>
+                            <tr>
+                                <th></th>
+                                <th>avg price</th>
+                                <th>qty</th>
+                                <th>cost</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="up-row">
+                                <td class="side-label">up</td>
+                                <td class="avg-price up" id="standard-up-avg">--</td>
+                                <td class="qty up" id="standard-up-qty">--</td>
+                                <td class="cost" id="standard-up-cost">--</td>
+                            </tr>
+                            <tr class="down-row">
+                                <td class="side-label">down</td>
+                                <td class="avg-price down" id="standard-down-avg">--</td>
+                                <td class="qty down" id="standard-down-qty">--</td>
+                                <td class="cost" id="standard-down-cost">--</td>
+                            </tr>
+                        </tbody>
+                    </table>
                     <div class="metrics-row">
-                        <div class="metric">
-                            <span class="label">Pairs</span>
+                        <div class="metric pairs">
                             <span class="value" id="standard-pairs">--</span>
+                            <span class="label">@ <span id="standard-avg-pair-cost">--</span></span>
                         </div>
                         <div class="metric">
-                            <span class="label">Avg Cost</span>
-                            <span class="value" id="standard-avg-pair-cost">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Locked</span>
+                            <span class="label">Locked PNL</span>
                             <span class="value pnl" id="standard-locked-pnl">--</span>
                         </div>
                         <div class="metric">
-                            <span class="label">Range</span>
+                            <span class="label">Range PNL</span>
                             <span class="value pnl" id="standard-pnl-range">--</span>
                         </div>
                         <div class="metric">
@@ -156,35 +165,41 @@
                         <span class="market-value" id="volume-weighted-market">--</span>
                         <span class="time-remaining" id="volume-weighted-time">--:--</span>
                     </div>
-                    <div class="position-row">
-                        <div class="position-side up">
-                            <span class="side-label">UP</span>
-                            <span class="qty" id="volume-weighted-up-qty">--</span>
-                            <span class="price">@ <span id="volume-weighted-up-avg">--</span></span>
-                            <span class="cost">Cost: <span id="volume-weighted-up-cost">--</span></span>
-                        </div>
-                        <div class="position-side down">
-                            <span class="side-label">DOWN</span>
-                            <span class="qty" id="volume-weighted-down-qty">--</span>
-                            <span class="price">@ <span id="volume-weighted-down-avg">--</span></span>
-                            <span class="cost">Cost: <span id="volume-weighted-down-cost">--</span></span>
-                        </div>
-                    </div>
+                    <table class="position-table">
+                        <thead>
+                            <tr>
+                                <th></th>
+                                <th>avg price</th>
+                                <th>qty</th>
+                                <th>cost</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="up-row">
+                                <td class="side-label">up</td>
+                                <td class="avg-price up" id="volume-weighted-up-avg">--</td>
+                                <td class="qty up" id="volume-weighted-up-qty">--</td>
+                                <td class="cost" id="volume-weighted-up-cost">--</td>
+                            </tr>
+                            <tr class="down-row">
+                                <td class="side-label">down</td>
+                                <td class="avg-price down" id="volume-weighted-down-avg">--</td>
+                                <td class="qty down" id="volume-weighted-down-qty">--</td>
+                                <td class="cost" id="volume-weighted-down-cost">--</td>
+                            </tr>
+                        </tbody>
+                    </table>
                     <div class="metrics-row">
-                        <div class="metric">
-                            <span class="label">Pairs</span>
+                        <div class="metric pairs">
                             <span class="value" id="volume-weighted-pairs">--</span>
+                            <span class="label">@ <span id="volume-weighted-avg-pair-cost">--</span></span>
                         </div>
                         <div class="metric">
-                            <span class="label">Avg Cost</span>
-                            <span class="value" id="volume-weighted-avg-pair-cost">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Locked</span>
+                            <span class="label">Locked PNL</span>
                             <span class="value pnl" id="volume-weighted-locked-pnl">--</span>
                         </div>
                         <div class="metric">
-                            <span class="label">Range</span>
+                            <span class="label">Range PNL</span>
                             <span class="value pnl" id="volume-weighted-pnl-range">--</span>
                         </div>
                         <div class="metric">
@@ -268,35 +283,41 @@
                         <span class="bias-value bullish" id="directional-bias">BULLISH</span>
                         <span class="flip-count" id="directional-flips">(0 flips)</span>
                     </div>
-                    <div class="position-row">
-                        <div class="position-side up">
-                            <span class="side-label">UP</span>
-                            <span class="qty" id="directional-up-qty">--</span>
-                            <span class="price">@ <span id="directional-up-avg">--</span></span>
-                            <span class="cost">Cost: <span id="directional-up-cost">--</span></span>
-                        </div>
-                        <div class="position-side down">
-                            <span class="side-label">DOWN</span>
-                            <span class="qty" id="directional-down-qty">--</span>
-                            <span class="price">@ <span id="directional-down-avg">--</span></span>
-                            <span class="cost">Cost: <span id="directional-down-cost">--</span></span>
-                        </div>
-                    </div>
+                    <table class="position-table">
+                        <thead>
+                            <tr>
+                                <th></th>
+                                <th>avg price</th>
+                                <th>qty</th>
+                                <th>cost</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="up-row">
+                                <td class="side-label">up</td>
+                                <td class="avg-price up" id="directional-up-avg">--</td>
+                                <td class="qty up" id="directional-up-qty">--</td>
+                                <td class="cost" id="directional-up-cost">--</td>
+                            </tr>
+                            <tr class="down-row">
+                                <td class="side-label">down</td>
+                                <td class="avg-price down" id="directional-down-avg">--</td>
+                                <td class="qty down" id="directional-down-qty">--</td>
+                                <td class="cost" id="directional-down-cost">--</td>
+                            </tr>
+                        </tbody>
+                    </table>
                     <div class="metrics-row">
-                        <div class="metric">
-                            <span class="label">Pairs</span>
+                        <div class="metric pairs">
                             <span class="value" id="directional-pairs">--</span>
+                            <span class="label">@ <span id="directional-avg-pair-cost">--</span></span>
                         </div>
                         <div class="metric">
-                            <span class="label">Avg Cost</span>
-                            <span class="value" id="directional-avg-pair-cost">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Locked</span>
+                            <span class="label">Locked PNL</span>
                             <span class="value pnl" id="directional-locked-pnl">--</span>
                         </div>
                         <div class="metric">
-                            <span class="label">Range</span>
+                            <span class="label">Range PNL</span>
                             <span class="value pnl" id="directional-pnl-range">--</span>
                         </div>
                         <div class="metric">
