@@ -68,7 +68,7 @@ body {
    ============================================ */
 
 .dashboard {
-    max-width: 1386px;
+    max-width: 1455px;
     margin: 0 auto;
     padding: var(--gap);
     display: flex;
