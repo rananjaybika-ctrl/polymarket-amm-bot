@@ -502,7 +502,21 @@ class PolymarketClient:
         try:
             order = self.create_order(token_id, side, price, size)
             result = self._client.post_order(order, order_type)
+
+            # Check for API errors in response
+            if result is None:
+                raise PolymarketClientError("Order placement returned None (API error)")
+
+            error_msg = result.get('errorMsg', '')
+            if error_msg:
+                raise PolymarketClientError(f"Order rejected: {error_msg}")
+
+            if not result.get('success', True):
+                raise PolymarketClientError(f"Order failed: status={result.get('status', 'unknown')}")
+
             return result
+        except PolymarketClientError:
+            raise
         except Exception as e:
             raise PolymarketClientError(f"Failed to place order: {e}")
 
