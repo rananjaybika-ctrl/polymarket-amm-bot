@@ -1146,22 +1146,11 @@ class PolymarketClient:
                     logger.info(f"Redeemed {pos['balance']} {pos['outcome']} → ${pos['balance']:.2f}")
 
                 except Exception as e:
-                    # FALLBACK: Sell at 99¢ (emergency)
-                    logger.warning(f"Redeem failed, falling back to sell at 99¢: {e}")
-                    result["method"] = "sell_fallback"
-                    try:
-                        order_result = await self.claim_winnings_via_sell(
-                            token_id=pos["token_id"],
-                            amount=pos["balance"],
-                            min_price=0.99,
-                        )
-                        result["status"] = "sold_fallback"
-                        result["order"] = order_result
-                        result["estimated_value"] = pos["balance"] * 0.99
-                        logger.info(f"Sold {pos['balance']} {pos['outcome']} at $0.99 (fallback)")
-                    except Exception as e2:
-                        result["status"] = "error"
-                        result["error"] = str(e2)
+                    # Redeem failed - log error, don't auto-sell
+                    # User can manually sell via frontend/Telegram if needed
+                    logger.error(f"Redeem failed for {pos['balance']} {pos['outcome']}: {e}")
+                    result["status"] = "redeem_failed"
+                    result["error"] = str(e)
 
             results.append(result)
 

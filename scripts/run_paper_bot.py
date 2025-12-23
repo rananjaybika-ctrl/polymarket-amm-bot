@@ -2255,14 +2255,9 @@ class PaperTradingBot:
                         )
                         logger.info(f"✅ [REDEEM] {winning_shares} {winner} → ${winning_shares:.2f} (tx: {receipt.get('transaction_hash', '')[:16]}...)")
                     except Exception as e:
-                        # Fall back to sell at 99¢
-                        logger.warning(f"[REDEEM] Failed, falling back to sell: {e}")
-                        try:
-                            token_id = market.up_token_id if winner == "UP" else market.down_token_id
-                            await self._client.claim_winnings_via_sell(token_id, winning_shares, 0.99)
-                            logger.info(f"[REDEEM] Sold {winning_shares} {winner} at $0.99 (fallback)")
-                        except Exception as e2:
-                            logger.error(f"[REDEEM] Sell fallback also failed: {e2}")
+                        # Redeem failed - log error, don't auto-sell
+                        # User can manually sell via frontend/Telegram if needed
+                        logger.error(f"[REDEEM] Failed for {winning_shares} {winner}: {e}")
 
             # Resolve the market (paper P&L tracking)
             pnl = self._engine.resolve_market(market.slug, winner)
