@@ -1770,6 +1770,20 @@ class PaperTradingBot:
             logger.debug(f"[MIN$1] DOWN size {down_buy_size} → {down_min_size} (${down_price:.3f} × {down_min_size} = ${down_price * down_min_size:.2f})")
             down_buy_size = down_min_size
 
+        # HARD CAP: Don't buy if already at or above target
+        # This MUST come after $1 minimum enforcement to prevent exceeding target
+        if current_up >= self.accum_target_shares:
+            if buy_up:
+                logger.debug(f"[TARGET] UP at target ({current_up}/{self.accum_target_shares}), skipping buy")
+            buy_up = False
+            up_buy_size = 0
+
+        if current_down >= self.accum_target_shares:
+            if buy_down:
+                logger.debug(f"[TARGET] DOWN at target ({current_down}/{self.accum_target_shares}), skipping buy")
+            buy_down = False
+            down_buy_size = 0
+
         # IMBALANCE ENFORCEMENT: Block trades that would exceed max imbalance
         # Note: max_imbalance was calculated earlier (percentage-based in volume_weighted, absolute in standard)
         if buy_up:
