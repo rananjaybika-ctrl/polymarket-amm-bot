@@ -127,6 +127,18 @@ class LiveTradingBot:
             balance = await self._client.get_balance()
             logger.info(f"Current USDC balance: ${balance:.2f}")
 
+            # Check for existing positions from previous sessions
+            if not self.dry_run:
+                existing = await self._check_existing_positions()
+                if existing["total"] > 0:
+                    logger.warning("=" * 60)
+                    logger.warning(f"WARNING: {existing['total']} existing positions found!")
+                    logger.warning(f"  Total UP shares: {existing['up']:.2f}")
+                    logger.warning(f"  Total DOWN shares: {existing['down']:.2f}")
+                    logger.warning(f"  Imbalance: {abs(existing['up'] - existing['down']):.2f}")
+                    logger.warning("Use 'python scripts/sell_all_positions.py' to clear first.")
+                    logger.warning("=" * 60)
+
             # Initialize Telegram for notifications and remote control
             self._telegram = TelegramNotifier(self._config)
             if self._telegram.enabled:
@@ -187,6 +199,40 @@ class LiveTradingBot:
             return f"USDC Balance: ${balance:.2f}"
         except Exception as e:
             return f"Error fetching balance: {e}"
+
+    async def _check_existing_positions(self) -> Dict[str, Any]:
+        """Check for existing positions on startup."""
+        import aiohttp
+
+        result = {"up": 0.0, "down": 0.0, "total": 0}
+
+        try:
+            wallet = self._client.get_wallet_address()
+            url = f"https://gamma-api.polymarket.com/positions?user={wallet}"
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                    if response.status != 200:
+                        return result
+                    positions = await response.json()
+
+            for pos in positions:
+                size = float(pos.get("size", 0))
+                if size <= 0:
+                    continue
+
+                outcome = pos.get("outcome", "").upper()
+                result["total"] += 1
+
+                if outcome in ["YES", "UP"]:
+                    result["up"] += size
+                elif outcome in ["NO", "DOWN"]:
+                    result["down"] += size
+
+        except Exception as e:
+            logger.debug(f"Could not check existing positions: {e}")
+
+        return result
 
     async def check_and_claim_winnings(self) -> List[Dict[str, Any]]:
         """

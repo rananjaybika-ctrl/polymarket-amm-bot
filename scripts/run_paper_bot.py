@@ -494,6 +494,26 @@ class PaperTradingBot:
             # Sync balance from chain
             await self._engine.sync_balance()
             logger.info(f"Live balance: ${self._engine.balance:.2f}")
+
+            # Check for existing positions from previous sessions
+            existing = await self._check_existing_positions()
+            if existing["total"] > 0:
+                logger.warning("=" * 60)
+                logger.warning(f"WARNING: {existing['total']} existing positions found!")
+                logger.warning(f"  Total UP shares: {existing['up']:.2f}")
+                logger.warning(f"  Total DOWN shares: {existing['down']:.2f}")
+                logger.warning(f"  Imbalance: {abs(existing['up'] - existing['down']):.2f}")
+                logger.warning("These may accumulate with new trades.")
+                logger.warning("Use 'python scripts/sell_all_positions.py' to clear first.")
+                logger.warning("=" * 60)
+
+                # Send Telegram alert if enabled
+                if self._telegram and self._telegram.enabled:
+                    await self._telegram.send_warning(
+                        f"Existing positions detected!\n"
+                        f"UP: {existing['up']:.2f}, DOWN: {existing['down']:.2f}\n"
+                        f"Imbalance: {abs(existing['up'] - existing['down']):.2f}"
+                    )
         else:
             sim_config = SimulationConfig(
                 fill_probability=0.90,
@@ -558,6 +578,55 @@ class PaperTradingBot:
             logger.info(f"Directional mode: Bias={self.initial_bias.value}")
 
         logger.info(f"Bot initialized with ${self.initial_balance:.2f} balance")
+
+    async def _check_existing_positions(self) -> Dict[str, Any]:
+        """
+        Check for existing positions on startup (live mode only).
+
+        Warns user if positions exist from previous sessions to avoid
+        unexpected accumulation across sessions.
+
+        Returns:
+            Dict with total UP/DOWN shares and position count
+        """
+        import aiohttp
+
+        result = {"up": 0.0, "down": 0.0, "total": 0, "positions": []}
+
+        try:
+            wallet = self._client.get_wallet_address()
+            url = f"https://gamma-api.polymarket.com/positions?user={wallet}"
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                    if response.status != 200:
+                        return result
+                    positions = await response.json()
+
+            for pos in positions:
+                size = float(pos.get("size", 0))
+                if size <= 0:
+                    continue
+
+                outcome = pos.get("outcome", "").upper()
+                market = pos.get("title", pos.get("slug", "Unknown"))
+
+                result["total"] += 1
+                result["positions"].append({
+                    "market": market[:50],
+                    "outcome": outcome,
+                    "size": size,
+                })
+
+                if outcome in ["YES", "UP"]:
+                    result["up"] += size
+                elif outcome in ["NO", "DOWN"]:
+                    result["down"] += size
+
+        except Exception as e:
+            logger.debug(f"Could not check existing positions: {e}")
+
+        return result
 
     def _init_csv(self) -> None:
         """Initialize CSV file with headers."""
