@@ -877,23 +877,46 @@ class PaperTradingBot:
         # Also send web update
         self._send_web_update()
 
+    def _get_end_time_from_slug(self, slug: str) -> Optional[datetime]:
+        """
+        Extract end time from market slug's embedded Unix timestamp.
+
+        Slug format: btc-updown-15m-1766521800
+        The last segment is a Unix timestamp representing the market end time.
+        This is more reliable than cached API data which can vary between requests.
+        """
+        if not slug:
+            return None
+        try:
+            # Extract the last segment (Unix timestamp)
+            parts = slug.split("-")
+            if len(parts) >= 4:
+                timestamp = int(parts[-1])
+                return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        except (ValueError, IndexError):
+            pass
+        return None
+
     def _build_web_state(self) -> dict:
         """Build trading state as JSON for web UI."""
         market = self._rotator.current_market if self._rotator else None
         position = self._engine.get_position(market) if market and self._engine else None
 
-        # Calculate time remaining
+        # Calculate time remaining from slug timestamp (consistent across all bots)
         time_remaining = "N/A"
         time_remaining_secs = 0
-        if market and market.end_time:
-            remaining = (market.end_time - datetime.now(timezone.utc)).total_seconds()
-            if remaining > 0:
-                mins = int(remaining // 60)
-                secs = int(remaining % 60)
-                time_remaining = f"{mins}:{secs:02d}"
-                time_remaining_secs = remaining
-            else:
-                time_remaining = "EXPIRED"
+        if market:
+            # Prefer slug-based end time for consistency across bot instances
+            end_time = self._get_end_time_from_slug(market.slug) or market.end_time
+            if end_time:
+                remaining = (end_time - datetime.now(timezone.utc)).total_seconds()
+                if remaining > 0:
+                    mins = int(remaining // 60)
+                    secs = int(remaining % 60)
+                    time_remaining = f"{mins}:{secs:02d}"
+                    time_remaining_secs = remaining
+                else:
+                    time_remaining = "EXPIRED"
 
         # Position data
         pos_data = {
