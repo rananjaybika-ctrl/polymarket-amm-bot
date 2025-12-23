@@ -269,11 +269,8 @@ function formatConfigTooltip(modeName, status) {
         lines.push(`Cost Target: ${config.accum_pair_cost_target || '--'}`);
         lines.push(`Cost Limit: ${config.accum_pair_cost_limit || '--'}`);
     } else if (modeName === 'volume-weighted') {
-        lines.push(`Trade Size: ${config.accum_trade_size || '--'}`);
         lines.push(`Target: ${config.accum_target_shares || '--'}`);
-        lines.push(`Bootstrap: ${config.vw_bootstrap_pct || '--'}`);
-        lines.push(`Cheap $: ${config.vw_cheap_threshold || '--'}`);
-        lines.push(`Hedge Trig: ${config.vw_hedge_trigger_pct || '--'}`);
+        lines.push(`Imbal %: ${config.vw_imbalance_pct || '--'}`);
     } else if (modeName === 'directional') {
         lines.push(`Bias: ${config.dir_initial_bias || '--'}`);
         lines.push(`Trade Size: ${config.accum_trade_size || '--'}`);
@@ -484,12 +481,7 @@ function getVolumeWeightedConfig() {
         start_datetime: document.getElementById('volume-weighted-start').value,
         end_datetime: document.getElementById('volume-weighted-end').value,
         starting_balance: parseFloat(document.getElementById('volume-weighted-balance-input').value),
-        accum_trade_size: parseInt(document.getElementById('volume-weighted-trade-size').value),
         accum_target_shares: parseInt(document.getElementById('volume-weighted-target').value),
-        vw_bootstrap_pct: parseFloat(document.getElementById('volume-weighted-bootstrap').value),
-        vw_cheap_threshold: parseFloat(document.getElementById('volume-weighted-cheap').value),
-        vw_hedge_trigger_pct: parseFloat(document.getElementById('volume-weighted-hedge-trigger').value),
-        vw_max_hedge_price: parseFloat(document.getElementById('volume-weighted-max-hedge').value),
         vw_imbalance_pct: parseFloat(document.getElementById('volume-weighted-imbalance').value),
         max_share_price: 0.95,
         accum_buy_both_sides: true

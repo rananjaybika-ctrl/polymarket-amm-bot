@@ -20,6 +20,8 @@ Usage:
 """
 
 import asyncio
+import logging
+import math
 from typing import Optional, List, Dict, Any, Literal
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
@@ -33,8 +35,15 @@ from py_clob_client.clob_types import (
     PostOrdersArgs,
     OpenOrderParams,
 )
+# Using vendored copy for security (not pulled from PyPI)
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "vendor"))
+from polymarket_apis import PolymarketGaslessWeb3Client, PolymarketWeb3Client
 
 from src.config import Config
+
+logger = logging.getLogger(__name__)
 
 
 # Type alias for tick sizes
@@ -79,6 +88,7 @@ class PolymarketClient:
         self.config = config
         self._client: Optional[ClobClient] = None
         self._api_creds: Optional[ApiCreds] = None
+        self._web3_client: Optional[PolymarketGaslessWeb3Client] = None
         self.connected: bool = False
 
     async def connect(self) -> bool:
@@ -143,6 +153,25 @@ class PolymarketClient:
                     f"Cannot reach Polymarket servers. "
                     f"Check your internet connection. Error: {e}"
                 )
+
+            # Initialize Web3 client for merge/redeem operations
+            try:
+                if self.config.wallet_type == "magic":
+                    # Magic wallet uses gasless relay (signature_type=1)
+                    self._web3_client = PolymarketGaslessWeb3Client(
+                        private_key=self.config.wallet_private_key,
+                        signature_type=1,
+                    )
+                else:
+                    # EOA wallet pays gas directly (signature_type=0)
+                    self._web3_client = PolymarketWeb3Client(
+                        private_key=self.config.wallet_private_key,
+                        signature_type=0,
+                    )
+                logger.info("Web3 client initialized for merge/redeem operations")
+            except Exception as e:
+                logger.warning(f"Web3 client init failed (merge/redeem unavailable): {e}")
+                self._web3_client = None
 
             self.connected = True
             return True
@@ -454,8 +483,21 @@ class PolymarketClient:
 
         Returns:
             Order response with order_id and status
+
+        Raises:
+            PolymarketClientError: If order value < $1.00 minimum
         """
         self._ensure_connected()
+
+        # POLYMARKET $1 MINIMUM ORDER VALUE ENFORCEMENT
+        # New orders must have value >= $1.00
+        order_value = price * size
+        if order_value < 1.00:
+            min_size = math.ceil(1.00 / price) if price > 0 else 1
+            raise PolymarketClientError(
+                f"Order value ${order_value:.2f} < $1.00 minimum. "
+                f"At price ${price:.4f}, minimum size is {min_size} shares"
+            )
 
         try:
             order = self.create_order(token_id, side, price, size)
@@ -578,12 +620,104 @@ class PolymarketClient:
 
     # ==================== Claiming / Redemption Methods ====================
 
-    async def get_market_info(self, condition_id: str) -> Optional[Dict[str, Any]]:
+    async def merge_positions(
+        self,
+        condition_id: str,
+        amount: float,
+        neg_risk: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Merge complementary positions (1 YES + 1 NO) into USDC.
+
+        This converts balanced pairs back to collateral WITHOUT waiting for
+        market resolution. Useful for locking in profits on hedged positions.
+
+        Args:
+            condition_id: The market's condition ID (bytes32 hex string)
+            amount: Number of pairs to merge (e.g., 10 = merge 10 YES + 10 NO)
+            neg_risk: Whether this is a neg risk market (default True for BTC markets)
+
+        Returns:
+            Transaction receipt dict with 'status', 'transaction_hash', 'gas_used'
+
+        Raises:
+            PolymarketClientError: If web3 client not available or tx fails
+        """
+        self._ensure_connected()
+
+        if self._web3_client is None:
+            raise PolymarketClientError(
+                "Web3 client not initialized. Merge requires web3 connection."
+            )
+
+        try:
+            logger.info(f"Merging {amount} pairs for condition {condition_id[:16]}...")
+            receipt = self._web3_client.merge_position(
+                condition_id=condition_id,
+                amount=amount,
+                neg_risk=neg_risk,
+            )
+            logger.info(f"Merge successful: {receipt.transaction_hash.hex()}")
+            return {
+                "status": receipt.status,
+                "transaction_hash": receipt.transaction_hash.hex(),
+                "gas_used": receipt.gas_used,
+            }
+        except Exception as e:
+            raise PolymarketClientError(f"Failed to merge positions: {e}")
+
+    async def redeem_positions(
+        self,
+        condition_id: str,
+        amounts: List[float],
+        neg_risk: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Redeem winning positions into USDC after market resolution.
+
+        Call this after a market resolves to convert winning tokens to USDC.
+
+        Args:
+            condition_id: The market's condition ID (bytes32 hex string)
+            amounts: [yes_amount, no_amount] - shares of each outcome to redeem
+            neg_risk: Whether this is a neg risk market (default True for BTC markets)
+
+        Returns:
+            Transaction receipt dict with 'status', 'transaction_hash', 'gas_used'
+
+        Raises:
+            PolymarketClientError: If web3 client not available or tx fails
+        """
+        self._ensure_connected()
+
+        if self._web3_client is None:
+            raise PolymarketClientError(
+                "Web3 client not initialized. Redeem requires web3 connection."
+            )
+
+        try:
+            logger.info(f"Redeeming positions for condition {condition_id[:16]}...")
+            receipt = self._web3_client.redeem_position(
+                condition_id=condition_id,
+                amounts=amounts,
+                neg_risk=neg_risk,
+            )
+            logger.info(f"Redeem successful: {receipt.transaction_hash.hex()}")
+            return {
+                "status": receipt.status,
+                "transaction_hash": receipt.transaction_hash.hex(),
+                "gas_used": receipt.gas_used,
+            }
+        except Exception as e:
+            raise PolymarketClientError(f"Failed to redeem positions: {e}")
+
+    async def get_market_info(self, condition_id: str = None, slug: str = None) -> Optional[Dict[str, Any]]:
         """
         Get market information including resolution status.
 
         Args:
-            condition_id: The market's condition ID
+            condition_id: The market's condition ID (optional)
+            slug: The market's slug (preferred - more reliable for resolution data)
 
         Returns:
             Market info dict with 'closed', 'resolved', 'winning_token_id' etc.
@@ -592,13 +726,24 @@ class PolymarketClient:
         self._ensure_connected()
 
         try:
-            # Fetch market from Gamma API
             import aiohttp
-            url = f"https://gamma-api.polymarket.com/markets/{condition_id}"
+
+            # Prefer slug-based query (returns accurate outcomePrices for resolved markets)
+            if slug:
+                url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
+            elif condition_id:
+                url = f"https://gamma-api.polymarket.com/markets?conditionId={condition_id}"
+            else:
+                return None
+
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
                     if response.status == 200:
-                        return await response.json()
+                        data = await response.json()
+                        # API returns list when querying by parameters
+                        if isinstance(data, list) and len(data) > 0:
+                            return data[0]
+                        return data if data else None
                     return None
         except Exception as e:
             raise PolymarketClientError(f"Failed to get market info: {e}")
@@ -624,7 +769,7 @@ class PolymarketClient:
             market.get("active", True) is False
         )
 
-    async def get_winning_token(self, condition_id: str) -> Optional[str]:
+    async def get_winning_token(self, condition_id: str, max_retries: int = 3) -> Optional[str]:
         """
         Get the winning token ID for a resolved market.
 
@@ -634,30 +779,198 @@ class PolymarketClient:
 
         Args:
             condition_id: The market's condition ID
+            max_retries: Number of retry attempts for API calls
 
         Returns:
             Token ID of the winning outcome, or None if not resolved
         """
-        market = await self.get_market_info(condition_id)
+        import json
+        import asyncio
+
+        market = None
+        last_error = None
+
+        # Retry logic for API reliability
+        for attempt in range(max_retries):
+            try:
+                market = await self.get_market_info(condition_id)
+                if market:
+                    break
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(0.5 * (attempt + 1))  # Exponential backoff
+
         if not market:
+            if last_error:
+                logger.warning(f"get_winning_token failed after {max_retries} retries: {last_error}")
             return None
 
-        # Check if resolved
-        if not market.get("resolved", False):
-            return None
+        # Method 1: Check outcomePrices (most reliable for BTC up/down markets)
+        # Format: "[\"1\",\"0\"]" means first outcome won, "[\"0\",\"1\"]" means second won
+        outcome_prices = market.get("outcomePrices")
+        if outcome_prices:
+            try:
+                if isinstance(outcome_prices, str):
+                    prices = json.loads(outcome_prices)
+                else:
+                    prices = outcome_prices
 
-        # Get tokens and outcomes
+                if len(prices) >= 2:
+                    up_price = float(prices[0])
+                    down_price = float(prices[1])
+
+                    # Winner has price = 1.0, loser has price = 0.0
+                    if up_price > 0.99 and down_price < 0.01:
+                        # UP won - return UP token
+                        tokens = market.get("tokens", [])
+                        for token in tokens:
+                            outcome = token.get("outcome", "").upper()
+                            if outcome in ["YES", "UP"]:
+                                logger.debug(f"Winner from outcomePrices: UP (token {token.get('token_id', '')[:10]}...)")
+                                return token.get("token_id")
+                        # Fallback: first token is typically UP/YES
+                        if tokens:
+                            return tokens[0].get("token_id")
+
+                    elif down_price > 0.99 and up_price < 0.01:
+                        # DOWN won - return DOWN token
+                        tokens = market.get("tokens", [])
+                        for token in tokens:
+                            outcome = token.get("outcome", "").upper()
+                            if outcome in ["NO", "DOWN"]:
+                                logger.debug(f"Winner from outcomePrices: DOWN (token {token.get('token_id', '')[:10]}...)")
+                                return token.get("token_id")
+                        # Fallback: second token is typically DOWN/NO
+                        if len(tokens) >= 2:
+                            return tokens[1].get("token_id")
+
+            except (json.JSONDecodeError, ValueError, TypeError) as e:
+                logger.debug(f"Could not parse outcomePrices: {e}")
+
+        # Method 2: Check tokens for winner flag or price
         tokens = market.get("tokens", [])
-        if len(tokens) < 2:
+        for token in tokens:
+            # Check explicit winner field
+            if token.get("winner", False):
+                logger.debug(f"Winner from token.winner flag: {token.get('outcome')}")
+                return token.get("token_id")
+
+            # Check if price indicates winner (price >= 0.99)
+            try:
+                token_price = float(token.get("price", 0))
+                if token_price >= 0.99:
+                    logger.debug(f"Winner from token.price: {token.get('outcome')} (price={token_price})")
+                    return token.get("token_id")
+            except (ValueError, TypeError):
+                pass
+
+        # Method 3: Check resolved flag (least reliable for Gamma API)
+        if market.get("resolved", False) or market.get("closed", False):
+            # Market is marked resolved but we couldn't determine winner
+            logger.warning(f"Market {condition_id[:20]}... is resolved but winner unclear")
+
+        return None
+
+    async def get_winning_side(
+        self,
+        condition_id: str = None,
+        slug: str = None,
+        max_retries: int = 3
+    ) -> Optional[str]:
+        """
+        Get the winning side ("UP" or "DOWN") for a resolved BTC up/down market.
+
+        This method is specifically designed for BTC up/down markets and returns
+        the winning side directly, without needing to match token IDs.
+
+        Args:
+            condition_id: The market's condition ID (optional)
+            slug: The market's slug (preferred - more reliable)
+            max_retries: Number of retry attempts for API calls
+
+        Returns:
+            "UP" or "DOWN" if winner can be determined, None otherwise
+        """
+        import json
+        import asyncio
+
+        if not condition_id and not slug:
+            logger.warning("get_winning_side called without condition_id or slug")
             return None
 
-        # Find the winning token (winner field or price == 1)
+        market = None
+        last_error = None
+
+        # Retry logic for API reliability
+        for attempt in range(max_retries):
+            try:
+                # Prefer slug-based query (more reliable for resolution data)
+                market = await self.get_market_info(condition_id=condition_id, slug=slug)
+                if market:
+                    break
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+
+        if not market:
+            if last_error:
+                logger.warning(f"get_winning_side failed after {max_retries} retries: {last_error}")
+            return None
+
+        # Primary method: Check outcomePrices (most reliable)
+        # Format: ["1", "0"] = UP won, ["0", "1"] = DOWN won
+        outcome_prices = market.get("outcomePrices")
+        if outcome_prices:
+            try:
+                if isinstance(outcome_prices, str):
+                    prices = json.loads(outcome_prices)
+                else:
+                    prices = outcome_prices
+
+                if len(prices) >= 2:
+                    up_price = float(prices[0])
+                    down_price = float(prices[1])
+
+                    if up_price > 0.99 and down_price < 0.01:
+                        logger.info(f"[POLYMARKET] Winner from outcomePrices: UP")
+                        return "UP"
+                    elif down_price > 0.99 and up_price < 0.01:
+                        logger.info(f"[POLYMARKET] Winner from outcomePrices: DOWN")
+                        return "DOWN"
+
+            except (json.JSONDecodeError, ValueError, TypeError) as e:
+                logger.debug(f"Could not parse outcomePrices: {e}")
+
+        # Secondary: Check tokens if available
+        tokens = market.get("tokens", [])
         for token in tokens:
             if token.get("winner", False):
-                return token.get("token_id")
-            # Also check if price is 1 (indicating winner)
-            if float(token.get("price", 0)) >= 0.99:
-                return token.get("token_id")
+                outcome = token.get("outcome", "").upper()
+                if outcome in ["YES", "UP"]:
+                    logger.info(f"[POLYMARKET] Winner from token.winner: UP")
+                    return "UP"
+                elif outcome in ["NO", "DOWN"]:
+                    logger.info(f"[POLYMARKET] Winner from token.winner: DOWN")
+                    return "DOWN"
+
+            try:
+                token_price = float(token.get("price", 0))
+                if token_price >= 0.99:
+                    outcome = token.get("outcome", "").upper()
+                    if outcome in ["YES", "UP"]:
+                        logger.info(f"[POLYMARKET] Winner from token.price: UP")
+                        return "UP"
+                    elif outcome in ["NO", "DOWN"]:
+                        logger.info(f"[POLYMARKET] Winner from token.price: DOWN")
+                        return "DOWN"
+            except (ValueError, TypeError):
+                pass
+
+        # Market may be closed but winner not determinable
+        if market.get("closed", False):
+            logger.warning(f"Market {condition_id[:20]}... is closed but winner unclear from API")
 
         return None
 

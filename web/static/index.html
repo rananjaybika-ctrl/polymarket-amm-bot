@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PolyBot</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦾</text></svg>">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="dashboard">
+        <!-- Header -->
+        <header class="dashboard-header">
+            <h1>PolyBot</h1>
+            <div class="ws-status" id="ws-status">
+                <span class="ws-dot"></span>
+                <span class="ws-text">Connecting...</span>
+            </div>
+        </header>
+
+        <!-- Mode Cards Container -->
+        <div class="cards-container">
+            <!-- ========== STANDARD MODE CARD ========== -->
+            <div class="mode-card" id="card-standard">
+                <div class="card-header">
+                    <h2>STANDARD</h2>
+                    <div class="status-badge stopped" id="badge-standard">
+                        <span class="status-dot"></span>
+                        <span class="status-text">Stopped</span>
+                    </div>
+                </div>
+
+                <!-- Live Data Section -->
+                <div class="card-live-data" id="live-standard">
+                    <div class="market-row">
+                        <span class="market-label">Market:</span>
+                        <span class="market-value" id="standard-market">--</span>
+                        <span class="time-remaining" id="standard-time">--:--</span>
+                    </div>
+                    <div class="position-row">
+                        <div class="position-side up">
+                            <span class="side-label">UP</span>
+                            <span class="qty" id="standard-up-qty">--</span>
+                            <span class="price">@ <span id="standard-up-avg">--</span></span>
+                            <span class="cost">Cost: <span id="standard-up-cost">--</span></span>
+                        </div>
+                        <div class="position-side down">
+                            <span class="side-label">DOWN</span>
+                            <span class="qty" id="standard-down-qty">--</span>
+                            <span class="price">@ <span id="standard-down-avg">--</span></span>
+                            <span class="cost">Cost: <span id="standard-down-cost">--</span></span>
+                        </div>
+                    </div>
+                    <div class="metrics-row">
+                        <div class="metric">
+                            <span class="label">Pairs</span>
+                            <span class="value" id="standard-pairs">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Avg Cost</span>
+                            <span class="value" id="standard-avg-pair-cost">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Locked</span>
+                            <span class="value pnl" id="standard-locked-pnl">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Range</span>
+                            <span class="value pnl" id="standard-pnl-range">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Balance</span>
+                            <span class="value" id="standard-balance">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Collapsible Config -->
+                <div class="card-config">
+                    <button type="button" class="config-toggle expanded" id="toggle-standard">
+                        <span class="toggle-icon">&#9660;</span> Config
+                    </button>
+                    <div class="config-content expanded" id="config-standard">
+                        <div class="config-row">
+                            <div class="toggle-group mode-toggle">
+                                <label class="toggle-option">
+                                    <input type="radio" name="standard_mode" value="paper" checked>
+                                    <span>Paper</span>
+                                </label>
+                                <label class="toggle-option live-option">
+                                    <input type="radio" name="standard_mode" value="live">
+                                    <span>LIVE</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="config-grid">
+                            <div class="config-field">
+                                <label>Start</label>
+                                <input type="datetime-local" id="standard-start" required>
+                            </div>
+                            <div class="config-field">
+                                <label>End</label>
+                                <input type="datetime-local" id="standard-end" required>
+                            </div>
+                            <div class="config-field">
+                                <label>Balance</label>
+                                <input type="number" id="standard-balance-input" value="100" min="1">
+                            </div>
+                            <div class="config-field">
+                                <label>Trade Size</label>
+                                <input type="number" id="standard-trade-size" value="2" min="1">
+                            </div>
+                            <div class="config-field">
+                                <label>Target</label>
+                                <input type="number" id="standard-target" value="15" min="1">
+                            </div>
+                            <div class="config-field">
+                                <label>Max Imbal</label>
+                                <input type="number" id="standard-max-imbalance" value="5" min="1">
+                            </div>
+                            <div class="config-field">
+                                <label>Cost Target</label>
+                                <input type="number" id="standard-cost-target" value="0.995" step="0.001">
+                            </div>
+                            <div class="config-field">
+                                <label>Cost Limit</label>
+                                <input type="number" id="standard-cost-limit" value="1.02" step="0.001">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="card-actions">
+                    <button class="btn btn-start" id="btn-start-standard">START</button>
+                    <button class="btn btn-stop" id="btn-stop-standard" disabled>STOP</button>
+                    <button class="btn btn-nuke" id="btn-nuke-standard" disabled>NUKE</button>
+                </div>
+                <div id="error-standard" class="card-error hidden"></div>
+            </div>
+
+            <!-- ========== VOLUME WEIGHTED MODE CARD ========== -->
+            <div class="mode-card" id="card-volume-weighted">
+                <div class="card-header">
+                    <h2>VOLUME WEIGHTED</h2>
+                    <div class="status-badge stopped" id="badge-volume-weighted">
+                        <span class="status-dot"></span>
+                        <span class="status-text">Stopped</span>
+                    </div>
+                </div>
+
+                <!-- Live Data Section -->
+                <div class="card-live-data" id="live-volume-weighted">
+                    <div class="market-row">
+                        <span class="market-label">Market:</span>
+                        <span class="market-value" id="volume-weighted-market">--</span>
+                        <span class="time-remaining" id="volume-weighted-time">--:--</span>
+                    </div>
+                    <div class="position-row">
+                        <div class="position-side up">
+                            <span class="side-label">UP</span>
+                            <span class="qty" id="volume-weighted-up-qty">--</span>
+                            <span class="price">@ <span id="volume-weighted-up-avg">--</span></span>
+                            <span class="cost">Cost: <span id="volume-weighted-up-cost">--</span></span>
+                        </div>
+                        <div class="position-side down">
+                            <span class="side-label">DOWN</span>
+                            <span class="qty" id="volume-weighted-down-qty">--</span>
+                            <span class="price">@ <span id="volume-weighted-down-avg">--</span></span>
+                            <span class="cost">Cost: <span id="volume-weighted-down-cost">--</span></span>
+                        </div>
+                    </div>
+                    <div class="metrics-row">
+                        <div class="metric">
+                            <span class="label">Pairs</span>
+                            <span class="value" id="volume-weighted-pairs">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Avg Cost</span>
+                            <span class="value" id="volume-weighted-avg-pair-cost">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Locked</span>
+                            <span class="value pnl" id="volume-weighted-locked-pnl">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Range</span>
+                            <span class="value pnl" id="volume-weighted-pnl-range">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Balance</span>
+                            <span class="value" id="volume-weighted-balance">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Collapsible Config -->
+                <div class="card-config">
+                    <button type="button" class="config-toggle expanded" id="toggle-volume-weighted">
+                        <span class="toggle-icon">&#9660;</span> Config
+                    </button>
+                    <div class="config-content expanded" id="config-volume-weighted">
+                        <div class="config-row">
+                            <div class="toggle-group mode-toggle">
+                                <label class="toggle-option">
+                                    <input type="radio" name="volume_weighted_mode" value="paper" checked>
+                                    <span>Paper</span>
+                                </label>
+                                <label class="toggle-option live-option">
+                                    <input type="radio" name="volume_weighted_mode" value="live">
+                                    <span>LIVE</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="config-grid">
+                            <div class="config-field">
+                                <label>Start</label>
+                                <input type="datetime-local" id="volume-weighted-start" required>
+                            </div>
+                            <div class="config-field">
+                                <label>End</label>
+                                <input type="datetime-local" id="volume-weighted-end" required>
+                            </div>
+                            <div class="config-field">
+                                <label>Balance</label>
+                                <input type="number" id="volume-weighted-balance-input" value="100" min="1">
+                            </div>
+                            <div class="config-field">
+                                <label>Target</label>
+                                <input type="number" id="volume-weighted-target" value="15" min="1">
+                            </div>
+                            <div class="config-field">
+                                <label>Imbal %</label>
+                                <input type="number" id="volume-weighted-imbalance" value="0.40" step="0.01">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="card-actions">
+                    <button class="btn btn-start" id="btn-start-volume-weighted">START</button>
+                    <button class="btn btn-stop" id="btn-stop-volume-weighted" disabled>STOP</button>
+                    <button class="btn btn-nuke" id="btn-nuke-volume-weighted" disabled>NUKE</button>
+                </div>
+                <div id="error-volume-weighted" class="card-error hidden"></div>
+            </div>
+
+            <!-- ========== DIRECTIONAL MODE CARD ========== -->
+            <div class="mode-card" id="card-directional">
+                <div class="card-header">
+                    <h2>DIRECTIONAL</h2>
+                    <div class="status-badge stopped" id="badge-directional">
+                        <span class="status-dot"></span>
+                        <span class="status-text">Stopped</span>
+                    </div>
+                </div>
+
+                <!-- Live Data Section -->
+                <div class="card-live-data" id="live-directional">
+                    <div class="market-row">
+                        <span class="market-label">Market:</span>
+                        <span class="market-value" id="directional-market">--</span>
+                        <span class="time-remaining" id="directional-time">--:--</span>
+                    </div>
+                    <div class="bias-indicator">
+                        <span class="bias-label">Bias:</span>
+                        <span class="bias-value bullish" id="directional-bias">BULLISH</span>
+                        <span class="flip-count" id="directional-flips">(0 flips)</span>
+                    </div>
+                    <div class="position-row">
+                        <div class="position-side up">
+                            <span class="side-label">UP</span>
+                            <span class="qty" id="directional-up-qty">--</span>
+                            <span class="price">@ <span id="directional-up-avg">--</span></span>
+                            <span class="cost">Cost: <span id="directional-up-cost">--</span></span>
+                        </div>
+                        <div class="position-side down">
+                            <span class="side-label">DOWN</span>
+                            <span class="qty" id="directional-down-qty">--</span>
+                            <span class="price">@ <span id="directional-down-avg">--</span></span>
+                            <span class="cost">Cost: <span id="directional-down-cost">--</span></span>
+                        </div>
+                    </div>
+                    <div class="metrics-row">
+                        <div class="metric">
+                            <span class="label">Pairs</span>
+                            <span class="value" id="directional-pairs">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Avg Cost</span>
+                            <span class="value" id="directional-avg-pair-cost">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Locked</span>
+                            <span class="value pnl" id="directional-locked-pnl">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Range</span>
+                            <span class="value pnl" id="directional-pnl-range">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Balance</span>
+                            <span class="value" id="directional-balance">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Collapsible Config -->
+                <div class="card-config">
+                    <button type="button" class="config-toggle expanded" id="toggle-directional">
+                        <span class="toggle-icon">&#9660;</span> Config
+                    </button>
+                    <div class="config-content expanded" id="config-directional">
+                        <div class="config-row">
+                            <div class="toggle-group mode-toggle">
+                                <label class="toggle-option">
+                                    <input type="radio" name="directional_mode" value="paper" checked>
+                                    <span>Paper</span>
+                                </label>
+                                <label class="toggle-option live-option">
+                                    <input type="radio" name="directional_mode" value="live">
+                                    <span>LIVE</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="config-row">
+                            <div class="toggle-group bias-toggle">
+                                <label class="toggle-option">
+                                    <input type="radio" name="directional_bias" value="BULLISH" checked>
+                                    <span class="bullish">BULLISH</span>
+                                </label>
+                                <label class="toggle-option">
+                                    <input type="radio" name="directional_bias" value="BEARISH">
+                                    <span class="bearish">BEARISH</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="config-grid">
+                            <div class="config-field">
+                                <label>Start</label>
+                                <input type="datetime-local" id="directional-start" required>
+                            </div>
+                            <div class="config-field">
+                                <label>End</label>
+                                <input type="datetime-local" id="directional-end" required>
+                            </div>
+                            <div class="config-field">
+                                <label>Balance</label>
+                                <input type="number" id="directional-balance-input" value="100" min="1">
+                            </div>
+                            <div class="config-field">
+                                <label>Trade Size</label>
+                                <input type="number" id="directional-trade-size" value="5" min="1">
+                            </div>
+                            <div class="config-field">
+                                <label>Flip CD (s)</label>
+                                <input type="number" id="directional-flip-cd" value="180" min="0">
+                            </div>
+                            <div class="config-field">
+                                <label>Sigma</label>
+                                <input type="number" id="directional-sigma" value="2.0" step="0.1">
+                            </div>
+                            <div class="config-field">
+                                <label>Max Flips</label>
+                                <input type="number" id="directional-max-flips" value="2" min="0">
+                            </div>
+                            <div class="config-field">
+                                <label>Dip %</label>
+                                <input type="number" id="directional-dip" value="0.10" step="0.01">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="card-actions">
+                    <button class="btn btn-start" id="btn-start-directional">START</button>
+                    <button class="btn btn-stop" id="btn-stop-directional" disabled>STOP</button>
+                    <button class="btn btn-nuke" id="btn-nuke-directional" disabled>NUKE</button>
+                </div>
+                <div id="error-directional" class="card-error hidden"></div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="dashboard-footer">
+            <p>PolyBot v3.0 | <a href="/api/status" target="_blank">API Status</a></p>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
