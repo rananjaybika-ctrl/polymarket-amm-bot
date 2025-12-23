@@ -479,7 +479,7 @@ function getStandardConfig() {
 function getVolumeWeightedConfig() {
     return {
         mode: document.querySelector('input[name="volume_weighted_mode"]:checked').value,
-        accum_mode: 'volume-weighted',
+        accum_mode: 'volume_weighted',
         market: 'btc-15m',
         start_datetime: document.getElementById('volume-weighted-start').value,
         end_datetime: document.getElementById('volume-weighted-end').value,
