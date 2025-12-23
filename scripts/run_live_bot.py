@@ -39,6 +39,7 @@ sys.path.insert(0, str(project_root))
 
 from src.config import Config
 from src.api.polymarket_client import PolymarketClient, PolymarketClientError
+from src.utils.telegram_notifier import TelegramNotifier
 
 # Configure logging
 logging.basicConfig(
@@ -81,11 +82,15 @@ class LiveTradingBot:
         self._running: bool = False
         self._shutdown_event: asyncio.Event = asyncio.Event()
 
+        # Telegram for notifications and remote control
+        self._telegram: Optional[TelegramNotifier] = None
+
         # Track state
         self._last_claim_check: Optional[datetime] = None
         self._last_sync: Optional[datetime] = None
         self._total_claimed: float = 0.0
         self._claim_count: int = 0
+        self._emergency_sell_requested: bool = False
 
     async def initialize(self) -> bool:
         """
@@ -122,11 +127,66 @@ class LiveTradingBot:
             balance = await self._client.get_balance()
             logger.info(f"Current USDC balance: ${balance:.2f}")
 
+            # Initialize Telegram for notifications and remote control
+            self._telegram = TelegramNotifier(self._config)
+            if self._telegram.enabled:
+                # Register command handlers
+                self._telegram.on_stop(self._handle_telegram_stop)
+                self._telegram.on_sell_all(self._handle_telegram_sell_all)
+                self._telegram.on_status(self._handle_telegram_status)
+                self._telegram.on_balance(self._handle_telegram_balance)
+
+                await self._telegram.start()
+                await self._telegram.send_info(
+                    f"Live Trading Bot started in {mode_str} mode\n"
+                    f"Balance: ${balance:.2f} USDC"
+                )
+                await self._telegram.send_control_panel()
+                logger.info("Telegram remote control enabled")
+            else:
+                logger.info("Telegram notifications disabled (no token configured)")
+
             return True
 
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
             return False
+
+    # === Telegram Command Handlers ===
+
+    async def _handle_telegram_stop(self) -> None:
+        """Handle /stop command from Telegram."""
+        logger.info("Stop command received from Telegram")
+        self.signal_shutdown()
+
+    async def _handle_telegram_sell_all(self) -> None:
+        """Handle /sell_all command from Telegram - sets flag for main loop."""
+        logger.info("Emergency sell command received from Telegram")
+        self._emergency_sell_requested = True
+        if self._telegram:
+            await self._telegram.send_message("Emergency sell requested - will execute on next cycle")
+
+    async def _handle_telegram_status(self) -> str:
+        """Handle /status command from Telegram."""
+        mode_str = "DRY-RUN" if self.dry_run else "LIVE"
+        status_lines = [
+            f"Mode: {mode_str}",
+            f"Running: {self._running}",
+            f"Claims: {self._claim_count} (${self._total_claimed:.2f})",
+        ]
+        if self._last_claim_check:
+            status_lines.append(f"Last claim check: {self._last_claim_check.strftime('%H:%M:%S')}")
+        if self._last_sync:
+            status_lines.append(f"Last sync: {self._last_sync.strftime('%H:%M:%S')}")
+        return "\n".join(status_lines)
+
+    async def _handle_telegram_balance(self) -> str:
+        """Handle /balance command from Telegram."""
+        try:
+            balance = await self._client.get_balance()
+            return f"USDC Balance: ${balance:.2f}"
+        except Exception as e:
+            return f"Error fetching balance: {e}"
 
     async def check_and_claim_winnings(self) -> List[Dict[str, Any]]:
         """
@@ -305,6 +365,17 @@ class LiveTradingBot:
         """Clean up resources."""
         self._running = False
         logger.info(f"Session complete: Claimed ${self._total_claimed:.2f} from {self._claim_count} positions")
+
+        # Send final Telegram notification and stop
+        if self._telegram and self._telegram.enabled:
+            try:
+                await self._telegram.send_message(
+                    f"Live Trading Bot stopped\n"
+                    f"Session claims: ${self._total_claimed:.2f} from {self._claim_count} positions"
+                )
+                await self._telegram.stop()
+            except Exception as e:
+                logger.error(f"Error stopping Telegram: {e}")
 
     def signal_shutdown(self) -> None:
         """Signal the bot to shut down gracefully."""
