@@ -1884,6 +1884,9 @@ class PaperTradingBot:
                     f"Imbal:{imbal:.0f} | Time:{time_remaining} Bal:${self._engine.balance:.2f}"
                 )
 
+        # Try to merge complete pairs (live mode only)
+        await self._try_merge_pairs(market)
+
         # Check for rotation
         if self._rotator.should_rotate():
             await self._handle_market_rotation(market)
@@ -2058,6 +2061,9 @@ class PaperTradingBot:
                 f"Time:{time_remaining_secs}s"
             )
 
+        # Try to merge complete pairs (live mode only)
+        await self._try_merge_pairs(market)
+
         # Check for rotation
         if self._rotator.should_rotate():
             self._is_new_market = True
@@ -2110,6 +2116,59 @@ class PaperTradingBot:
                 status["price_vs_strike_pct"],
                 status["z_score"],
             ])
+
+    async def _try_merge_pairs(self, market) -> Optional[Dict[str, Any]]:
+        """
+        Merge complete UP+DOWN pairs into $1 each.
+
+        Only runs in LIVE mode. Merges any complete pairs immediately
+        to lock in profit without waiting for resolution.
+
+        Returns:
+            Merge result dict or None if no merge needed/possible
+        """
+        # Only merge in live mode
+        if self.trading_mode != "live":
+            return None
+
+        if not self._client:
+            return None
+
+        # Get current position
+        pos = self._engine.get_position(market)
+        if not pos:
+            return None
+
+        # Calculate complete pairs
+        pairs = int(min(pos.up_size, pos.down_size))
+        if pairs < 1:
+            return None
+
+        try:
+            logger.info(f"[MERGE] Merging {pairs} pairs for {market.slug}...")
+            result = await self._client.merge_positions(
+                condition_id=market.condition_id,
+                amount=float(pairs),
+                neg_risk=True,
+            )
+
+            # Update local position tracking
+            pos.up_size -= pairs
+            pos.down_size -= pairs
+
+            # Track merged value
+            merge_value = pairs * 1.0  # $1 per pair
+            logger.info(f"✅ [MERGE] Merged {pairs} pairs → ${merge_value:.2f} USDC")
+
+            return {
+                "pairs_merged": pairs,
+                "value": merge_value,
+                "tx_hash": result.get("transaction_hash", ""),
+            }
+
+        except Exception as e:
+            logger.warning(f"[MERGE] Failed (will resolve at expiry): {e}")
+            return None
 
     async def _handle_market_rotation(self, market) -> None:
         """Handle market rotation and position resolution."""
@@ -2182,7 +2241,30 @@ class PaperTradingBot:
                 "locked": locked,
             }
 
-            # Resolve the market
+            # LIVE MODE: Redeem winning positions on-chain
+            if self.trading_mode == "live" and self._client:
+                winning_shares = pos.up_size if winner == "UP" else pos.down_size
+                if winning_shares > 0:
+                    try:
+                        # Build amounts: [yes_shares, no_shares] - UP=Yes, DOWN=No
+                        amounts = [winning_shares, 0] if winner == "UP" else [0, winning_shares]
+                        receipt = await self._client.redeem_positions(
+                            condition_id=market.condition_id,
+                            amounts=amounts,
+                            neg_risk=True,
+                        )
+                        logger.info(f"✅ [REDEEM] {winning_shares} {winner} → ${winning_shares:.2f} (tx: {receipt.get('transaction_hash', '')[:16]}...)")
+                    except Exception as e:
+                        # Fall back to sell at 99¢
+                        logger.warning(f"[REDEEM] Failed, falling back to sell: {e}")
+                        try:
+                            token_id = market.up_token_id if winner == "UP" else market.down_token_id
+                            await self._client.claim_winnings_via_sell(token_id, winning_shares, 0.99)
+                            logger.info(f"[REDEEM] Sold {winning_shares} {winner} at $0.99 (fallback)")
+                        except Exception as e2:
+                            logger.error(f"[REDEEM] Sell fallback also failed: {e2}")
+
+            # Resolve the market (paper P&L tracking)
             pnl = self._engine.resolve_market(market.slug, winner)
             logger.info(f"Market resolved ({winner}): P&L ${pnl:.4f}, LockedProfit was ${locked:.4f}")
 

@@ -1094,11 +1094,14 @@ class PolymarketClient:
         """
         Claim all available winning positions.
 
+        PRIMARY: Redeem on-chain at $1.00 per share
+        FALLBACK: Sell at $0.99 (emergency only)
+
         Args:
             dry_run: If True, only simulate (don't execute trades)
 
         Returns:
-            List of claim results
+            List of claim results with method used (redeem or sell_fallback)
         """
         results = []
         claimable = await self.get_claimable_positions()
@@ -1114,26 +1117,51 @@ class PolymarketClient:
                 "token_id": pos["token_id"],
                 "condition_id": pos["condition_id"],
                 "balance": pos["balance"],
-                "estimated_value": pos["estimated_value"],
+                "estimated_value": pos["balance"],  # $1 per winning share
                 "outcome": pos["outcome"],
                 "dry_run": dry_run,
+                "method": "redeem",
             }
 
             if dry_run:
                 result["status"] = "simulated"
-                result["message"] = f"Would sell {pos['balance']} shares at $0.99"
+                result["message"] = f"Would redeem {pos['balance']} shares at $1.00"
             else:
+                # PRIMARY: Try redeem at $1.00 (on-chain)
                 try:
-                    order_result = await self.claim_winnings_via_sell(
-                        token_id=pos["token_id"],
-                        amount=pos["balance"],
-                        min_price=0.99,
+                    # Build amounts array: [yes_shares, no_shares]
+                    outcome = pos["outcome"].lower()
+                    if outcome in ["yes", "up"]:
+                        amounts = [pos["balance"], 0]
+                    else:
+                        amounts = [0, pos["balance"]]
+
+                    receipt = await self.redeem_positions(
+                        condition_id=pos["condition_id"],
+                        amounts=amounts,
+                        neg_risk=True,
                     )
-                    result["status"] = "success"
-                    result["order"] = order_result
+                    result["status"] = "redeemed"
+                    result["tx_hash"] = receipt.get("transaction_hash", "")
+                    logger.info(f"Redeemed {pos['balance']} {pos['outcome']} → ${pos['balance']:.2f}")
+
                 except Exception as e:
-                    result["status"] = "error"
-                    result["error"] = str(e)
+                    # FALLBACK: Sell at 99¢ (emergency)
+                    logger.warning(f"Redeem failed, falling back to sell at 99¢: {e}")
+                    result["method"] = "sell_fallback"
+                    try:
+                        order_result = await self.claim_winnings_via_sell(
+                            token_id=pos["token_id"],
+                            amount=pos["balance"],
+                            min_price=0.99,
+                        )
+                        result["status"] = "sold_fallback"
+                        result["order"] = order_result
+                        result["estimated_value"] = pos["balance"] * 0.99
+                        logger.info(f"Sold {pos['balance']} {pos['outcome']} at $0.99 (fallback)")
+                    except Exception as e2:
+                        result["status"] = "error"
+                        result["error"] = str(e2)
 
             results.append(result)
 
