@@ -25,7 +25,7 @@ import signal
 import sys
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Deque, Callable
+from typing import Optional, List, Deque, Callable, Dict, Any
 from collections import deque
 import random as random_module
 from zoneinfo import ZoneInfo  # Python 3.9+ for timezone handling
@@ -59,6 +59,7 @@ from src.services.directional_strategy import (
     DirectionalPhase,
     TradeDecision,
 )
+from src.services.health_monitor import get_health_monitor, HealthMonitor
 
 
 # Configure logging
@@ -1502,20 +1503,53 @@ class PaperTradingBot:
             await self._trading_loop_inner(end_time, check_interval)
 
     async def _trading_loop_inner(self, end_time: datetime, check_interval: float) -> None:
-        """Inner trading loop logic."""
+        """Inner trading loop logic with health monitoring and resilience."""
+        # Get health monitor for recording heartbeats
+        health_monitor = get_health_monitor()
+        health_monitor.register_strategy(self.strategy_name)
+
+        # Track consecutive errors for exponential backoff
+        consecutive_errors = 0
+        max_consecutive_errors = 10
+        last_successful_cycle = datetime.now(timezone.utc)
+
         try:
             while self._running and datetime.now(timezone.utc) < end_time:
+                cycle_start = datetime.now(timezone.utc)
+
                 try:
+                    # Record heartbeat at start of each cycle
+                    health_monitor.record_heartbeat(self.strategy_name)
+
                     # Run appropriate trading cycle
                     if self.directional_mode:
                         await self._directional_trading_cycle()
                     else:
                         await self._accumulation_trading_cycle()
+
+                    # Reset error counter on success
+                    consecutive_errors = 0
+                    last_successful_cycle = datetime.now(timezone.utc)
+
+                except asyncio.CancelledError:
+                    raise  # Don't catch cancellation
                 except Exception as e:
-                    # Log but don't crash - the retry logic in trading cycles
-                    # handles most errors, this is a safety net
-                    logger.error(f"Unexpected error in trading cycle: {e}")
-                    if not await self._interruptible_sleep(self.retry_base_delay, check_interval=2.0):
+                    consecutive_errors += 1
+                    health_monitor.record_error(self.strategy_name, str(e))
+
+                    # Log with increasing severity based on consecutive errors
+                    if consecutive_errors >= max_consecutive_errors:
+                        logger.critical(f"[{self.strategy_name}] CRITICAL: {consecutive_errors} consecutive errors: {e}")
+                    elif consecutive_errors >= 5:
+                        logger.error(f"[{self.strategy_name}] Multiple errors ({consecutive_errors}): {e}")
+                    else:
+                        logger.warning(f"[{self.strategy_name}] Error in trading cycle: {e}")
+
+                    # Exponential backoff with cap
+                    backoff = min(self.retry_base_delay * (2 ** min(consecutive_errors, 5)), 60.0)
+                    logger.info(f"[{self.strategy_name}] Backing off for {backoff:.1f}s before retry")
+
+                    if not await self._interruptible_sleep(backoff, check_interval=2.0):
                         break
                     continue
 
@@ -1523,8 +1557,16 @@ class PaperTradingBot:
                 if not await self._interruptible_sleep(check_interval):
                     break
 
+                # Periodic health log
+                elapsed = (datetime.now(timezone.utc) - self._start_time).total_seconds()
+                if int(elapsed) % 300 == 0:  # Every 5 minutes
+                    logger.info(f"[{self.strategy_name}] Heartbeat: trades={self._trade_count}, pairs={self._total_pairs}, balance=${self._engine.balance:.2f}")
+
         except asyncio.CancelledError:
-            logger.info("Bot cancelled")
+            logger.info(f"[{self.strategy_name}] Bot cancelled")
+        except Exception as e:
+            logger.critical(f"[{self.strategy_name}] Fatal error in trading loop: {e}")
+            health_monitor.record_error(self.strategy_name, f"FATAL: {e}")
         finally:
             # Send final report
             try:
@@ -1607,9 +1649,20 @@ class PaperTradingBot:
         Calculate max allowed imbalance in volume_weighted mode.
 
         Returns percentage-based imbalance limit instead of absolute.
+
+        Minimum of 10 to allow initial bootstrap trades:
+        - Polymarket $1 minimum order requires ceil(1.00/price) shares
+        - At $0.20 price, that's 5 shares per trade
+        - Need to allow both sides to trade independently during bootstrap
+        - Minimum 10 allows first trades on both sides without blocking
+
+        Once position is established, the 40% rule takes over:
+        - At 50 shares: max imbalance = 20 shares
+        - At 100 shares: max imbalance = 40 shares
         """
         max_position = max(current_up, current_down, 1)
-        return max(1, int(max_position * self.vw_imbalance_pct))
+        # Minimum of 10 for bootstrap phase (allows $1 min orders at any price)
+        return max(10, int(max_position * self.vw_imbalance_pct))
 
     async def _accumulation_trading_cycle(self) -> None:
         """
@@ -1896,6 +1949,9 @@ class PaperTradingBot:
         # Execute trades
         trades_made = 0
 
+        # Get health monitor for trade recording
+        health_monitor = get_health_monitor()
+
         if buy_up and self._engine.balance >= up_price * up_buy_size:
             result = await self._engine.execute_single_side_trade(
                 market=market,
@@ -1907,6 +1963,8 @@ class PaperTradingBot:
                 trades_made += 1
                 self._trade_count += 1
                 self._profitable_opportunities += 1
+                # Record trade in health monitor
+                health_monitor.record_trade(self.strategy_name, market.slug)
                 # Log to CSV
                 updated_position = self._engine.get_position(market)
                 self._log_event_csv(
@@ -1938,6 +1996,8 @@ class PaperTradingBot:
                 trades_made += 1
                 self._trade_count += 1
                 self._profitable_opportunities += 1
+                # Record trade in health monitor
+                health_monitor.record_trade(self.strategy_name, market.slug)
                 # Log to CSV
                 updated_position = self._engine.get_position(market)
                 self._log_event_csv(
@@ -2263,8 +2323,12 @@ class PaperTradingBot:
             return None
 
     async def _handle_market_rotation(self, market) -> None:
-        """Handle market rotation and position resolution."""
-        logger.info(f"Rotating from {market.slug}")
+        """Handle market rotation and position resolution with resilience."""
+        old_market_slug = market.slug
+        logger.info(f"[{self.strategy_name}] Rotating from {market.slug}")
+
+        # Get health monitor for tracking
+        health_monitor = get_health_monitor()
 
         # Resolve positions for this market
         pos = self._engine.get_position(market)
@@ -2431,7 +2495,28 @@ class PaperTradingBot:
                     pair_cost=pair_cost,
                 )
 
-        await self._rotator.rotate()
+        # Rotate to next market with retry logic
+        rotation_success = False
+        for attempt in range(3):
+            try:
+                rotation_success = await self._rotator.rotate()
+                if rotation_success:
+                    new_market = self._rotator.current_market
+                    new_slug = new_market.slug if new_market else "None"
+                    health_monitor.record_market_transition(self.strategy_name, old_market_slug, new_slug)
+                    logger.info(f"[{self.strategy_name}] Successfully rotated to {new_slug}")
+                    self._is_new_market = True  # Flag for next cycle
+                    break
+                else:
+                    logger.warning(f"[{self.strategy_name}] Rotation returned False (no next market?)")
+                    break
+            except Exception as e:
+                logger.error(f"[{self.strategy_name}] Rotation attempt {attempt+1}/3 failed: {e}")
+                health_monitor.record_error(self.strategy_name, f"Rotation failed: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(5)  # Wait before retry
+                else:
+                    logger.critical(f"[{self.strategy_name}] All rotation attempts failed!")
 
         # Check for graceful stop after market ends
         if self._graceful_stop_requested:

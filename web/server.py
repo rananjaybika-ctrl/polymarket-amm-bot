@@ -1,13 +1,21 @@
 """
 FastAPI Web Server for Polymarket Trading Bot
 Run with: uvicorn web.server:app --reload --port 8000
+
+Features:
+- Health monitoring for all strategies
+- Auto-restart on crash
+- Health check endpoints
+- Resilient to bot failures
 """
 
 import sys
 import asyncio
+import logging
+import traceback
 from pathlib import Path
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +25,17 @@ from pydantic import BaseModel
 # Add project root to path for imports
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.services.health_monitor import (
+    HealthMonitor,
+    get_health_monitor,
+    set_health_monitor,
+    HealthStatus,
+)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Polymarket Trading Bot", version="1.0.0")
 
@@ -150,6 +169,171 @@ bot_status = {
     "balance": None,
 }
 connected_websockets: list[WebSocket] = []
+
+# Health monitor instance
+health_monitor: Optional[HealthMonitor] = None
+
+# Auto-restart configuration storage
+restart_configs: Dict[str, Dict[str, Any]] = {}
+
+
+async def handle_health_alert(strategy_name: str, message: str, severity: HealthStatus):
+    """Handle health alerts - broadcast to websockets and log."""
+    logger.warning(f"[HEALTH ALERT] {strategy_name}: {message} (severity: {severity.value})")
+
+    # Broadcast to connected websockets
+    alert_data = {
+        "type": "health_alert",
+        "strategy": strategy_name,
+        "message": message,
+        "severity": severity.value,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    await broadcast_message(alert_data)
+
+
+async def handle_auto_restart(strategy_name: str):
+    """Handle auto-restart for a crashed strategy."""
+    logger.info(f"[AUTO-RESTART] Attempting restart for {strategy_name}")
+
+    # Check if we have stored config for this strategy
+    if strategy_name not in restart_configs:
+        logger.error(f"[AUTO-RESTART] No stored config for {strategy_name}")
+        return
+
+    config = restart_configs[strategy_name]
+    strategy = strategies.get(strategy_name)
+
+    if not strategy:
+        logger.error(f"[AUTO-RESTART] Unknown strategy: {strategy_name}")
+        return
+
+    # Cancel existing task if any
+    if strategy.task and not strategy.task.done():
+        strategy.task.cancel()
+        try:
+            await strategy.task
+        except asyncio.CancelledError:
+            pass
+
+    # Wait a bit before restart
+    await asyncio.sleep(5)
+
+    # Extend end time to continue from now
+    now = datetime.now()
+    original_end = datetime.fromisoformat(config.get("end_datetime", now.isoformat()))
+    remaining = (original_end - datetime.fromisoformat(config.get("start_datetime", now.isoformat()))).total_seconds()
+
+    if remaining > 0:
+        # Restart with remaining duration
+        config["start_datetime"] = now.isoformat()
+        config["end_datetime"] = (now + timedelta(seconds=remaining)).isoformat()
+
+        logger.info(f"[AUTO-RESTART] Restarting {strategy_name} with {remaining/60:.1f} minutes remaining")
+
+        try:
+            if strategy_name == "directional":
+                from pydantic import BaseModel
+                # Create config object
+                dir_config = DirectionalBotConfig(**config)
+                strategy.status["running"] = True
+                strategy.status["error"] = None
+                strategy.status["restarted_at"] = now.isoformat()
+                await broadcast_status()
+                strategy.task = asyncio.create_task(run_directional_bot(dir_config, strategy))
+            else:
+                # Accumulation strategies (standard, volume_weighted)
+                accum_config = AccumulationBotConfig(**config)
+                strategy.status["running"] = True
+                strategy.status["error"] = None
+                strategy.status["restarted_at"] = now.isoformat()
+                await broadcast_status()
+                strategy.task = asyncio.create_task(run_accumulation_bot(accum_config, strategy))
+
+            logger.info(f"[AUTO-RESTART] Successfully restarted {strategy_name}")
+
+        except Exception as e:
+            logger.error(f"[AUTO-RESTART] Failed to restart {strategy_name}: {e}")
+            strategy.status["error"] = f"Auto-restart failed: {e}"
+            await broadcast_status()
+    else:
+        logger.info(f"[AUTO-RESTART] Session ended, not restarting {strategy_name}")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize health monitoring on server startup."""
+    global health_monitor
+
+    # Create and configure health monitor
+    health_monitor = HealthMonitor(
+        trade_gap_threshold_minutes=20,
+        heartbeat_threshold_seconds=60,
+        check_interval_seconds=30,
+        on_alert=handle_health_alert,
+        on_restart=handle_auto_restart,
+    )
+    set_health_monitor(health_monitor)
+
+    # Start the health monitor
+    await health_monitor.start()
+    logger.info("[SERVER] Health monitor started")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on server shutdown."""
+    global health_monitor
+
+    if health_monitor:
+        await health_monitor.stop()
+        logger.info("[SERVER] Health monitor stopped")
+
+    # Stop all running strategies
+    for name, strategy in strategies.items():
+        if strategy and strategy.task and not strategy.task.done():
+            strategy.task.cancel()
+            try:
+                await strategy.task
+            except asyncio.CancelledError:
+                pass
+            logger.info(f"[SERVER] Stopped strategy: {name}")
+
+
+@app.get("/api/health")
+async def get_health():
+    """Get health status for all strategies."""
+    if health_monitor:
+        return health_monitor.get_status_summary()
+    return {"overall_status": "unknown", "strategies": {}, "alerts": []}
+
+
+@app.get("/api/health/{strategy_name}")
+async def get_strategy_health(strategy_name: str):
+    """Get health status for a specific strategy."""
+    if not health_monitor:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Health monitor not initialized"}
+        )
+
+    health = health_monitor.get_health(strategy_name)
+    if not health:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Strategy {strategy_name} not found"}
+        )
+
+    return {
+        "strategy": strategy_name,
+        "status": health.status.value,
+        "last_trade": health.last_trade_time.isoformat() if health.last_trade_time else None,
+        "last_heartbeat": health.last_heartbeat.isoformat() if health.last_heartbeat else None,
+        "trade_count": health.trade_count,
+        "error_count": health.error_count,
+        "restart_count": health.restart_count,
+        "last_error": health.last_error,
+    }
 
 
 @app.get("/")
@@ -485,35 +669,21 @@ async def start_directional(config: DirectionalBotConfig):
 
 @app.post("/api/stop/{strategy_name}")
 async def stop_strategy(strategy_name: str):
-    """Stop a specific trading strategy."""
+    """Gracefully stop a strategy - waits for current market to end."""
     if strategy_name not in strategies:
         return JSONResponse(status_code=404, content={"error": f"Unknown strategy: {strategy_name}"})
 
     strategy = strategies[strategy_name]
 
     if strategy.instance:
-        strategy.instance.stop()
-
-    if strategy.task and not strategy.task.done():
-        strategy.task.cancel()
-        try:
-            await strategy.task
-        except asyncio.CancelledError:
-            pass
-
-    strategy.status = {
-        "running": False,
-        "strategy": strategy_name,
-        "error": None,
-        "config": None,
-        "start_time": None,
-        "balance": None,
-    }
-    strategy.task = None
-    strategy.instance = None
+        # Use graceful stop - bot will finish current market then stop
+        strategy.instance.graceful_stop()
+        # Update status to indicate stopping
+        if strategy.status:
+            strategy.status["stopping"] = True
 
     await broadcast_status()
-    return {"status": "stopped", "strategy": strategy_name}
+    return {"status": "stopping", "message": "Will stop after current market ends"}
 
 
 @app.post("/api/graceful-stop/{strategy_name}")
@@ -597,7 +767,12 @@ async def emergency_stop_strategy(strategy_name: str):
 # =============================================================================
 
 async def run_accumulation_bot(config: AccumulationBotConfig, strategy: StrategyState):
-    """Run the Accumulation trading bot asynchronously."""
+    """Run the Accumulation trading bot asynchronously with resilience."""
+    accum_mode = config.accum_mode  # "standard" or "volume_weighted"
+
+    # Store config for auto-restart
+    restart_configs[accum_mode] = config.dict()
+
     try:
         from scripts.run_paper_bot import PaperTradingBot
 
@@ -620,7 +795,6 @@ async def run_accumulation_bot(config: AccumulationBotConfig, strategy: Strategy
         duration_minutes = (end_dt - start_dt).total_seconds() / 60.0
 
         # Use accum_mode as strategy name for callbacks and CSV naming
-        accum_mode = config.accum_mode  # "standard" or "volume_weighted"
         web_callback = create_web_callback_for_strategy(accum_mode)
 
         # Create Accumulation bot with mode-specific settings
@@ -631,29 +805,40 @@ async def run_accumulation_bot(config: AccumulationBotConfig, strategy: Strategy
         )
         strategy.instance = bot
 
+        logger.info(f"[{accum_mode}] Initializing bot...")
         await bot.initialize()
+
+        logger.info(f"[{accum_mode}] Starting trading loop for {duration_minutes:.1f} minutes")
         await bot.run(duration_minutes=duration_minutes)
 
         strategy.status["running"] = False
         strategy.status["completed"] = True
         strategy.instance = None
+        logger.info(f"[{accum_mode}] Trading session completed normally")
         await broadcast_status()
 
     except asyncio.CancelledError:
         strategy.status["running"] = False
         strategy.status["error"] = "Stopped by user"
         strategy.instance = None
+        logger.info(f"[{accum_mode}] Stopped by user")
         await broadcast_status()
         raise
     except Exception as e:
         strategy.status["running"] = False
         strategy.status["error"] = str(e)
         strategy.instance = None
+        logger.error(f"[{accum_mode}] Error: {e}")
+        logger.error(f"[{accum_mode}] Traceback: {traceback.format_exc()}")
         await broadcast_status()
+        # Don't remove from restart_configs - health monitor may restart
 
 
 async def run_directional_bot(config: DirectionalBotConfig, strategy: StrategyState):
-    """Run the Directional trading bot asynchronously."""
+    """Run the Directional trading bot asynchronously with resilience."""
+    # Store config for auto-restart
+    restart_configs["directional"] = config.dict()
+
     try:
         from scripts.run_paper_bot import PaperTradingBot
 
@@ -680,25 +865,33 @@ async def run_directional_bot(config: DirectionalBotConfig, strategy: StrategySt
         bot = PaperTradingBot.from_directional_config(config.dict(), web_callback=web_callback)
         strategy.instance = bot
 
+        logger.info("[directional] Initializing bot...")
         await bot.initialize()
+
+        logger.info(f"[directional] Starting trading loop for {duration_minutes:.1f} minutes")
         await bot.run(duration_minutes=duration_minutes)
 
         strategy.status["running"] = False
         strategy.status["completed"] = True
         strategy.instance = None
+        logger.info("[directional] Trading session completed normally")
         await broadcast_status()
 
     except asyncio.CancelledError:
         strategy.status["running"] = False
         strategy.status["error"] = "Stopped by user"
         strategy.instance = None
+        logger.info("[directional] Stopped by user")
         await broadcast_status()
         raise
     except Exception as e:
         strategy.status["running"] = False
         strategy.status["error"] = str(e)
         strategy.instance = None
+        logger.error(f"[directional] Error: {e}")
+        logger.error(f"[directional] Traceback: {traceback.format_exc()}")
         await broadcast_status()
+        # Don't remove from restart_configs - health monitor may restart
 
 
 def create_web_callback_for_strategy(strategy_name: str):
@@ -761,6 +954,15 @@ async def broadcast_status():
     for ws in connected_websockets[:]:
         try:
             await ws.send_json(status_msg)
+        except Exception:
+            connected_websockets.remove(ws)
+
+
+async def broadcast_message(data: dict):
+    """Broadcast a generic message to all connected WebSocket clients."""
+    for ws in connected_websockets[:]:
+        try:
+            await ws.send_json(data)
         except Exception:
             connected_websockets.remove(ws)
 
