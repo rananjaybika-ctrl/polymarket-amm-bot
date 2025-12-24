@@ -6,11 +6,14 @@ and balance management. Uses same interface as PaperTradingEngine
 for drop-in replacement.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import uuid
+
+from py_clob_client.clob_types import OrderType
 
 from src.api.polymarket_client import PolymarketClient, PolymarketClientError
 from src.models.market import BTCMarket
@@ -142,6 +145,7 @@ class LiveTradingEngine:
         self,
         client: PolymarketClient,
         starting_balance: float = 100.0,
+        use_fok: bool = False,
     ):
         """
         Initialize LiveTradingEngine.
@@ -149,6 +153,11 @@ class LiveTradingEngine:
         Args:
             client: Connected PolymarketClient
             starting_balance: Initial balance (for tracking, actual balance from API)
+            use_fok: Use Fill-Or-Kill orders (default False).
+                     GTC (default) is required for patient pricing strategy where
+                     bids are placed below best ask. Orders are polled for fill
+                     status with 30s timeout.
+                     FOK can be enabled for aggressive orders that must fill immediately.
         """
         self.client = client
         self._starting_balance = starting_balance
@@ -156,8 +165,11 @@ class LiveTradingEngine:
         self._positions: Dict[str, LivePosition] = {}
         self._realized_pnl: float = 0.0
         self._trade_count: int = 0
+        self._use_fok = use_fok
+        self._order_type = OrderType.FOK if use_fok else OrderType.GTC
 
-        logger.info(f"LiveTradingEngine initialized with starting balance ${starting_balance:.2f}")
+        order_type_str = "FOK (Fill-Or-Kill)" if use_fok else "GTC (Good-Til-Cancelled)"
+        logger.info(f"LiveTradingEngine initialized: balance=${starting_balance:.2f}, order_type={order_type_str}")
 
     @property
     def balance(self) -> float:
@@ -180,6 +192,74 @@ class LiveTradingEngine:
         except Exception as e:
             logger.error(f"Failed to sync balance: {e}")
             return self.balance
+
+    async def _poll_order_until_filled(
+        self,
+        order_id: str,
+        requested_size: float,
+        timeout_seconds: float = 30.0,
+        poll_interval: float = 2.0,
+    ) -> Dict[str, Any]:
+        """
+        Poll order status until filled, cancelled, or timeout.
+
+        For GTC orders that may sit in the orderbook waiting to fill,
+        this method polls the order status and handles timeouts.
+
+        Args:
+            order_id: The order ID to poll
+            requested_size: Original requested size (for partial fill detection)
+            timeout_seconds: Max time to wait before cancelling (default 30s)
+            poll_interval: Time between status checks (default 2s)
+
+        Returns:
+            Dict with filled_size, final_status, was_cancelled
+        """
+        start_time = asyncio.get_event_loop().time()
+
+        while True:
+            elapsed = asyncio.get_event_loop().time() - start_time
+
+            if elapsed >= timeout_seconds:
+                # Timeout - cancel unfilled portion
+                try:
+                    await self.client.cancel_order(order_id)
+                    logger.info(f"[LIVE] Timeout after {timeout_seconds:.0f}s, cancelled order {order_id[:16]}...")
+                except Exception as e:
+                    logger.warning(f"[LIVE] Failed to cancel order on timeout: {e}")
+
+                # Get final fill status after cancellation
+                try:
+                    final_status = await self.client.get_order(order_id)
+                    filled = float(final_status.get("size_matched", 0)) if final_status else 0
+                except Exception:
+                    filled = 0
+
+                return {"filled_size": filled, "final_status": "TIMEOUT", "was_cancelled": True}
+
+            # Poll order status
+            try:
+                status = await self.client.get_order(order_id)
+                if not status:
+                    await asyncio.sleep(poll_interval)
+                    continue
+
+                order_status = status.get("status", "").upper()
+                filled_size = float(status.get("size_matched", 0))
+
+                if order_status in ["MATCHED", "FILLED"]:
+                    return {"filled_size": filled_size, "final_status": "FILLED", "was_cancelled": False}
+                elif order_status == "CANCELLED":
+                    return {"filled_size": filled_size, "final_status": "CANCELLED", "was_cancelled": False}
+
+                # Still LIVE - log partial fill progress
+                if filled_size > 0 and filled_size < requested_size:
+                    logger.debug(f"[LIVE] Partial fill in progress: {filled_size}/{requested_size}")
+
+            except Exception as e:
+                logger.warning(f"[LIVE] Poll error: {e}")
+
+            await asyncio.sleep(poll_interval)
 
     def get_position(self, market: BTCMarket) -> Optional[LivePosition]:
         """Get position for a market."""
@@ -228,25 +308,28 @@ class LiveTradingEngine:
         # Get token ID
         token_id = market.up_token_id if side_upper == "UP" else market.down_token_id
 
-        logger.info(f"[LIVE] Placing order: {size} {side_upper} @ ${price:.4f} on {market.slug}")
+        order_type_label = "FOK" if self._use_fok else "GTC"
+        logger.info(f"[LIVE] Placing {order_type_label} order: {size} {side_upper} @ ${price:.4f} on {market.slug}")
 
         try:
-            # Place real order
+            # Place real order with configured order type
             result = await self.client.place_order(
                 token_id=token_id,
                 side="BUY",
                 price=price,
                 size=size,
+                order_type=self._order_type,
             )
 
             # Parse result
             order_id = result.get("orderID") or result.get("order_id", trade_id)
-            status = result.get("status", "unknown")
+            status = result.get("status", "unknown").upper()
 
-            # Check if order was matched
-            if status in ["MATCHED", "FILLED", "LIVE"]:
-                # For now, assume full fill at requested price
-                # In production, should poll for actual fill status
+            # MATCHED/FILLED = immediate fill (works for both FOK and GTC)
+            # LIVE = GTC order sitting in orderbook (needs polling)
+            # CANCELLED = FOK couldn't fill or order was cancelled
+            if status in ["MATCHED", "FILLED"]:
+                # Immediate fill - use requested size
                 filled_size = size
                 filled_price = price
                 cost = filled_size * filled_price
@@ -282,8 +365,74 @@ class LiveTradingEngine:
                     "trade_id": trade_id,
                     "order_id": order_id,
                 }
+            elif status == "LIVE" and not self._use_fok:
+                # GTC order is live (sitting in orderbook) - poll until filled or timeout
+                logger.info(f"[LIVE] GTC order LIVE, polling for fill (timeout=30s)...")
+                poll_result = await self._poll_order_until_filled(
+                    order_id=order_id,
+                    requested_size=size,
+                    timeout_seconds=30.0,
+                    poll_interval=2.0,
+                )
+
+                filled_size = poll_result["filled_size"]
+                if filled_size > 0:
+                    filled_price = price  # Limit order fills at our price
+                    cost = filled_size * filled_price
+
+                    # Update position with ACTUAL filled size (may be partial)
+                    position = self._positions.get(market.slug)
+                    if position is None:
+                        position = LivePosition(market_slug=market.slug)
+                        self._positions[market.slug] = position
+
+                    if side_upper == "UP":
+                        position.up_token_id = token_id
+                    else:
+                        position.down_token_id = token_id
+
+                    position.add_fill(side_upper, filled_price, filled_size, cost)
+                    self._trade_count += 1
+                    await self.sync_balance()
+
+                    if filled_size < size:
+                        logger.info(
+                            f"[LIVE] PARTIAL FILL: {filled_size}/{size} {side_upper} @ ${filled_price:.4f} "
+                            f"(order_id={order_id[:16]}...)"
+                        )
+                    else:
+                        logger.info(
+                            f"[LIVE] Order filled: {filled_size} {side_upper} @ ${filled_price:.4f} "
+                            f"(order_id={order_id[:16]}...)"
+                        )
+
+                    return {
+                        "success": True,
+                        "filled_size": filled_size,
+                        "filled_price": filled_price,
+                        "cost": cost,
+                        "trade_id": trade_id,
+                        "order_id": order_id,
+                        "partial": filled_size < size,
+                    }
+                else:
+                    # No fill after timeout
+                    logger.info(f"[LIVE] Order unfilled after 30s timeout, skipping")
+                    return {
+                        "success": False,
+                        "filled_size": 0,
+                        "filled_price": 0,
+                        "cost": 0,
+                        "trade_id": trade_id,
+                        "order_id": order_id,
+                        "error": "Timeout - no fill",
+                    }
             else:
-                logger.warning(f"[LIVE] Order not filled: status={status}")
+                # CANCELLED (FOK couldn't fill) or other status
+                if status == "CANCELLED" and self._use_fok:
+                    logger.info(f"[LIVE] FOK order cancelled (insufficient liquidity at ${price:.4f})")
+                else:
+                    logger.warning(f"[LIVE] Order not filled: status={status}")
                 return {
                     "success": False,
                     "filled_size": 0,
