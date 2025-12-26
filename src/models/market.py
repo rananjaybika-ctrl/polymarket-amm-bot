@@ -97,7 +97,25 @@ class BTCMarket:
 
         # Parse ISO timestamps
         start_time = cls._parse_timestamp(start_time_str)
-        end_time = cls._parse_timestamp(end_time_str)
+
+        # For BTC 15-min markets, prefer slug-based end_time (API endDate is often wrong)
+        # Slug format: btc-updown-15m-TIMESTAMP where TIMESTAMP is the market START time
+        # End time = start time + 15 minutes (900 seconds)
+        slug = market_data.get("slug", "")
+        end_time = None
+        if "15m" in slug:
+            try:
+                parts = slug.split("-")
+                if len(parts) >= 4:
+                    start_timestamp = int(parts[-1])
+                    # Add 15 minutes to get end time
+                    end_time = datetime.fromtimestamp(start_timestamp + 900, tz=timezone.utc)
+            except (ValueError, IndexError):
+                pass
+
+        # Fallback to API endDate if slug parsing failed
+        if end_time is None:
+            end_time = cls._parse_timestamp(end_time_str)
 
         return cls(
             condition_id=market_data.get("conditionId", ""),
