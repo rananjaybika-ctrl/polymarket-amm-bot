@@ -91,6 +91,7 @@ class MarketFinder:
     """
 
     GAMMA_API_URL = "https://gamma-api.polymarket.com"
+    MARKET_INTERVAL_SECONDS = 900  # 15 minutes
 
     def __init__(self, timeout: float = 30.0, max_retries: int = 3):
         """
@@ -138,6 +139,121 @@ class MarketFinder:
             return data if isinstance(data, list) else []
 
         return await retry_async(do_fetch, max_retries=self.max_retries)
+
+    @staticmethod
+    def _get_current_window_timestamp(now: Optional[datetime] = None) -> int:
+        """
+        Calculate the start timestamp of the current 15-minute window.
+
+        BTC 15-minute markets run on fixed intervals (00, 15, 30, 45 minutes).
+        This returns the Unix timestamp for the start of the current window.
+
+        Args:
+            now: Optional datetime, defaults to current UTC time
+
+        Returns:
+            Unix timestamp of current window start
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        current_ts = int(now.timestamp())
+        # Round down to nearest 15-minute interval
+        window_start = (current_ts // 900) * 900
+        return window_start
+
+    @staticmethod
+    def _generate_market_slugs(count: int = 5, now: Optional[datetime] = None) -> List[str]:
+        """
+        Generate slugs for current and upcoming BTC 15-minute markets.
+
+        Args:
+            count: Number of market slugs to generate (including current)
+            now: Optional datetime, defaults to current UTC time
+
+        Returns:
+            List of market slugs, starting with current window
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        current_ts = int(now.timestamp())
+        # Slug timestamp is the START time of the market window
+        # Market btc-updown-15m-1766745000 runs from 10:30 to 10:45 (starts at ts)
+        # So we need the market that started at or before now (round DOWN to boundary)
+        current_boundary = (current_ts // 900) * 900
+
+        slugs = []
+        for i in range(count):
+            ts = current_boundary + (i * 900)
+            slugs.append(f"btc-updown-15m-{ts}")
+
+        return slugs
+
+    async def get_current_market(self) -> Optional[BTCMarket]:
+        """
+        Get the market for the current 15-minute window.
+
+        Calculates the expected market slug based on current time and
+        fetches it directly from the API. This is more reliable than
+        searching through all markets.
+
+        Returns:
+            BTCMarket for current window, or None if not found
+        """
+        now = datetime.now(timezone.utc)
+        slugs = self._generate_market_slugs(count=1, now=now)
+
+        if slugs:
+            market = await self.get_market_by_slug(slugs[0])
+            if market:
+                logger.info(f"Found current market: {market.slug}")
+                return market
+
+        logger.warning("Current market not found by calculated slug")
+        return None
+
+    async def get_current_and_upcoming_markets(
+        self,
+        count: int = 5,
+    ) -> List[BTCMarket]:
+        """
+        Get the current market and upcoming markets.
+
+        Calculates expected market slugs based on current time and
+        fetches them directly. This ensures we get currently active
+        markets rather than only future ones.
+
+        Args:
+            count: Number of markets to fetch (including current)
+
+        Returns:
+            List of BTCMarket objects, starting with current window
+        """
+        now = datetime.now(timezone.utc)
+        slugs = self._generate_market_slugs(count=count, now=now)
+
+        markets = []
+        for slug in slugs:
+            try:
+                market = await self.get_market_by_slug(slug)
+                if market:
+                    markets.append(market)
+                    logger.debug(f"Fetched market: {slug}")
+                else:
+                    logger.debug(f"Market not found: {slug}")
+            except Exception as e:
+                logger.warning(f"Failed to fetch market {slug}: {e}")
+
+        if markets:
+            logger.info(
+                f"Found {len(markets)} current/upcoming markets, "
+                f"first: {markets[0].slug}"
+            )
+        else:
+            logger.warning("No current/upcoming markets found by slug calculation")
+
+        return markets
 
     async def find_btc_15min_markets(
         self,
@@ -222,8 +338,8 @@ class MarketFinder:
         """
         Get the currently active BTC 15-minute market.
 
-        Returns the market with the soonest end_time that is
-        currently accepting orders and hasn't expired.
+        Uses slug calculation to find the current window's market first,
+        then falls back to searching all markets if not found.
 
         Returns:
             The active BTCMarket
@@ -231,6 +347,21 @@ class MarketFinder:
         Raises:
             NoMarketsFoundError: If no active markets found
         """
+        # First, try to get the current market by calculated slug
+        # This is more reliable as it directly targets the current window
+        current_markets = await self.get_current_and_upcoming_markets(count=3)
+
+        # Find the first market that's currently active (not expired, accepting orders)
+        for market in current_markets:
+            if market.is_active() and not market.is_expired():
+                logger.info(
+                    f"Active market (via slug): {market.slug} "
+                    f"(ends in {int(market.time_remaining())}s)"
+                )
+                return market
+
+        # Fallback: search through all markets
+        logger.debug("Falling back to general market search")
         markets = await self.find_btc_15min_markets(active_only=True)
 
         if not markets:
@@ -301,28 +432,130 @@ class MarketFinder:
         """
         Get all BTC 15-minute markets within a rolling time window.
 
-        Used by MarketRotator in continuous mode to select which markets
-        to consider for trading. Window rolls forward with each call.
+        Uses slug calculation to directly fetch current and upcoming markets,
+        which is more reliable than searching through general API results.
 
         Args:
             hours: Time window in hours (default 1.0 = 60 minutes)
 
         Returns:
-            List of BTCMarket objects ending within the time window
+            List of BTCMarket objects within the time window
         """
-        markets = await self.find_btc_15min_markets(active_only=False)
+        # Calculate how many 15-min markets fit in the window
+        # Each market is 15 minutes, so hours * 4 markets per hour
+        count = max(1, int(hours * 4) + 1)
+
+        # Get current and upcoming markets by calculated slug
+        markets = await self.get_current_and_upcoming_markets(count=count)
+
+        if markets:
+            logger.info(
+                f"Found {len(markets)} markets in {hours}h window via slug calculation"
+            )
+            return markets
+
+        # Fallback to general search if slug-based approach fails
+        logger.debug("Slug-based search failed, falling back to general search")
+        all_markets = await self.find_btc_15min_markets(active_only=False)
 
         now = datetime.now(timezone.utc)
         window_seconds = hours * 3600
 
         # Filter to markets ending within the window
         in_window = [
-            m for m in markets
+            m for m in all_markets
             if 0 < m.time_remaining() <= window_seconds
         ]
 
-        logger.info(f"Found {len(in_window)} markets in {hours}h window")
+        logger.info(f"Found {len(in_window)} markets in {hours}h window (fallback)")
         return in_window
+
+    async def get_markets_in_time_range(
+        self,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> List[BTCMarket]:
+        """
+        Get all BTC 15-minute markets that END within a specific UTC time range.
+
+        CRITICAL: This method ensures the bot ONLY trades markets that fall within
+        the user's configured session window. It prevents trading on markets that
+        end before the session starts or after the session ends.
+
+        A market is included if its end_time falls within [start_utc, end_utc].
+
+        Args:
+            start_utc: Session start time (UTC, timezone-aware)
+            end_utc: Session end time (UTC, timezone-aware)
+
+        Returns:
+            List of BTCMarket objects that END within the time range, sorted by end_time
+
+        Example:
+            # User configures session from 14:00 to 16:00 IST (08:30 to 10:30 UTC)
+            markets = await finder.get_markets_in_time_range(
+                start_utc=datetime(2025, 12, 26, 8, 30, tzinfo=timezone.utc),
+                end_utc=datetime(2025, 12, 26, 10, 30, tzinfo=timezone.utc),
+            )
+            # Returns markets ending at 08:30, 08:45, 09:00, ..., 10:30 UTC
+        """
+        # Ensure times are UTC
+        if start_utc.tzinfo is None:
+            start_utc = start_utc.replace(tzinfo=timezone.utc)
+        if end_utc.tzinfo is None:
+            end_utc = end_utc.replace(tzinfo=timezone.utc)
+
+        start_ts = int(start_utc.timestamp())
+        end_ts = int(end_utc.timestamp())
+
+        # Calculate all 15-minute boundary timestamps within the range
+        # Round start_ts UP to next 15-min boundary (that's when first eligible market ends)
+        first_boundary = ((start_ts + 899) // 900) * 900  # Round up to next 15-min
+        # Round end_ts DOWN to current or previous 15-min boundary
+        last_boundary = (end_ts // 900) * 900  # Round down
+
+        if first_boundary > last_boundary:
+            logger.warning(
+                f"Time range too short: {start_utc.isoformat()} to {end_utc.isoformat()}, "
+                f"no 15-minute markets fit"
+            )
+            return []
+
+        # Generate slugs for all markets that END within the range
+        slugs = []
+        ts = first_boundary
+        while ts <= last_boundary:
+            slugs.append(f"btc-updown-15m-{ts}")
+            ts += 900  # Next 15-min boundary
+
+        logger.info(
+            f"Fetching {len(slugs)} markets in range "
+            f"{start_utc.isoformat()} to {end_utc.isoformat()}"
+        )
+
+        # Fetch each market by slug
+        markets = []
+        for slug in slugs:
+            try:
+                market = await self.get_market_by_slug(slug)
+                if market:
+                    markets.append(market)
+                    logger.debug(f"Found market in range: {slug}")
+                else:
+                    logger.debug(f"Market not found: {slug}")
+            except Exception as e:
+                logger.warning(f"Failed to fetch market {slug}: {e}")
+
+        # Filter to only markets that haven't expired yet
+        now = datetime.now(timezone.utc)
+        active_markets = [m for m in markets if not m.is_expired()]
+
+        logger.info(
+            f"Found {len(active_markets)} active markets in time range "
+            f"(out of {len(markets)} total)"
+        )
+
+        return active_markets
 
     def __repr__(self) -> str:
         """String representation."""
