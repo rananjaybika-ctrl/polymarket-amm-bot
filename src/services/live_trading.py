@@ -23,6 +23,30 @@ from src.models.position import Position, Fill
 logger = logging.getLogger(__name__)
 
 
+def calculate_price_depth_timeout(our_price: float, best_bid: float) -> float:
+    """
+    Calculate timeout based on how deep we are in the orderbook.
+
+    Deeper in book = longer timeout (need more price movement to fill).
+    Close to best bid = shorter timeout (should fill soon or give up).
+
+    Args:
+        our_price: The price we're placing our order at
+        best_bid: Current best bid in the orderbook
+
+    Returns:
+        Timeout in seconds
+    """
+    depth = best_bid - our_price
+    if depth >= 0.03:
+        return 30.0  # Deep in book, be patient
+    if depth >= 0.02:
+        return 20.0
+    if depth >= 0.01:
+        return 10.0
+    return 5.0  # At or above best bid, should fill quickly
+
+
 def calculate_dynamic_timeout(time_remaining_secs: float, is_emergency: bool = False) -> float:
     """
     Calculate appropriate order timeout based on time remaining in market.
@@ -332,12 +356,19 @@ class LiveTradingEngine:
                 }
             elif status == "LIVE" and not self._use_fok:
                 # GTC order is live (sitting in orderbook) - poll until filled or timeout
-                # Use dynamic timeout based on time remaining in market
-                timeout = calculate_dynamic_timeout(
+                # Combine time-based and price-depth timeouts
+                time_timeout = calculate_dynamic_timeout(
                     time_remaining_secs=time_remaining if time_remaining else 600,
                     is_emergency=False,
                 )
-                logger.info(f"[LIVE] GTC order LIVE, polling for fill (timeout={timeout:.0f}s)...")
+                price_timeout = calculate_price_depth_timeout(
+                    our_price=price,
+                    best_bid=market.best_bid if market.best_bid > 0 else 0.50,
+                )
+                # Use minimum of both - be conservative
+                timeout = min(time_timeout, price_timeout)
+                depth = (market.best_bid if market.best_bid > 0 else 0.50) - price
+                logger.info(f"[LIVE] GTC order LIVE, polling (timeout={timeout:.0f}s, depth=${depth:.2f})")
                 poll_result = await self._poll_order_until_filled(
                     order_id=order_id,
                     requested_size=size,
