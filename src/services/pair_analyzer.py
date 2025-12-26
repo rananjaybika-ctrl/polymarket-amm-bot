@@ -15,11 +15,38 @@ if TYPE_CHECKING:
     from src.models.position import Position
 
 from src.models.market import BTCMarket
-from src.models.orderbook import Orderbook
+from src.models.orderbook import Orderbook, Order
 from src.api.polymarket_client import PolymarketClient
 
 
 logger = logging.getLogger(__name__)
+
+
+def create_synthetic_orderbook(token_id: str, price: float, size: float = 100.0) -> Orderbook:
+    """
+    Create a synthetic orderbook from CLOB market price.
+
+    Used when /book endpoint returns garbage data but /markets has correct prices.
+    Creates a tight spread around the given price.
+
+    Args:
+        token_id: Token ID for this orderbook
+        price: Mid-market price from CLOB /markets endpoint
+        size: Size to use for synthetic orders (default 100)
+
+    Returns:
+        Orderbook with synthetic bids/asks around the price
+    """
+    # Create tight spread around the price (0.5% each side)
+    bid_price = max(0.01, price - 0.005)
+    ask_price = min(0.99, price + 0.005)
+
+    return Orderbook(
+        token_id=token_id,
+        bids=[Order(price=bid_price, size=size)],
+        asks=[Order(price=ask_price, size=size)],
+        timestamp=0,
+    )
 
 
 @dataclass
@@ -426,21 +453,17 @@ class PairAnalyzer:
         Fetches orderbooks for both Up and Down tokens and
         calculates pair cost and potential profit.
 
+        If orderbook data is garbage (extreme spread like $0.01/$0.99),
+        falls back to CLOB /markets endpoint for accurate prices.
+
         Args:
             market: BTCMarket to analyze
 
         Returns:
             PairOpportunity with analysis results
         """
-        # Fetch both orderbooks in parallel for speed
-        up_response, down_response = await asyncio.gather(
-            self.client.get_orderbook(market.up_token_id),
-            self.client.get_orderbook(market.down_token_id),
-        )
-
-        # Convert to our Orderbook model
-        up_orderbook = Orderbook.from_clob_response(up_response)
-        down_orderbook = Orderbook.from_clob_response(down_response)
+        # Fetch orderbooks with fallback for garbage data
+        up_orderbook, down_orderbook = await self._fetch_orderbooks_with_fallback(market)
 
         opportunity = PairOpportunity(
             market=market,
@@ -455,6 +478,76 @@ class PairAnalyzer:
         )
 
         return opportunity
+
+    async def _fetch_orderbooks_with_fallback(
+        self, market: BTCMarket
+    ) -> tuple[Orderbook, Orderbook]:
+        """
+        Fetch orderbooks with fallback to CLOB /markets endpoint.
+
+        If /book returns garbage data, falls back to /markets for accurate prices.
+
+        Args:
+            market: BTCMarket to fetch orderbooks for
+
+        Returns:
+            Tuple of (up_orderbook, down_orderbook)
+        """
+        # Fetch both orderbooks in parallel for speed
+        up_response, down_response = await asyncio.gather(
+            self.client.get_orderbook(market.up_token_id),
+            self.client.get_orderbook(market.down_token_id),
+        )
+
+        # Convert to our Orderbook model
+        up_orderbook = Orderbook.from_clob_response(up_response)
+        down_orderbook = Orderbook.from_clob_response(down_response)
+
+        # Check for garbage data from /book endpoint
+        if up_orderbook.is_garbage() or down_orderbook.is_garbage():
+            logger.warning(
+                f"Garbage orderbook detected for {market.slug}: "
+                f"UP={up_orderbook.best_bid}/{up_orderbook.best_ask}, "
+                f"DOWN={down_orderbook.best_bid}/{down_orderbook.best_ask}. "
+                f"Falling back to CLOB /markets endpoint."
+            )
+
+            # Fallback: Get prices from CLOB /markets/{condition_id}
+            try:
+                clob_market = await self.client.get_clob_market(market.condition_id)
+
+                # Extract token prices from CLOB market response
+                up_price = None
+                down_price = None
+
+                for token in clob_market.token_ids:
+                    if token.outcome.upper() in ("UP", "YES"):
+                        up_price = token.price
+                    elif token.outcome.upper() in ("DOWN", "NO"):
+                        down_price = token.price
+
+                if up_price is not None and down_price is not None:
+                    logger.info(
+                        f"Got correct prices from CLOB /markets: "
+                        f"UP=${up_price:.3f}, DOWN=${down_price:.3f}"
+                    )
+
+                    # Create synthetic orderbooks with correct prices
+                    up_orderbook = create_synthetic_orderbook(
+                        market.up_token_id, up_price
+                    )
+                    down_orderbook = create_synthetic_orderbook(
+                        market.down_token_id, down_price
+                    )
+                else:
+                    logger.error(
+                        f"Could not extract prices from CLOB market response: {clob_market}"
+                    )
+
+            except Exception as e:
+                logger.error(f"Failed to fetch CLOB market as fallback: {e}")
+
+        return up_orderbook, down_orderbook
 
     async def analyze_asymmetric_opportunity(
         self,
@@ -483,14 +576,8 @@ class PairAnalyzer:
         Returns:
             AsymmetricOpportunity with buy recommendations for each side
         """
-        # Fetch both orderbooks in parallel for speed
-        up_response, down_response = await asyncio.gather(
-            self.client.get_orderbook(market.up_token_id),
-            self.client.get_orderbook(market.down_token_id),
-        )
-
-        up_orderbook = Orderbook.from_clob_response(up_response)
-        down_orderbook = Orderbook.from_clob_response(down_response)
+        # Fetch orderbooks with fallback for garbage data
+        up_orderbook, down_orderbook = await self._fetch_orderbooks_with_fallback(market)
 
         opportunity = AsymmetricOpportunity(
             market=market,

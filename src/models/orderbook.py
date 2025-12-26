@@ -211,6 +211,28 @@ class Orderbook:
         """Check if orderbook has orders on both sides."""
         return bool(self.bids and self.asks)
 
+    def is_garbage(self) -> bool:
+        """
+        Detect invalid/stale orderbook data from CLOB API.
+
+        The /book endpoint sometimes returns garbage data ($0.01/$0.99)
+        instead of real market prices. This detects that pattern.
+
+        Returns:
+            True if orderbook data appears invalid/stale
+        """
+        # No orders = likely garbage or market not active
+        if not self.bids or not self.asks:
+            return True
+
+        # Extreme spread pattern: $0.01 bid / $0.99 ask
+        # Real markets have spreads around 1-5%, not 97%
+        if self.best_bid is not None and self.best_ask is not None:
+            if self.best_bid <= 0.02 and self.best_ask >= 0.98:
+                return True
+
+        return False
+
     def __repr__(self) -> str:
         bid_str = f"${self.best_bid:.2f}" if self.best_bid else "None"
         ask_str = f"${self.best_ask:.2f}" if self.best_ask else "None"
