@@ -517,14 +517,31 @@ class PairAnalyzer:
                 clob_market = await self.client.get_clob_market(market.condition_id)
 
                 # Extract token prices from CLOB market response
+                # Handle both ClobMarket object and dict response
                 up_price = None
                 down_price = None
 
-                for token in clob_market.token_ids:
-                    if token.outcome.upper() in ("UP", "YES"):
-                        up_price = token.price
-                    elif token.outcome.upper() in ("DOWN", "NO"):
-                        down_price = token.price
+                # Get tokens list (handles both object and dict)
+                if hasattr(clob_market, 'token_ids'):
+                    tokens = clob_market.token_ids
+                elif isinstance(clob_market, dict):
+                    tokens = clob_market.get('tokens', [])
+                else:
+                    tokens = []
+
+                for token in tokens:
+                    # Handle both Token object and dict
+                    if isinstance(token, dict):
+                        outcome = token.get('outcome', '').upper()
+                        price = float(token.get('price', 0))
+                    else:
+                        outcome = token.outcome.upper()
+                        price = token.price
+
+                    if outcome in ("UP", "YES"):
+                        up_price = price
+                    elif outcome in ("DOWN", "NO"):
+                        down_price = price
 
                 if up_price is not None and down_price is not None:
                     logger.info(
