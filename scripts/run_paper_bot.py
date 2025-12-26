@@ -1127,17 +1127,19 @@ class PaperTradingBot:
         Extract end time from market slug's embedded Unix timestamp.
 
         Slug format: btc-updown-15m-1766521800
-        The last segment is a Unix timestamp representing the market end time.
+        The last segment is a Unix timestamp representing the market START time.
+        End time = start time + 15 minutes (900 seconds).
         This is more reliable than cached API data which can vary between requests.
         """
         if not slug:
             return None
         try:
-            # Extract the last segment (Unix timestamp)
+            # Extract the last segment (Unix timestamp = START time)
             parts = slug.split("-")
             if len(parts) >= 4:
-                timestamp = int(parts[-1])
-                return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+                start_timestamp = int(parts[-1])
+                # Add 15 minutes to get end time
+                return datetime.fromtimestamp(start_timestamp + 900, tz=timezone.utc)
         except (ValueError, IndexError):
             pass
         return None
