@@ -5,10 +5,14 @@ Analyzes Up/Down token orderbooks to find pair_cost < $1.00 arbitrage.
 When pair_cost < $1.00, buying both tokens guarantees profit on resolution.
 """
 
+import asyncio
 import logging
-from dataclasses import dataclass
-from typing import Optional, List
+from dataclasses import dataclass, field
+from typing import Optional, List, TYPE_CHECKING
 from datetime import datetime, timezone
+
+if TYPE_CHECKING:
+    from src.models.position import Position
 
 from src.models.market import BTCMarket
 from src.models.orderbook import Orderbook
@@ -221,6 +225,178 @@ class PairOpportunity:
         return "\n".join(lines)
 
 
+@dataclass
+class AsymmetricOpportunity:
+    """
+    Opportunity analysis for gabagool-style asymmetric trading.
+
+    Unlike PairOpportunity which requires both sides cheap NOW,
+    this checks each side independently against the prospective pair cost
+    based on current position.
+
+    Attributes:
+        market: The BTCMarket being analyzed
+        up_orderbook: Current Up token orderbook
+        down_orderbook: Current Down token orderbook
+        current_up_size: Current position Up size
+        current_down_size: Current position Down size
+        current_up_cost: Current position Up cost
+        current_down_cost: Current position Down cost
+        pair_cost_threshold: Maximum pair cost to allow buying (default 0.99)
+    """
+    market: BTCMarket
+    up_orderbook: Orderbook
+    down_orderbook: Orderbook
+    current_up_size: float = 0.0
+    current_down_size: float = 0.0
+    current_up_cost: float = 0.0
+    current_down_cost: float = 0.0
+    pair_cost_threshold: float = 0.99
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @property
+    def up_ask(self) -> Optional[float]:
+        """Best ask price for Up token."""
+        return self.up_orderbook.best_ask
+
+    @property
+    def down_ask(self) -> Optional[float]:
+        """Best ask price for Down token."""
+        return self.down_orderbook.best_ask
+
+    @property
+    def up_bid(self) -> Optional[float]:
+        """Best bid price for Up token (for patient bidding)."""
+        return self.up_orderbook.best_bid
+
+    @property
+    def down_bid(self) -> Optional[float]:
+        """Best bid price for Down token (for patient bidding)."""
+        return self.down_orderbook.best_bid
+
+    @property
+    def up_available_size(self) -> float:
+        """Available size at best ask for Up token."""
+        return self.up_orderbook.best_ask_size
+
+    @property
+    def down_available_size(self) -> float:
+        """Available size at best ask for Down token."""
+        return self.down_orderbook.best_ask_size
+
+    @property
+    def current_pair_cost(self) -> float:
+        """Current average pair cost from existing position."""
+        hedged = min(self.current_up_size, self.current_down_size)
+        if hedged <= 0:
+            return 0.0
+        avg_up = self.current_up_cost / self.current_up_size if self.current_up_size > 0 else 0
+        avg_down = self.current_down_cost / self.current_down_size if self.current_down_size > 0 else 0
+        return avg_up + avg_down
+
+    @property
+    def current_pair_count(self) -> int:
+        """Number of complete pairs in current position."""
+        return int(min(self.current_up_size, self.current_down_size))
+
+    def calculate_prospective_pair_cost(self, side: str, buy_price: float, buy_qty: float) -> float:
+        """
+        Calculate what pair cost would be after a prospective buy.
+
+        Args:
+            side: "UP" or "DOWN"
+            buy_price: Price we'd pay per share
+            buy_qty: Number of shares to buy
+
+        Returns:
+            Prospective pair cost after buy, or inf if no hedge possible
+        """
+        if side.upper() == "UP":
+            new_up_cost = self.current_up_cost + (buy_price * buy_qty)
+            new_up_size = self.current_up_size + buy_qty
+            new_down_cost = self.current_down_cost
+            new_down_size = self.current_down_size
+        else:
+            new_up_cost = self.current_up_cost
+            new_up_size = self.current_up_size
+            new_down_cost = self.current_down_cost + (buy_price * buy_qty)
+            new_down_size = self.current_down_size + buy_qty
+
+        hedged_qty = min(new_up_size, new_down_size)
+        if hedged_qty <= 0:
+            # First buy - return buy price as prospective cost
+            # This allows buying cheap when no hedge exists yet
+            return buy_price
+
+        avg_up = new_up_cost / new_up_size if new_up_size > 0 else 0
+        avg_down = new_down_cost / new_down_size if new_down_size > 0 else 0
+        return avg_up + avg_down
+
+    def should_buy_up(self, buy_qty: float) -> bool:
+        """
+        Check if buying UP would keep pair cost below threshold.
+
+        Args:
+            buy_qty: Number of UP shares to buy
+
+        Returns:
+            True if we should buy
+        """
+        if self.up_ask is None or buy_qty <= 0:
+            return False
+        prospective = self.calculate_prospective_pair_cost("UP", self.up_ask, buy_qty)
+        return prospective < self.pair_cost_threshold
+
+    def should_buy_down(self, buy_qty: float) -> bool:
+        """
+        Check if buying DOWN would keep pair cost below threshold.
+
+        Args:
+            buy_qty: Number of DOWN shares to buy
+
+        Returns:
+            True if we should buy
+        """
+        if self.down_ask is None or buy_qty <= 0:
+            return False
+        prospective = self.calculate_prospective_pair_cost("DOWN", self.down_ask, buy_qty)
+        return prospective < self.pair_cost_threshold
+
+    @property
+    def up_prospective_pair_cost(self) -> Optional[float]:
+        """Prospective pair cost if we bought UP at best ask."""
+        if self.up_ask is None or self.up_available_size <= 0:
+            return None
+        return self.calculate_prospective_pair_cost("UP", self.up_ask, self.up_available_size)
+
+    @property
+    def down_prospective_pair_cost(self) -> Optional[float]:
+        """Prospective pair cost if we bought DOWN at best ask."""
+        if self.down_ask is None or self.down_available_size <= 0:
+            return None
+        return self.calculate_prospective_pair_cost("DOWN", self.down_ask, self.down_available_size)
+
+    @property
+    def up_should_buy(self) -> bool:
+        """Whether we should buy UP based on prospective pair cost."""
+        return self.should_buy_up(self.up_available_size)
+
+    @property
+    def down_should_buy(self) -> bool:
+        """Whether we should buy DOWN based on prospective pair cost."""
+        return self.should_buy_down(self.down_available_size)
+
+    @property
+    def has_opportunity(self) -> bool:
+        """Whether either side should be bought."""
+        return self.up_should_buy or self.down_should_buy
+
+    def __repr__(self) -> str:
+        up_info = f"UP@${self.up_ask:.4f}->{'BUY' if self.up_should_buy else 'SKIP'}" if self.up_ask else "UP:None"
+        down_info = f"DOWN@${self.down_ask:.4f}->{'BUY' if self.down_should_buy else 'SKIP'}" if self.down_ask else "DOWN:None"
+        return f"AsymmetricOpportunity({self.market.slug}, {up_info}, {down_info}, pairs={self.current_pair_count})"
+
+
 class PairAnalyzer:
     """
     Service for analyzing BTC Up/Down markets for trading opportunities.
@@ -256,9 +432,11 @@ class PairAnalyzer:
         Returns:
             PairOpportunity with analysis results
         """
-        # Fetch both orderbooks
-        up_response = await self.client.get_orderbook(market.up_token_id)
-        down_response = await self.client.get_orderbook(market.down_token_id)
+        # Fetch both orderbooks in parallel for speed
+        up_response, down_response = await asyncio.gather(
+            self.client.get_orderbook(market.up_token_id),
+            self.client.get_orderbook(market.down_token_id),
+        )
 
         # Convert to our Orderbook model
         up_orderbook = Orderbook.from_clob_response(up_response)
@@ -274,6 +452,64 @@ class PairAnalyzer:
             f"Analyzed {market.slug}: pair_cost=${opportunity.pair_cost:.4f}, "
             f"profitable={opportunity.is_profitable}"
             if opportunity.pair_cost else f"Analyzed {market.slug}: no liquidity"
+        )
+
+        return opportunity
+
+    async def analyze_asymmetric_opportunity(
+        self,
+        market: BTCMarket,
+        current_up_size: float = 0.0,
+        current_down_size: float = 0.0,
+        current_up_cost: float = 0.0,
+        current_down_cost: float = 0.0,
+        pair_cost_threshold: float = 0.99,
+    ) -> AsymmetricOpportunity:
+        """
+        Analyze market for asymmetric trading opportunity.
+
+        This is the gabagool-style analysis: instead of checking if
+        pair_cost < $1.00 right now, we check if buying either side
+        would keep our AVERAGE pair cost below threshold.
+
+        Args:
+            market: BTCMarket to analyze
+            current_up_size: Current UP position size
+            current_down_size: Current DOWN position size
+            current_up_cost: Total cost of current UP position
+            current_down_cost: Total cost of current DOWN position
+            pair_cost_threshold: Max acceptable pair cost (default 0.99)
+
+        Returns:
+            AsymmetricOpportunity with buy recommendations for each side
+        """
+        # Fetch both orderbooks in parallel for speed
+        up_response, down_response = await asyncio.gather(
+            self.client.get_orderbook(market.up_token_id),
+            self.client.get_orderbook(market.down_token_id),
+        )
+
+        up_orderbook = Orderbook.from_clob_response(up_response)
+        down_orderbook = Orderbook.from_clob_response(down_response)
+
+        opportunity = AsymmetricOpportunity(
+            market=market,
+            up_orderbook=up_orderbook,
+            down_orderbook=down_orderbook,
+            current_up_size=current_up_size,
+            current_down_size=current_down_size,
+            current_up_cost=current_up_cost,
+            current_down_cost=current_down_cost,
+            pair_cost_threshold=pair_cost_threshold,
+        )
+
+        logger.debug(
+            f"Asymmetric analysis {market.slug}: "
+            f"UP@${opportunity.up_ask:.4f}->{'BUY' if opportunity.up_should_buy else 'SKIP'}, "
+            f"DOWN@${opportunity.down_ask:.4f}->{'BUY' if opportunity.down_should_buy else 'SKIP'}, "
+            f"current_pairs={opportunity.current_pair_count}"
+            if opportunity.up_ask and opportunity.down_ask else
+            f"Asymmetric analysis {market.slug}: no liquidity"
         )
 
         return opportunity

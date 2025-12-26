@@ -23,102 +23,60 @@ from src.models.position import Position, Fill
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class LivePosition:
+def calculate_dynamic_timeout(time_remaining_secs: float, is_emergency: bool = False) -> float:
     """
-    Tracks a live position in a market.
+    Calculate appropriate order timeout based on time remaining in market.
 
-    Mirrors PaperPosition interface for compatibility with bot.
+    Returns shorter timeouts when less time remains to avoid hanging orders
+    that waste valuable trading time.
+
+    Args:
+        time_remaining_secs: Seconds until market ends
+        is_emergency: If True, return minimum timeout for urgent situations
+
+    Returns:
+        Timeout in seconds (3.0 to 30.0)
     """
-    market_slug: str
-    up_shares: float = 0.0
-    down_shares: float = 0.0
-    up_avg_price: float = 0.0
-    down_avg_price: float = 0.0
-    up_cost: float = 0.0
-    down_cost: float = 0.0
-    realized_pnl: float = 0.0
-    fills: List[Dict[str, Any]] = field(default_factory=list)
-    # Store token IDs for emergency sell
-    up_token_id: Optional[str] = None
-    down_token_id: Optional[str] = None
+    if is_emergency:
+        return 3.0
+    if time_remaining_secs > 600:   # >10 min: full patience
+        return 30.0
+    if time_remaining_secs > 300:   # 5-10 min: moderate patience
+        return 20.0
+    if time_remaining_secs > 120:   # 2-5 min: reduced patience
+        return 10.0
+    # <2 min: minimal patience
+    return 5.0
 
-    @property
-    def pair_count(self) -> float:
-        """Number of complete pairs (min of UP and DOWN)."""
-        return min(self.up_shares, self.down_shares)
 
-    @property
-    def total_cost(self) -> float:
-        """Total cost of position."""
-        return self.up_cost + self.down_cost
+def calculate_fallback_price(best_ask: float, urgency: str = "normal") -> float:
+    """
+    Calculate fallback price when patient pricing fails.
 
-    @property
-    def avg_pair_cost(self) -> float:
-        """Average pair cost (UP avg + DOWN avg)."""
-        if self.pair_count == 0:
-            return 0.0
-        return self.up_avg_price + self.down_avg_price
+    Progressively more aggressive pricing based on urgency level.
 
-    def calculate_expected_pnl_range(self) -> tuple:
-        """
-        Calculate expected P&L range based on resolution scenarios.
+    Args:
+        best_ask: Current best ask price
+        urgency: "normal", "urgent", or "critical"
 
-        Returns:
-            Tuple of (min_pnl, max_pnl, locked_profit)
-        """
-        # Complete pairs: guaranteed $1 each, profit = $1 - pair_cost
-        pairs = self.pair_count
-        locked_profit = pairs * (1.0 - self.avg_pair_cost) if pairs > 0 else 0.0
+    Returns:
+        Fallback price (more likely to fill)
+    """
+    if urgency == "normal":
+        # Slight improvement over patient price
+        return min(0.98, best_ask + 0.005)
+    if urgency == "urgent":
+        # Meet the ask
+        return min(0.98, best_ask)
+    if urgency == "critical":
+        # Improve slightly over ask
+        return min(0.98, best_ask + 0.01)
+    return min(0.98, best_ask + 0.02)  # panic
 
-        # Unhedged exposure
-        unhedged_up = self.up_shares - pairs
-        unhedged_down = self.down_shares - pairs
 
-        # UP wins: unhedged UP worth $1 each, unhedged DOWN worth $0
-        up_scenario = locked_profit + unhedged_up - (unhedged_up * self.up_avg_price if unhedged_up > 0 else 0)
-
-        # DOWN wins: unhedged DOWN worth $1 each, unhedged UP worth $0
-        down_scenario = locked_profit + unhedged_down - (unhedged_down * self.down_avg_price if unhedged_down > 0 else 0)
-
-        # Adjust for cost of unhedged
-        if unhedged_up > 0:
-            up_scenario = locked_profit + unhedged_up * (1.0 - self.up_avg_price)
-            down_scenario = locked_profit - unhedged_up * self.up_avg_price
-        elif unhedged_down > 0:
-            up_scenario = locked_profit - unhedged_down * self.down_avg_price
-            down_scenario = locked_profit + unhedged_down * (1.0 - self.down_avg_price)
-        else:
-            up_scenario = locked_profit
-            down_scenario = locked_profit
-
-        min_pnl = min(up_scenario, down_scenario)
-        max_pnl = max(up_scenario, down_scenario)
-
-        return (min_pnl, max_pnl, locked_profit)
-
-    def add_fill(self, side: str, price: float, size: float, cost: float) -> None:
-        """Record a fill and update averages."""
-        if side.upper() == "UP":
-            new_cost = self.up_cost + cost
-            new_shares = self.up_shares + size
-            self.up_avg_price = new_cost / new_shares if new_shares > 0 else price
-            self.up_shares = new_shares
-            self.up_cost = new_cost
-        else:
-            new_cost = self.down_cost + cost
-            new_shares = self.down_shares + size
-            self.down_avg_price = new_cost / new_shares if new_shares > 0 else price
-            self.down_shares = new_shares
-            self.down_cost = new_cost
-
-        self.fills.append({
-            "side": side.upper(),
-            "price": price,
-            "size": size,
-            "cost": cost,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
+# LivePosition has been consolidated into the unified Position class
+# in src/models/position.py. This eliminates ~140 lines of duplicate code
+# and ensures paper and live trading use identical position calculations.
 
 
 class LiveTradingEngine:
@@ -162,7 +120,7 @@ class LiveTradingEngine:
         self.client = client
         self._starting_balance = starting_balance
         self._cached_balance: Optional[float] = None
-        self._positions: Dict[str, LivePosition] = {}
+        self._positions: Dict[str, Position] = {}
         self._realized_pnl: float = 0.0
         self._trade_count: int = 0
         self._use_fok = use_fok
@@ -179,7 +137,7 @@ class LiveTradingEngine:
         return self._cached_balance
 
     @property
-    def positions(self) -> List[LivePosition]:
+    def positions(self) -> List[Position]:
         """List of all positions."""
         return list(self._positions.values())
 
@@ -261,7 +219,7 @@ class LiveTradingEngine:
 
             await asyncio.sleep(poll_interval)
 
-    def get_position(self, market: BTCMarket) -> Optional[LivePosition]:
+    def get_position(self, market: BTCMarket) -> Optional[Position]:
         """Get position for a market."""
         return self._positions.get(market.slug)
 
@@ -283,6 +241,9 @@ class LiveTradingEngine:
         side: str,
         price: float,
         size: float,
+        best_ask: float = None,
+        time_remaining: float = None,
+        enable_fallback: bool = True,
     ) -> Dict[str, Any]:
         """
         Execute a single-side LIVE trade (UP or DOWN only).
@@ -292,6 +253,9 @@ class LiveTradingEngine:
             side: "UP" or "DOWN"
             price: The price to buy at
             size: Number of shares to buy
+            best_ask: Current best ask (used for fallback pricing)
+            time_remaining: Seconds until market ends (for dynamic timeout)
+            enable_fallback: If True and patient price times out, retry at aggressive price
 
         Returns:
             Dict with trade result:
@@ -301,6 +265,7 @@ class LiveTradingEngine:
                 - cost: float
                 - trade_id: str
                 - order_id: str (from Polymarket)
+                - used_fallback: bool (if fallback pricing was used)
         """
         trade_id = f"LIVE-{uuid.uuid4().hex[:8]}"
         side_upper = side.upper()
@@ -337,7 +302,7 @@ class LiveTradingEngine:
                 # Update position
                 position = self._positions.get(market.slug)
                 if position is None:
-                    position = LivePosition(market_slug=market.slug)
+                    position = Position(market_slug=market.slug)
                     self._positions[market.slug] = position
 
                 # Store token ID for emergency sell capability
@@ -367,11 +332,16 @@ class LiveTradingEngine:
                 }
             elif status == "LIVE" and not self._use_fok:
                 # GTC order is live (sitting in orderbook) - poll until filled or timeout
-                logger.info(f"[LIVE] GTC order LIVE, polling for fill (timeout=30s)...")
+                # Use dynamic timeout based on time remaining in market
+                timeout = calculate_dynamic_timeout(
+                    time_remaining_secs=time_remaining if time_remaining else 600,
+                    is_emergency=False,
+                )
+                logger.info(f"[LIVE] GTC order LIVE, polling for fill (timeout={timeout:.0f}s)...")
                 poll_result = await self._poll_order_until_filled(
                     order_id=order_id,
                     requested_size=size,
-                    timeout_seconds=30.0,
+                    timeout_seconds=timeout,
                     poll_interval=2.0,
                 )
 
@@ -383,7 +353,7 @@ class LiveTradingEngine:
                     # Update position with ACTUAL filled size (may be partial)
                     position = self._positions.get(market.slug)
                     if position is None:
-                        position = LivePosition(market_slug=market.slug)
+                        position = Position(market_slug=market.slug)
                         self._positions[market.slug] = position
 
                     if side_upper == "UP":
@@ -416,8 +386,40 @@ class LiveTradingEngine:
                         "partial": filled_size < size,
                     }
                 else:
-                    # No fill after timeout
-                    logger.info(f"[LIVE] Order unfilled after 30s timeout, skipping")
+                    # No fill after timeout - try fallback pricing if enabled
+                    logger.info(f"[LIVE] Order unfilled after {timeout:.0f}s timeout")
+
+                    # Determine if fallback is viable
+                    should_fallback = (
+                        enable_fallback and
+                        best_ask is not None and
+                        time_remaining is not None and
+                        time_remaining < 300  # Only fallback with <5 min remaining
+                    )
+
+                    if should_fallback:
+                        urgency = "urgent" if time_remaining < 120 else "normal"
+                        fallback_price = calculate_fallback_price(best_ask, urgency)
+                        logger.info(
+                            f"[LIVE] Retrying at fallback price ${fallback_price:.4f} "
+                            f"(was ${price:.4f}, urgency={urgency})"
+                        )
+
+                        # Recursive call with fallback disabled to prevent infinite loop
+                        fallback_result = await self.execute_single_side_trade(
+                            market=market,
+                            side=side,
+                            price=fallback_price,
+                            size=size,
+                            best_ask=best_ask,
+                            time_remaining=time_remaining,
+                            enable_fallback=False,  # Prevent infinite recursion
+                        )
+                        fallback_result["used_fallback"] = True
+                        fallback_result["original_price"] = price
+                        return fallback_result
+
+                    # No fallback - return failure
                     return {
                         "success": False,
                         "filled_size": 0,
@@ -426,6 +428,7 @@ class LiveTradingEngine:
                         "trade_id": trade_id,
                         "order_id": order_id,
                         "error": "Timeout - no fill",
+                        "used_fallback": False,
                     }
             else:
                 # CANCELLED (FOK couldn't fill) or other status
@@ -505,7 +508,7 @@ class LiveTradingEngine:
 
         return pnl
 
-    async def sync_position(self, market: BTCMarket) -> Optional[LivePosition]:
+    async def sync_position(self, market: BTCMarket) -> Optional[Position]:
         """
         Sync position from chain for a market.
 
@@ -518,11 +521,11 @@ class LiveTradingEngine:
             if up_balance > 0 or down_balance > 0:
                 position = self._positions.get(market.slug)
                 if position is None:
-                    position = LivePosition(market_slug=market.slug)
+                    position = Position(market_slug=market.slug)
                     self._positions[market.slug] = position
 
-                position.up_shares = up_balance
-                position.down_shares = down_balance
+                # Use sync_balances() to update position from chain
+                position.sync_balances(up_balance, down_balance)
 
                 logger.debug(
                     f"Position synced for {market.slug}: "

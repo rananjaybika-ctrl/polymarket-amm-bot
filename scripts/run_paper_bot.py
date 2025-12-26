@@ -48,8 +48,10 @@ from src.api.binance_client import BinanceClient
 from src.utils.telegram_notifier import TelegramNotifier
 from src.services.market_finder import MarketFinder
 from src.services.market_rotator import MarketRotator
+from src.services.state_persistence import StatePersistence, PersistedState
 from src.services.pair_analyzer import PairAnalyzer, AsymmetricOpportunity
-from src.services.paper_trading import PaperTradingEngine, SimulationConfig, PaperPosition
+from src.services.paper_trading import PaperTradingEngine, SimulationConfig
+from src.models.position import Position  # Unified position model for paper and live trading
 from src.services.live_trading import LiveTradingEngine
 from src.api.polymarket_client import PolymarketClient
 from src.services.directional_strategy import (
@@ -191,6 +193,48 @@ def calculate_dynamic_trade_size(
     return max(min_size, size)
 
 
+def get_patient_price(
+    best_bid: float,
+    best_ask: float,
+    time_remaining_secs: float,
+    is_emergency: bool = False
+) -> float:
+    """
+    Calculate patient bid price based on time window (Gabagool-style).
+
+    For Standard and VW modes (spread-focused strategies), we want to:
+    - Post limit orders BELOW best ask (maker behavior)
+    - Progressively get more aggressive as time runs out
+    - Only take liquidity at ask in emergency situations
+
+    Time windows:
+    - Early (10-15 min): best_bid - 0.02 (very patient)
+    - Mid (5-10 min): best_bid - 0.01 (moderate)
+    - Late (0-5 min): mid_price (split the spread)
+    - Emergency: best_ask (taker, immediate fill)
+
+    Args:
+        best_bid: Current best bid price
+        best_ask: Current best ask price
+        time_remaining_secs: Seconds until market resolution
+        is_emergency: If True, use aggressive pricing (best_ask)
+
+    Returns:
+        Patient bid price (clamped to minimum 0.01)
+    """
+    if is_emergency:
+        return best_ask
+
+    if time_remaining_secs >= 600:  # 10+ min remaining (early window)
+        price = best_bid - 0.02
+    elif time_remaining_secs >= 300:  # 5-10 min remaining (mid window)
+        price = best_bid - 0.01
+    else:  # 0-5 min remaining (late window)
+        price = (best_bid + best_ask) / 2
+
+    return max(0.01, price)
+
+
 class PaperTradingBot:
     """
     Standalone paper trading bot with CSV logging and Discord notifications.
@@ -210,17 +254,18 @@ class PaperTradingBot:
         accum_trade_size: int = 1,  # Shares per trade (small, frequent)
         accum_pair_cost_target: float = 0.995,  # Target pair cost for normal trading
         accum_pair_cost_limit: float = 1.02,  # Max pair cost for rebalancing
-        accum_max_imbalance_shares: int = 5,  # Max share difference before forcing rebalance
-        accum_target_shares: int = 15,  # Target shares per side per market
+        accum_max_imbalance_pct: float = 0.15,  # Max imbalance as % of target (15% = gabagool-style)
+        accum_target_shares: int = 50,  # Target shares per side per market (capped by max_position_pct)
         accum_buy_both_sides: bool = True,  # Try to buy both sides each cycle
+        max_position_pct: float = 0.15,  # Max shares per side as % of balance (15% of $100 = 15 shares)
         accum_max_share_price: float = 0.98,  # Never buy shares above this price (Gabagool buys up to $0.98)
         # VOLUME WEIGHTED MODE - Gabagool-style accumulation
         accum_mode: str = "standard",  # "standard" or "volume_weighted"
         # GABAGOOL-STYLE SETTINGS (reverse-engineered from their Dec 2024 behavior)
-        vw_imbalance_pct: float = 0.40,  # Max 40% imbalance (gabagool avg: 39.6%)
+        vw_imbalance_pct: float = 0.20,  # Max 20% imbalance (gabagool: 10-20%)
         vw_cheap_threshold: float = 0.45,  # Buy aggressively below this (gabagool loads up < $0.45)
-        vw_hedge_trigger_pct: float = 0.30,  # Start hedging at 30% imbalance (not 5%!)
-        vw_max_hedge_price: float = 0.70,  # NEVER pay > $0.70 for hedge (gabagool max: $0.87, but safer)
+        vw_hedge_trigger_pct: float = 0.15,  # Start hedging at 15% imbalance (gabagool: ~15-20%)
+        vw_max_hedge_price: float = 0.85,  # Max hedge price $0.85 (gabagool: up to $0.87)
         vw_bootstrap_pct: float = 0.33,  # Bootstrap phase: buy both sides until 33% of target (gabagool: ~1.5% but we need more for smaller positions)
         # DIRECTIONAL MODE - Bias-based trading with Binance price feed
         directional_mode: bool = False,
@@ -232,10 +277,29 @@ class PaperTradingBot:
         strategy_name: str = "accumulation",
         # Trading mode: "paper" or "live"
         trading_mode: str = "paper",
+        # Quiet mode: suppress per-second status logs
+        quiet_mode: bool = False,
+        # Session time window (UTC) - only trade markets ending within this window
+        session_start_utc: Optional[datetime] = None,
+        session_end_utc: Optional[datetime] = None,
     ):
         self.initial_balance = initial_balance
         self.trading_mode = trading_mode
-        self.csv_path = Path(csv_path)
+        self.quiet_mode = quiet_mode
+
+        # CRITICAL: Session time window for market selection enforcement
+        self.session_start_utc = session_start_utc
+        self.session_end_utc = session_end_utc
+        if session_start_utc and session_end_utc:
+            logger.info(
+                f"Session time window configured: "
+                f"{session_start_utc.isoformat()} to {session_end_utc.isoformat()}"
+            )
+        # Daily CSV rotation: extract base name and add date
+        self._csv_base_name = Path(csv_path).stem  # e.g., "paper_trades_directional"
+        self._csv_dir = Path(csv_path).parent or Path(".")
+        self._csv_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self.csv_path = self._csv_dir / f"{self._csv_base_name}_{self._csv_date}.csv"
         self.discord_interval = timedelta(minutes=discord_interval_minutes)
 
         # Retry configuration for network resilience
@@ -248,8 +312,12 @@ class PaperTradingBot:
         self.accum_trade_size = accum_trade_size
         self.accum_pair_cost_target = accum_pair_cost_target
         self.accum_pair_cost_limit = accum_pair_cost_limit
-        self.accum_max_imbalance_shares = accum_max_imbalance_shares
-        self.accum_target_shares = accum_target_shares
+        self.accum_max_imbalance_pct = accum_max_imbalance_pct
+        self.max_position_pct = max_position_pct
+        # Calculate max allowed shares from max_position_pct (15% of $100 = 15 shares)
+        max_shares_from_pct = int(max_position_pct * initial_balance)
+        # Use the minimum of explicit target and calculated max
+        self.accum_target_shares = min(accum_target_shares, max_shares_from_pct)
         self.accum_buy_both_sides = accum_buy_both_sides
         self.accum_max_share_price = accum_max_share_price
 
@@ -285,6 +353,10 @@ class PaperTradingBot:
         # Telegram notifications and remote control
         self._telegram: Optional[TelegramNotifier] = None
 
+        # State persistence for crash recovery
+        self._state_persistence: Optional[StatePersistence] = None
+        self._persisted_state: Optional[PersistedState] = None
+
         # State
         self._running = False
         self._graceful_stop_requested = False  # Stop after current market ends
@@ -307,6 +379,46 @@ class PaperTradingBot:
 
         # Web UI callback
         self._web_callback = web_callback
+
+    async def _schedule_claim_scans(
+        self,
+        market_slug: str,
+        condition_id: str,
+        amounts: List[float],
+        winner: str,
+        winning_shares: float,
+    ) -> None:
+        """Schedule 2 claim scans: at 5 min and 10 min after market end.
+
+        This is a simple approach - try twice, then move on.
+        """
+        for delay_minutes in [5, 10]:
+            await asyncio.sleep(delay_minutes * 60)
+            if not self._running:
+                logger.info(f"[CLAIM] Bot stopped, skipping remaining scans for {market_slug}")
+                break
+            try:
+                receipt = await self._client.redeem_positions(
+                    condition_id=condition_id,
+                    amounts=amounts,
+                    neg_risk=False,
+                )
+                tx_hash = receipt.get("transaction_hash", "")[:16] if receipt else ""
+                logger.info(f"✅ [CLAIM] {winning_shares:.2f} {winner} from {market_slug} (scan at {delay_minutes}min) tx: {tx_hash}...")
+                if self._telegram:
+                    try:
+                        await self._telegram.send_info(
+                            f"✅ Claimed {winning_shares:.2f} {winner} → ${winning_shares:.2f}"
+                        )
+                    except Exception:
+                        pass
+                return  # Success, no need for second scan
+            except Exception as e:
+                err_msg = str(e)[:80]
+                if delay_minutes == 10:
+                    logger.warning(f"[CLAIM] Failed after both scans for {market_slug}: {err_msg}")
+                else:
+                    logger.info(f"[CLAIM] Scan at {delay_minutes}min failed, will retry at 10min: {err_msg}")
 
     async def _interruptible_sleep(self, total_seconds: float, check_interval: float = 5.0) -> bool:
         """Sleep that can be interrupted by stop signal.
@@ -331,6 +443,8 @@ class PaperTradingBot:
         config: dict,
         web_callback: Optional[Callable[[dict], None]] = None,
         strategy_name: str = "accumulation",
+        session_start_utc: Optional[datetime] = None,
+        session_end_utc: Optional[datetime] = None,
     ) -> "PaperTradingBot":
         """Create bot instance from web UI configuration.
 
@@ -338,6 +452,8 @@ class PaperTradingBot:
             config: Dictionary with web UI configuration values
             web_callback: Optional callback for web UI updates
             strategy_name: Strategy identifier for Discord and web UI (e.g., "standard", "volume_weighted")
+            session_start_utc: UTC start time - only trade markets ending AFTER this
+            session_end_utc: UTC end time - only trade markets ending BEFORE this
 
         Returns:
             PaperTradingBot instance configured from web UI
@@ -360,16 +476,16 @@ class PaperTradingBot:
             accum_max_share_price=config.get("max_share_price", 0.95),
             accum_trade_size=config.get("accum_trade_size", 1),
             accum_target_shares=config.get("accum_target_shares", 15),
-            accum_max_imbalance_shares=config.get("accum_max_imbalance", 5),
+            accum_max_imbalance_pct=config.get("accum_max_imbalance_pct", 0.15),
             accum_pair_cost_target=config.get("accum_pair_cost_target", 0.995),
             accum_pair_cost_limit=config.get("accum_pair_cost_limit", 1.02),
             accum_buy_both_sides=config.get("accum_buy_both_sides", True),
             # Volume Weighted mode params (only used when accum_mode="volume_weighted")
             # Gabagool-style settings
-            vw_imbalance_pct=config.get("vw_imbalance_pct", 0.40),
+            vw_imbalance_pct=config.get("vw_imbalance_pct", 0.20),
             vw_cheap_threshold=config.get("vw_cheap_threshold", 0.45),
-            vw_hedge_trigger_pct=config.get("vw_hedge_trigger_pct", 0.30),
-            vw_max_hedge_price=config.get("vw_max_hedge_price", 0.70),
+            vw_hedge_trigger_pct=config.get("vw_hedge_trigger_pct", 0.15),
+            vw_max_hedge_price=config.get("vw_max_hedge_price", 0.85),
             vw_bootstrap_pct=config.get("vw_bootstrap_pct", 0.33),
             # Output
             csv_path=csv_path,
@@ -380,6 +496,9 @@ class PaperTradingBot:
             strategy_name=strategy_name,
             # Trading mode
             trading_mode=trading_mode,
+            # CRITICAL: Session time window for market selection enforcement
+            session_start_utc=session_start_utc,
+            session_end_utc=session_end_utc,
         )
 
     @classmethod
@@ -387,12 +506,16 @@ class PaperTradingBot:
         cls,
         config: dict,
         web_callback: Optional[Callable[[dict], None]] = None,
+        session_start_utc: Optional[datetime] = None,
+        session_end_utc: Optional[datetime] = None,
     ) -> "PaperTradingBot":
         """Create bot instance from Directional web UI configuration.
 
         Args:
             config: Dictionary with directional configuration values
             web_callback: Optional callback for web UI updates
+            session_start_utc: UTC start time - only trade markets ending AFTER this
+            session_end_utc: UTC end time - only trade markets ending BEFORE this
 
         Returns:
             PaperTradingBot instance configured for directional mode
@@ -404,6 +527,7 @@ class PaperTradingBot:
             sustained_seconds=config.get("sustained_seconds", 30.0),
             window_seconds=config.get("window_seconds", 60),
             max_position_pct=config.get("max_position_pct", 0.15),
+            target_shares=config.get("target_shares", 15),
             trade_size_pct=config.get("trade_size_pct", 0.3333),
             trade_size=config.get("trade_size", 5),
             hedge_increment=config.get("hedge_increment", 5),
@@ -429,6 +553,9 @@ class PaperTradingBot:
             web_callback=web_callback,
             # Strategy name
             strategy_name="directional",
+            # CRITICAL: Session time window for market selection enforcement
+            session_start_utc=session_start_utc,
+            session_end_utc=session_end_utc,
         )
 
     async def initialize(self) -> None:
@@ -440,7 +567,7 @@ class PaperTradingBot:
         await self._client.connect()
 
         # Initialize Telegram for notifications and remote control
-        self._telegram = TelegramNotifier(self._config)
+        self._telegram = TelegramNotifier(self._config, trading_mode=self.trading_mode)
         if self._telegram.enabled:
             # Register command handlers
             self._telegram.on_stop(self._handle_telegram_stop)
@@ -480,6 +607,36 @@ class PaperTradingBot:
             await self._telegram.send_control_panel()
             logger.info("Telegram remote control enabled")
 
+        # Initialize state persistence for crash recovery
+        self._state_persistence = StatePersistence(
+            state_dir=project_root / "state",
+            strategy_name=self.strategy_name,
+            trading_mode=self.trading_mode,
+        )
+
+        # Try to load previous state (for crash recovery)
+        loaded_state = self._state_persistence.load()
+        if loaded_state:
+            logger.info(
+                f"[STATE] Recovered state: balance=${loaded_state.balance:.2f}, "
+                f"positions={len(loaded_state.positions)}, trades={loaded_state.trade_count}"
+            )
+            self._persisted_state = loaded_state
+            # TODO: Could restore balance/positions from loaded state for live mode
+        else:
+            # Create fresh state
+            self._persisted_state = PersistedState(
+                strategy_name=self.strategy_name,
+                trading_mode=self.trading_mode,
+                balance=self.initial_balance,
+                initial_balance=self.initial_balance,
+                realized_pnl=0.0,
+                session_start=datetime.now(timezone.utc).isoformat(),
+                last_save=datetime.now(timezone.utc).isoformat(),
+                trade_count=0,
+            )
+            logger.info("[STATE] Starting with fresh state")
+
         self._finder = MarketFinder()
         self._analyzer = PairAnalyzer(self._client)
 
@@ -495,6 +652,18 @@ class PaperTradingBot:
             # Sync balance from chain
             await self._engine.sync_balance()
             logger.info(f"Live balance: ${self._engine.balance:.2f}")
+
+            # AUTO-CLAIM: Disabled at startup for faster init - claims happen at resolution
+            # To re-enable: uncomment below
+            # logger.info("[AUTO-CLAIM] Scanning for unclaimed positions (last 30 min)...")
+            # try:
+            #     claimed = await self._client.scan_and_claim_recent_markets(hours_back=1)
+            #     if claimed:
+            #         logger.info(f"[AUTO-CLAIM] ✅ Claimed {len(claimed)} positions!")
+            #         await self._engine.sync_balance()
+            #         logger.info(f"[AUTO-CLAIM] New balance: ${self._engine.balance:.2f}")
+            # except Exception as e:
+            #     logger.warning(f"[AUTO-CLAIM] Scan failed (non-critical): {e}")
 
             # Check for existing positions from previous sessions
             existing = await self._check_existing_positions()
@@ -527,21 +696,34 @@ class PaperTradingBot:
             )
 
         # Try continuous mode first, fall back to session mode
+        # CRITICAL: Pass session time window to enforce market selection
         self._rotator = MarketRotator(
             finder=self._finder,
             continuous=True,
             market_window_minutes=60,
+            session_start_utc=self.session_start_utc,
+            session_end_utc=self.session_end_utc,
         )
 
         # Check if markets available in continuous mode
-        window_markets = await self._finder.get_markets_in_window(hours=1.0)
+        # Use time-range based check if session window is configured
+        if self.session_start_utc and self.session_end_utc:
+            window_markets = await self._finder.get_markets_in_time_range(
+                start_utc=self.session_start_utc,
+                end_utc=self.session_end_utc,
+            )
+        else:
+            window_markets = await self._finder.get_markets_in_window(hours=1.0)
+
         if not window_markets:
-            logger.info("No markets in 60-min window, using session mode")
+            logger.info("No markets in configured time window, using session mode")
             self._rotator = MarketRotator(
                 finder=self._finder,
                 continuous=False,  # Session mode
                 max_markets=100,
                 market_window_minutes=60,
+                session_start_utc=self.session_start_utc,
+                session_end_utc=self.session_end_utc,
             )
 
         # Initialize CSV
@@ -663,6 +845,61 @@ class PaperTradingBot:
                 ])
             logger.info(f"Created CSV log: {self.csv_path}")
 
+    def _check_csv_rotation(self) -> None:
+        """Check if date changed and rotate to new CSV file if needed.
+
+        This enables seamless overnight trading - when midnight UTC passes,
+        the next trade automatically goes to a new dated file.
+        """
+        current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if current_date != self._csv_date:
+            logger.info(f"Date changed {self._csv_date} -> {current_date}, rotating CSV file")
+            self._csv_date = current_date
+            self.csv_path = self._csv_dir / f"{self._csv_base_name}_{self._csv_date}.csv"
+            self._init_csv()  # Create new file with headers
+
+    def _save_state_if_needed(self, force: bool = False) -> None:
+        """
+        Save state to disk if enough time has passed or if forced.
+
+        Called after trades and periodically during trading loop.
+
+        Args:
+            force: If True, save regardless of time elapsed
+        """
+        if not self._state_persistence or not self._persisted_state:
+            return
+
+        # Save every 60 seconds, or immediately if forced (after trades)
+        if force or self._state_persistence.should_save(interval_seconds=60.0):
+            # Update state with current values
+            if self._engine:
+                self._persisted_state.balance = self._engine.balance
+            self._persisted_state.trade_count = self._trade_count
+            if self._rotator and self._rotator.current_market:
+                self._persisted_state.current_market_slug = self._rotator.current_market.slug
+
+            # Update position for current market
+            if self._rotator and self._rotator.current_market and self._engine:
+                market = self._rotator.current_market
+                position = self._engine.get_position(market)
+                if position:
+                    self._state_persistence.update_position(
+                        state=self._persisted_state,
+                        market_slug=market.slug,
+                        up_shares=position.up_size,
+                        up_avg_price=position.up_avg_price,
+                        down_shares=position.down_size,
+                        down_avg_price=position.down_avg_price,
+                        hedged_pairs=position.pair_count,
+                        pair_cost=position.up_avg_price + position.down_avg_price if position.pair_count > 0 else 0,
+                        locked_profit=position.locked_profit,
+                    )
+
+            # Save to disk
+            if self._state_persistence.save(self._persisted_state):
+                logger.debug("[STATE] State saved to disk")
+
     def _log_trade_csv(
         self,
         market_slug: str,
@@ -698,7 +935,7 @@ class PaperTradingBot:
         size_filled: float,
         price: float,
         cost: float,
-        position,  # PaperPosition or None
+        position,  # Position or None
         pnl_realized: float = 0,
         status: str = "SUCCESS",
     ) -> None:
@@ -734,6 +971,9 @@ class PaperTradingBot:
             pos_pairs = pos_pair_cost = pos_locked = pos_imbalance = 0
             min_pnl = max_pnl = 0
 
+        # Check for daily rotation before writing
+        self._check_csv_rotation()
+
         with open(self.csv_path, 'a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([
@@ -760,6 +1000,10 @@ class PaperTradingBot:
                 f"{self._engine.balance:.2f}",
                 status,
             ])
+
+        # Save state after every trade event
+        if event_type in ("TRADE", "RESOLUTION"):
+            self._save_state_if_needed(force=True)
 
     def _build_live_display(self) -> Panel:
         """Build the rich live display panel showing current position."""
@@ -942,6 +1186,7 @@ class PaperTradingBot:
             "pnl_max": 0,
             "balance": self._engine.balance if self._engine else 0,
             "target_shares": self.accum_target_shares,
+            "realized_pnl": self._engine.get_realized_pnl() if self._engine else 0,
         }
 
         if position:
@@ -962,6 +1207,15 @@ class PaperTradingBot:
             metrics["pnl_min"] = min_pnl
             metrics["pnl_max"] = max_pnl
 
+        # Get directional status if in directional mode
+        directional_status = None
+        if self.directional_mode and self._directional_strategy:
+            status = self._directional_strategy.get_status_dict()
+            directional_status = {
+                "bias": status.get("bias", "BULLISH"),
+                "flip_count": status.get("flip_count", 0),
+            }
+
         return {
             "type": "trading_update",
             "strategy": self.strategy_name,  # Strategy identifier for web UI routing
@@ -972,6 +1226,7 @@ class PaperTradingBot:
             "metrics": metrics,
             "trade_count": self._trade_count,
             "total_pairs": self._total_pairs,
+            "directional_status": directional_status,
         }
 
     def _send_web_update(self) -> None:
@@ -988,7 +1243,8 @@ class PaperTradingBot:
         if self._web_callback:
             try:
                 # Get current position for the after state
-                pos = self._engine.get_position(self._current_market) if self._current_market else None
+                market = self._rotator.current_market if self._rotator else None
+                pos = self._engine.get_position(market) if market else None
                 position_after = {
                     "up": int(pos.up_size) if pos else 0,
                     "down": int(pos.down_size) if pos else 0
@@ -1447,7 +1703,10 @@ class PaperTradingBot:
             logger.info("DIRECTIONAL MODE - Bias-Based Trading")
             logger.info("=" * 50)
             logger.info(f"  - Initial bias: {self.initial_bias.value}")
-            logger.info(f"  - Max position: {self.directional_config.max_position_pct*100:.0f}% per side")
+            # Calculate effective target (min of config target and max_position_pct limit)
+            max_shares_from_pct = int(self.directional_config.max_position_pct * self.initial_balance)
+            effective_target = min(self.directional_config.target_shares, max_shares_from_pct)
+            logger.info(f"  - Target shares: {effective_target} per side (max {self.directional_config.max_position_pct*100:.0f}% of ${self.initial_balance:.0f})")
             logger.info(f"  - Attractive price: ${self.directional_config.attractive_price_early:.2f} → ${self.directional_config.attractive_price_late:.2f} (time decay)")
             logger.info(f"  - Sigma threshold: {self.directional_config.sigma_threshold}σ")
             logger.info(f"  - Sustained time: {self.directional_config.sustained_seconds}s")
@@ -1465,8 +1724,10 @@ class PaperTradingBot:
                 logger.info(f"  - Hedge trigger: {self.vw_hedge_trigger_pct*100:.0f}% imbalance")
                 logger.info(f"  - Max hedge price: ${self.vw_max_hedge_price}")
             else:
-                logger.info(f"  - Max imbalance: {self.accum_max_imbalance_shares} shares")
-            logger.info(f"  - Target shares: {self.accum_target_shares} per side")
+                # Calculate actual max imbalance from percentage
+                max_imbal = max(int(self.accum_max_imbalance_pct * self.accum_target_shares), 2)
+                logger.info(f"  - Max imbalance: {self.accum_max_imbalance_pct*100:.0f}% of target ({max_imbal} shares)")
+            logger.info(f"  - Target shares: {self.accum_target_shares} per side (max {self.max_position_pct*100:.0f}% of ${self.initial_balance:.0f})")
             logger.info(f"  - Buy both sides: {self.accum_buy_both_sides}")
             logger.info(f"  - Price ceiling: ${self.accum_max_share_price} (never buy above)")
         logger.info("=" * 50)
@@ -1751,13 +2012,11 @@ class PaperTradingBot:
         self._last_spread = 1.0 - opportunity.up_ask - opportunity.down_ask
         self._update_live_display()
 
-        up_price = opportunity.up_ask
-        down_price = opportunity.down_ask
-        pair_cost = up_price + down_price
-
-        # Log pair cost status (buy first, hedge later - no hard limit)
-        if self._opportunities_checked % 10 == 0:
-            logger.info(f"[ACCUM] UP=${up_price:.3f} DOWN=${down_price:.3f} PairCost=${pair_cost:.4f}")
+        # Get raw orderbook prices (ask = taker price)
+        raw_up_ask = opportunity.up_ask
+        raw_down_ask = opportunity.down_ask
+        raw_up_bid = opportunity.up_bid or (raw_up_ask * 0.98 if raw_up_ask else 0.48)
+        raw_down_bid = opportunity.down_bid or (raw_down_ask * 0.98 if raw_down_ask else 0.48)
 
         # Calculate current average pair cost
         current_avg_pair_cost = 0.0
@@ -1768,10 +2027,42 @@ class PaperTradingBot:
         share_imbalance = abs(current_up - current_down)
         deficit_side = "UP" if current_down > current_up else "DOWN" if current_up > current_down else None
 
-        # Calculate time remaining for dynamic sizing
+        # Calculate time remaining for dynamic sizing and patient pricing
         time_remaining_secs = 900  # Default 15 min
         if market.end_time:
             time_remaining_secs = max(0, (market.end_time - datetime.now(timezone.utc)).total_seconds())
+
+        # Calculate max imbalance for emergency determination
+        if self.accum_mode == "volume_weighted":
+            max_imbalance_check = self.get_vw_max_imbalance(current_up, current_down)
+        else:
+            max_imbalance_check = max(int(self.accum_max_imbalance_pct * self.accum_target_shares), 2)
+
+        # Determine if this is an emergency hedge situation
+        # Emergency = severely imbalanced (>1.5x max allowed) and need to hedge immediately
+        is_emergency_up = share_imbalance > max_imbalance_check * 1.5 and deficit_side == "UP"
+        is_emergency_down = share_imbalance > max_imbalance_check * 1.5 and deficit_side == "DOWN"
+
+        # PATIENT PRICING (Gabagool-style)
+        # For Standard and VW modes: bid below ask based on time window
+        # Early (10-15min): bid - 0.02, Mid (5-10min): bid - 0.01, Late (0-5min): mid-price
+        up_price = get_patient_price(raw_up_bid, raw_up_ask, time_remaining_secs, is_emergency_up)
+        down_price = get_patient_price(raw_down_bid, raw_down_ask, time_remaining_secs, is_emergency_down)
+        pair_cost = up_price + down_price
+
+        # Determine price mode for logging
+        if is_emergency_up or is_emergency_down:
+            price_mode = "EMERGENCY"
+        elif time_remaining_secs >= 600:
+            price_mode = "EARLY"
+        elif time_remaining_secs >= 300:
+            price_mode = "MID"
+        else:
+            price_mode = "LATE"
+
+        # Log pair cost status with price mode (suppressed in quiet mode)
+        if self._opportunities_checked % 10 == 0 and not self.quiet_mode:
+            logger.info(f"[ACCUM] [{price_mode}] UP=${up_price:.3f} (ask=${raw_up_ask:.3f}) DOWN=${down_price:.3f} (ask=${raw_down_ask:.3f}) PairCost=${pair_cost:.4f}")
 
         # Determine what to buy this cycle
         buy_up = False
@@ -1785,11 +2076,8 @@ class PaperTradingBot:
 
         # BALANCE-FIRST LOGIC: If imbalanced beyond threshold, prioritize deficit side
         force_rebalance = False
-        # Use percentage-based imbalance in volume_weighted mode, absolute in standard
-        if self.accum_mode == "volume_weighted":
-            max_imbalance = self.get_vw_max_imbalance(current_up, current_down)
-        else:
-            max_imbalance = self.accum_max_imbalance_shares
+        # max_imbalance_check already calculated above for patient pricing
+        max_imbalance = max_imbalance_check
         if share_imbalance > max_imbalance:
             force_rebalance = True
             # Force rebalance - only buy deficit side
@@ -1831,8 +2119,10 @@ class PaperTradingBot:
                 # - Expensive buys on one side offset by cheap buys on other
                 # - Final pair cost always ends under $1.00
                 #
-                # buy_up and buy_down stay True - volume weighting does the work
-                logger.debug(f"[VW] True Gabagool: buying both sides UP@${up_price:.3f} DOWN@${down_price:.3f}")
+                # NO pair cost blocking in VW mode - allows temporary imbalances like Gabagool
+                # Volume weighting naturally keeps final pair cost reasonable
+
+                logger.debug(f"[VW] Gabagool mode: UP@${up_price:.3f} buy={buy_up}, DOWN@${down_price:.3f} buy={buy_down}")
             else:
                 # STANDARD MODE: Use pair cost threshold
                 if position and position.pair_count > 0:
@@ -1915,22 +2205,52 @@ class PaperTradingBot:
             logger.debug(f"[MIN$1] DOWN size {down_buy_size} → {down_min_size} (${down_price:.3f} × {down_min_size} = ${down_price * down_min_size:.2f})")
             down_buy_size = down_min_size
 
-        # HARD CAP: Don't buy if already at or above target
-        # This MUST come after $1 minimum enforcement to prevent exceeding target
-        if current_up >= self.accum_target_shares:
-            if buy_up:
+        # POLYMARKET MINIMUM 5 SHARES ENFORCEMENT
+        # Polymarket requires minimum 5 shares per order
+        MIN_SHARES = 5
+        if buy_up and up_buy_size < MIN_SHARES:
+            logger.debug(f"[MIN5] UP size {up_buy_size} → {MIN_SHARES} (Polymarket minimum)")
+            up_buy_size = MIN_SHARES
+
+        if buy_down and down_buy_size < MIN_SHARES:
+            logger.debug(f"[MIN5] DOWN size {down_buy_size} → {MIN_SHARES} (Polymarket minimum)")
+            down_buy_size = MIN_SHARES
+
+        # TARGET CAP: Don't exceed target even with minimum enforcement
+        # This prevents MIN_SHARES from pushing us over the target
+        up_remaining = max(0, self.accum_target_shares - current_up)
+        down_remaining = max(0, self.accum_target_shares - current_down)
+
+        if buy_up and up_buy_size > up_remaining:
+            if up_remaining >= 1:
+                logger.debug(f"[TARGET_CAP] UP size {up_buy_size} → {up_remaining} (approaching target)")
+                up_buy_size = up_remaining
+            else:
                 logger.debug(f"[TARGET] UP at target ({current_up}/{self.accum_target_shares}), skipping buy")
+                buy_up = False
+                up_buy_size = 0
+
+        if buy_down and down_buy_size > down_remaining:
+            if down_remaining >= 1:
+                logger.debug(f"[TARGET_CAP] DOWN size {down_buy_size} → {down_remaining} (approaching target)")
+                down_buy_size = down_remaining
+            else:
+                logger.debug(f"[TARGET] DOWN at target ({current_down}/{self.accum_target_shares}), skipping buy")
+                buy_down = False
+                down_buy_size = 0
+
+        # HARD CAP: Final check - skip if at or above target (safety net)
+        if current_up >= self.accum_target_shares:
             buy_up = False
             up_buy_size = 0
 
         if current_down >= self.accum_target_shares:
-            if buy_down:
-                logger.debug(f"[TARGET] DOWN at target ({current_down}/{self.accum_target_shares}), skipping buy")
             buy_down = False
             down_buy_size = 0
 
-        # IMBALANCE ENFORCEMENT: Block trades that would exceed max imbalance
-        # Note: max_imbalance was calculated earlier (percentage-based in volume_weighted, absolute in standard)
+        # IMBALANCE ENFORCEMENT: Applies to ALL modes to prevent one-sided exposure
+        # VW mode uses more permissive limit via get_vw_max_imbalance (min 10, or 20% of position)
+        # Standard mode uses accum_max_imbalance_pct (default 15%)
         if buy_up:
             new_up = current_up + up_buy_size
             new_imbalance = abs(new_up - current_down)
@@ -1958,6 +2278,7 @@ class PaperTradingBot:
                 side="UP",
                 price=up_price,
                 size=up_buy_size,
+                best_ask=raw_up_ask,  # For patient order fill simulation
             )
             if result["success"]:
                 trades_made += 1
@@ -1991,6 +2312,7 @@ class PaperTradingBot:
                 side="DOWN",
                 price=down_price,
                 size=down_buy_size,
+                best_ask=raw_down_ask,  # For patient order fill simulation
             )
             if result["success"]:
                 trades_made += 1
@@ -2036,10 +2358,7 @@ class PaperTradingBot:
                     f"Imbal:{imbal:.0f} | Time:{time_remaining} Bal:${self._engine.balance:.2f}"
                 )
 
-        # Try to merge complete pairs (live mode only)
-        await self._try_merge_pairs(market)
-
-        # Check for rotation
+        # Check for rotation (merge happens at market end, not during trading)
         if self._rotator.should_rotate():
             await self._handle_market_rotation(market)
 
@@ -2131,24 +2450,45 @@ class PaperTradingBot:
             return
 
         self._opportunities_checked += 1
-        up_price = opportunity.up_ask
-        down_price = opportunity.down_ask
 
-        # Update display prices
-        self._last_up_price = up_price
-        self._last_down_price = down_price
-        self._last_spread = 1.0 - up_price - down_price
+        # Get raw orderbook prices
+        raw_up_ask = opportunity.up_ask
+        raw_down_ask = opportunity.down_ask
+        raw_up_bid = opportunity.up_bid or (raw_up_ask * 0.98 if raw_up_ask else 0.48)
+        raw_down_bid = opportunity.down_bid or (raw_down_ask * 0.98 if raw_down_ask else 0.48)
+
+        # Update display prices (use raw ask for display)
+        self._last_up_price = raw_up_ask
+        self._last_down_price = raw_down_ask
+        self._last_spread = 1.0 - raw_up_ask - raw_down_ask
         self._update_live_display()  # Send update to web UI
 
-        # Evaluate trade decision
+        # Evaluate trade decision (pass raw ask prices for decision logic)
         decision = self._directional_strategy.evaluate_trade(
-            up_ask=up_price,
-            down_ask=down_price,
+            up_ask=raw_up_ask,
+            down_ask=raw_down_ask,
             time_remaining_secs=time_remaining_secs,
         )
 
         if decision:
-            # IMBALANCE ENFORCEMENT: Block trades that would exceed max imbalance
+            # TARGET SHARES ENFORCEMENT (first line of defense)
+            # Calculate effective target: min of config target and max_position_pct safety limit
+            max_shares_from_pct = int(self.directional_config.max_position_pct * self.initial_balance)
+            effective_target = min(self.directional_config.target_shares, max_shares_from_pct)
+
+            if decision.side == "UP":
+                new_up = current_up + decision.size
+                if new_up > effective_target:
+                    logger.info(f"⛔ [TARGET] BLOCKED UP: would exceed target {new_up:.0f} > {effective_target}")
+                    decision = None
+            else:
+                new_down = current_down + decision.size
+                if new_down > effective_target:
+                    logger.info(f"⛔ [TARGET] BLOCKED DOWN: would exceed target {new_down:.0f} > {effective_target}")
+                    decision = None
+
+        if decision:
+            # IMBALANCE ENFORCEMENT (final safety limit)
             max_imbalance = self.directional_config.max_position_pct * self.initial_balance / decision.price
             max_imbalance = max(max_imbalance, 10)  # At least 10 shares allowed
 
@@ -2164,11 +2504,45 @@ class PaperTradingBot:
                 decision = None  # Cancel the trade
 
         if decision:
+            # PATIENT PRICING: Apply time-based maker pricing
+            # Check if in emergency phase (< 5 min remaining, unhedged)
+            is_emergency = self._directional_strategy.state.phase == DirectionalPhase.EMERGENCY_HEDGE
+
+            # Get raw prices for patient pricing
+            if decision.side == "UP":
+                raw_bid = raw_up_bid
+                raw_ask = raw_up_ask
+            else:
+                raw_bid = raw_down_bid
+                raw_ask = raw_down_ask
+
+            # Apply patient pricing to decision.price
+            original_price = decision.price
+            decision.price = get_patient_price(
+                best_bid=raw_bid,
+                best_ask=raw_ask,
+                time_remaining_secs=time_remaining_secs,
+                is_emergency=is_emergency,
+            )
+
+            price_mode = "EMERGENCY" if is_emergency else (
+                "EARLY" if time_remaining_secs >= 600 else
+                "MID" if time_remaining_secs >= 300 else "LATE"
+            )
+            if decision.price != original_price:
+                logger.debug(f"[PATIENT-DIR] {price_mode} {decision.side}: ${original_price:.3f} → ${decision.price:.3f}")
+
             # POLYMARKET $1 MINIMUM ORDER VALUE ENFORCEMENT
             min_size = max(1, math.ceil(1.00 / decision.price)) if decision.price > 0 else 1
             if decision.size < min_size:
                 logger.debug(f"[MIN$1] DIR size {decision.size} → {min_size} (${decision.price:.3f} × {min_size} = ${decision.price * min_size:.2f})")
                 decision.size = min_size
+
+            # POLYMARKET MINIMUM 5 SHARES ENFORCEMENT
+            MIN_SHARES = 5
+            if decision.size < MIN_SHARES:
+                logger.debug(f"[MIN5] DIR size {decision.size} → {MIN_SHARES} (Polymarket minimum)")
+                decision.size = MIN_SHARES
 
             # Check balance
             trade_cost = decision.price * decision.size
@@ -2178,6 +2552,7 @@ class PaperTradingBot:
                     side=decision.side,
                     price=decision.price,
                     size=decision.size,
+                    best_ask=raw_ask,  # For realistic fill probability simulation
                 )
 
                 if result["success"]:
@@ -2199,8 +2574,8 @@ class PaperTradingBot:
                     # Emit trade event for web UI trade log
                     self._send_trade_event(decision.side, result["filled_size"], result["filled_price"], "BUY")
 
-        # Log status periodically
-        if self._opportunities_checked % 10 == 0:
+        # Log status periodically (suppressed in quiet mode)
+        if self._opportunities_checked % 10 == 0 and not self.quiet_mode:
             status = self._directional_strategy.get_status_dict()
             pos = self._engine.get_position(market)
             pair_cost = (pos.up_avg_price + pos.down_avg_price) if pos and pos.pair_count > 0 else 0
@@ -2213,10 +2588,7 @@ class PaperTradingBot:
                 f"Time:{time_remaining_secs}s"
             )
 
-        # Try to merge complete pairs (live mode only)
-        await self._try_merge_pairs(market)
-
-        # Check for rotation
+        # Check for rotation (merge happens at market end, not during trading)
         if self._rotator.should_rotate():
             self._is_new_market = True
             await self._handle_market_rotation(market)
@@ -2226,13 +2598,16 @@ class PaperTradingBot:
         market_slug: str,
         decision: TradeDecision,
         result: dict,
-        position: Optional[PaperPosition],
+        position: Optional[Position],
     ) -> None:
         """Log a directional mode trade to CSV."""
         now = datetime.now(timezone.utc)
 
         # Get directional-specific data
         status = self._directional_strategy.get_status_dict()
+
+        # Check for daily rotation before writing
+        self._check_csv_rotation()
 
         with open(self.csv_path, 'a', newline='') as f:
             writer = csv.writer(f)
@@ -2397,23 +2772,54 @@ class PaperTradingBot:
                 "locked": locked,
             }
 
-            # LIVE MODE: Redeem winning positions on-chain
+            # LIVE MODE: Merge pairs immediately, then schedule redeem for imbalance
             if self.trading_mode == "live" and self._client:
-                winning_shares = pos.up_size if winner == "UP" else pos.down_size
-                if winning_shares > 0:
+                # Step 1: Merge all pairs immediately (no oracle needed)
+                pairs = int(min(pos.up_size, pos.down_size))
+                merge_failed = False
+                if pairs > 0:
                     try:
-                        # Build amounts: [yes_shares, no_shares] - UP=Yes, DOWN=No
-                        amounts = [winning_shares, 0] if winner == "UP" else [0, winning_shares]
-                        receipt = await self._client.redeem_positions(
+                        logger.info(f"[MERGE] Merging {pairs} pairs for {market.slug}...")
+                        result = await self._client.merge_positions(
                             condition_id=market.condition_id,
-                            amounts=amounts,
+                            amount=float(pairs),
                             neg_risk=True,
                         )
-                        logger.info(f"✅ [REDEEM] {winning_shares} {winner} → ${winning_shares:.2f} (tx: {receipt.get('transaction_hash', '')[:16]}...)")
+                        merge_value = pairs * 1.0
+                        tx_hash = result.get("transaction_hash", "")[:16] if result else ""
+                        logger.info(f"✅ [MERGE] {pairs} pairs → ${merge_value:.2f} USDC (tx: {tx_hash}...)")
                     except Exception as e:
-                        # Redeem failed - log error, don't auto-sell
-                        # User can manually sell via frontend/Telegram if needed
-                        logger.error(f"[REDEEM] Failed for {winning_shares} {winner}: {e}")
+                        logger.warning(f"[MERGE] Failed: {str(e)[:50]} - scheduling claim as fallback")
+                        merge_failed = True
+
+                # Step 2: Schedule redeem for winning tokens
+                # If merge succeeded: only redeem imbalance (unpaired tokens)
+                # If merge failed: redeem ALL winning tokens (pairs + imbalance)
+                imbalance = abs(pos.up_size - pos.down_size)
+                winning_shares = pos.up_size if winner == "UP" else pos.down_size
+
+                if merge_failed and pairs > 0:
+                    # Merge failed - claim all winning shares
+                    amounts = [winning_shares, 0] if winner == "UP" else [0, winning_shares]
+                    logger.info(f"[CLAIM] Scheduling scans at 5min and 10min for {winning_shares:.2f} {winner} (merge fallback)")
+                    asyncio.create_task(self._schedule_claim_scans(
+                        market_slug=market.slug,
+                        condition_id=market.condition_id,
+                        amounts=amounts,
+                        winner=winner,
+                        winning_shares=winning_shares,
+                    ))
+                elif imbalance > 0:
+                    # Merge succeeded (or no pairs) - only claim imbalance
+                    amounts = [imbalance, 0] if winner == "UP" else [0, imbalance]
+                    logger.info(f"[CLAIM] Scheduling scans at 5min and 10min for {imbalance:.2f} {winner} (imbalance)")
+                    asyncio.create_task(self._schedule_claim_scans(
+                        market_slug=market.slug,
+                        condition_id=market.condition_id,
+                        amounts=amounts,
+                        winner=winner,
+                        winning_shares=imbalance,
+                    ))
 
             # Resolve the market (paper P&L tracking)
             pnl = self._engine.resolve_market(market.slug, winner)
@@ -2877,10 +3283,10 @@ async def main():
         help='Max average pair cost allowed (default: 0.995)',
     )
     parser.add_argument(
-        '--accum-max-imbalance',
-        type=int,
-        default=20,
-        help='Max share difference before forcing rebalance (default: 20)',
+        '--accum-max-imbalance-pct',
+        type=float,
+        default=0.15,
+        help='Max imbalance as %% of target before forcing rebalance (default: 0.15 = 15%%)',
     )
     parser.add_argument(
         '--accum-target-shares',
@@ -2971,6 +3377,12 @@ async def main():
         help='Max shares per side as %% of balance (default: 15%% → $100 = 15 shares)',
     )
     parser.add_argument(
+        '--dir-target-shares',
+        type=int,
+        default=15,
+        help='Target shares per side for directional mode (default: 15)',
+    )
+    parser.add_argument(
         '--pair-cost-target',
         type=float,
         default=0.95,
@@ -3002,6 +3414,7 @@ async def main():
             window_seconds=args.window_seconds,
             flip_cooldown_seconds=args.flip_cooldown,
             max_position_pct=args.max_position_pct,
+            target_shares=args.dir_target_shares,
             attractive_price_early=args.attractive_price_early,
             attractive_price_late=args.attractive_price_late,
             hedge_increment=args.hedge_increment,
@@ -3018,15 +3431,18 @@ async def main():
         # Accumulation mode parameters
         accum_trade_size=args.accum_trade_size,
         accum_pair_cost_limit=args.accum_pair_cost_limit,
-        accum_max_imbalance_shares=args.accum_max_imbalance,
+        accum_max_imbalance_pct=args.accum_max_imbalance_pct,
         accum_target_shares=args.accum_target_shares,
         accum_buy_both_sides=not args.accum_single_side,
         accum_max_share_price=args.accum_max_share_price,
         accum_mode=args.accum_mode,
+        max_position_pct=args.max_position_pct,
         # Directional mode parameters
         directional_mode=args.directional,
         initial_bias=args.bias,
         directional_config=directional_config,
+        # Quiet mode
+        quiet_mode=args.quiet,
     )
 
     # Handle signals

@@ -29,6 +29,17 @@ from src.services.balance_manager import (
     TradeValidation,
 )
 from src.services.trade_logger import TradeLogger
+from src.services.paper_trading import (
+    PaperTradingEngine,
+    SimulationConfig,
+    SimulationStats,
+)
+# Note: Position is now in src.models.position (consolidated from PaperPosition and LivePosition)
+from src.services.dry_run import (
+    DryRunSimulator,
+    SimulationReport,
+    run_dry_run,
+)
 
 __all__ = [
     "MarketFinder",
@@ -51,4 +62,10 @@ __all__ = [
     "RecoveryRecommendation",
     "TradeValidation",
     "TradeLogger",
+    "PaperTradingEngine",
+    "SimulationConfig",
+    "SimulationStats",
+    "DryRunSimulator",
+    "SimulationReport",
+    "run_dry_run",
 ]
