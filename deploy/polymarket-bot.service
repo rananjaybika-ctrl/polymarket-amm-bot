@@ -8,7 +8,7 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/polymarket-amm-bot
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/home/ubuntu/polymarket-amm-bot/.env
-ExecStart=/home/ubuntu/polymarket-amm-bot/venv/bin/python scripts/run_paper_bot.py --mode live --strategy calculus_maker
+ExecStart=/home/ubuntu/polymarket-amm-bot/venv/bin/python scripts/run_paper_bot.py --trading-mode live --accum-mode calculus_maker
 Restart=on-failure
 RestartSec=10
 StandardOutput=append:/home/ubuntu/polymarket-amm-bot/logs/bot.log

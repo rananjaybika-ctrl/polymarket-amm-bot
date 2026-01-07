@@ -621,7 +621,8 @@ function getVolumeWeightedConfig() {
         // Fixed parameters
         max_share_price: 0.98,
         accum_buy_both_sides: true,
-        accum_max_imbalance_pct: 0.15  // 15% (gabagool-style)
+        accum_max_imbalance_pct: 0.15,  // 15% (gabagool-style)
+        hard_max_imbalance: 10
     };
 }
 
@@ -659,6 +660,7 @@ function getCalculusMakerConfig() {
         lambda_decay: parseFloat(document.getElementById('calculus-maker-lambda').value),
         max_pair_cost: parseFloat(document.getElementById('calculus-maker-max-pair').value),
         max_imbalance_pct: parseFloat(document.getElementById('calculus-maker-imbalance').value),
+        hard_max_imbalance: parseInt(document.getElementById('calculus-maker-hard-max').value) || 10,
         max_share_price: 0.98,
         max_daily_loss: parseFloat(document.getElementById('calculus-maker-max-loss').value) || 0
     };
@@ -680,6 +682,7 @@ function getFairValueMMConfig() {
         fv_reprice_threshold: parseFloat(document.getElementById('fair-value-mm-reprice').value),
         max_pair_cost: parseFloat(document.getElementById('fair-value-mm-max-pair').value),
         max_imbalance_pct: 0.20,
+        hard_max_imbalance: parseInt(document.getElementById('fair-value-mm-hard-max').value) || 10,
         max_share_price: 0.98,
         max_daily_loss: parseFloat(document.getElementById('fair-value-mm-max-loss').value) || 0
     };

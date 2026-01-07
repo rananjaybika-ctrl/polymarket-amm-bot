@@ -3666,29 +3666,49 @@ class PaperTradingBot:
                     # Check against last known position
                     last_pos = pending_info.get("position_when_placed", 0)
                     if current_up > last_pos:
-                        # Expensive side filled! Clear tracking, place hedge
-                        del self._pending_expensive_orders[pending_key]
-                        filled_amount = current_up - last_pos
-                        logger.info(
-                            f"[SEQ_PAIR] ✓ Expensive UP filled +{filled_amount:.0f} "
-                            f"(position {last_pos:.0f} → {current_up:.0f}). Now placing DOWN hedge."
-                        )
-                        # FORCE hedge even if down_order is None (buy_down was blocked)
-                        if down_order:
-                            pending_trades.append(down_order)
+                        # Expensive side filled! Check if instant hedge already placed
+                        if pending_info.get("hedge_placed"):
+                            # WebSocket instant hedge already handled this - just clear tracking
+                            del self._pending_expensive_orders[pending_key]
+                            logger.info(
+                                f"[SEQ_PAIR] ✓ UP filled, instant hedge already placed via WebSocket. Skipping."
+                            )
+                            # Don't place duplicate hedge - instant hedge handled it
                         else:
-                            # Create forced hedge order
-                            hedge_size = min(filled_amount, down_buy_size) if down_buy_size > 0 else filled_amount
-                            hedge_size = max(5, int(hedge_size))
-                            forced_order = {
-                                "side": "DOWN",
-                                "price": down_price if down_price > 0 else raw_down_ask,
-                                "size": hedge_size,
-                                "best_ask": raw_down_ask,
-                                "best_bid": raw_down_bid,
-                            }
-                            pending_trades.append(forced_order)
-                            logger.info(f"[SEQ_PAIR] FORCED DOWN hedge (buy_down was blocked)")
+                            # No instant hedge yet - place hedge via main cycle
+                            del self._pending_expensive_orders[pending_key]
+                            filled_amount = current_up - last_pos
+                            logger.info(
+                                f"[SEQ_PAIR] ✓ Expensive UP filled +{filled_amount:.0f} "
+                                f"(position {last_pos:.0f} → {current_up:.0f}). Now placing DOWN hedge."
+                            )
+                            # FORCE hedge even if down_order is None (buy_down was blocked)
+                            if down_order:
+                                pending_trades.append(down_order)
+                            else:
+                                # Create forced hedge order with PROFIT CEILING
+                                hedge_size = min(filled_amount, down_buy_size) if down_buy_size > 0 else filled_amount
+                                hedge_size = max(5, int(hedge_size))
+                                hedge_price = down_price if down_price > 0 else raw_down_ask
+
+                                # Apply profit ceiling: never pay more than would wipe out edge
+                                expensive_price = pending_info.get("expensive_price", 0)
+                                if expensive_price > 0:
+                                    MIN_PROFIT = 0.005
+                                    max_hedge_price = 1.00 - expensive_price - MIN_PROFIT
+                                    if hedge_price > max_hedge_price:
+                                        logger.warning(f"[FORCED_HEDGE] DOWN capped @ ${max_hedge_price:.4f} (was ${hedge_price:.4f})")
+                                        hedge_price = max_hedge_price
+
+                                forced_order = {
+                                    "side": "DOWN",
+                                    "price": hedge_price,
+                                    "size": hedge_size,
+                                    "best_ask": raw_down_ask,
+                                    "best_bid": raw_down_bid,
+                                }
+                                pending_trades.append(forced_order)
+                                logger.info(f"[SEQ_PAIR] FORCED DOWN hedge @ ${hedge_price:.4f} (buy_down was blocked)")
                     elif pending_age > 30:
                         # Timeout - expensive side didn't fill in 30s, cancel and reset
                         del self._pending_expensive_orders[pending_key]
@@ -3707,29 +3727,49 @@ class PaperTradingBot:
                 else:  # pending_side == "DOWN"
                     last_pos = pending_info.get("position_when_placed", 0)
                     if current_down > last_pos:
-                        # Expensive side filled! Clear tracking, place hedge
-                        del self._pending_expensive_orders[pending_key]
-                        filled_amount = current_down - last_pos
-                        logger.info(
-                            f"[SEQ_PAIR] ✓ Expensive DOWN filled +{filled_amount:.0f} "
-                            f"(position {last_pos:.0f} → {current_down:.0f}). Now placing UP hedge."
-                        )
-                        # FORCE hedge even if up_order is None (buy_up was blocked)
-                        if up_order:
-                            pending_trades.append(up_order)
+                        # Expensive side filled! Check if instant hedge already placed
+                        if pending_info.get("hedge_placed"):
+                            # WebSocket instant hedge already handled this - just clear tracking
+                            del self._pending_expensive_orders[pending_key]
+                            logger.info(
+                                f"[SEQ_PAIR] ✓ DOWN filled, instant hedge already placed via WebSocket. Skipping."
+                            )
+                            # Don't place duplicate hedge - instant hedge handled it
                         else:
-                            # Create forced hedge order
-                            hedge_size = min(filled_amount, up_buy_size) if up_buy_size > 0 else filled_amount
-                            hedge_size = max(5, int(hedge_size))
-                            forced_order = {
-                                "side": "UP",
-                                "price": up_price if up_price > 0 else raw_up_ask,
-                                "size": hedge_size,
-                                "best_ask": raw_up_ask,
-                                "best_bid": raw_up_bid,
-                            }
-                            pending_trades.append(forced_order)
-                            logger.info(f"[SEQ_PAIR] FORCED UP hedge (buy_up was blocked)")
+                            # No instant hedge yet - place hedge via main cycle
+                            del self._pending_expensive_orders[pending_key]
+                            filled_amount = current_down - last_pos
+                            logger.info(
+                                f"[SEQ_PAIR] ✓ Expensive DOWN filled +{filled_amount:.0f} "
+                                f"(position {last_pos:.0f} → {current_down:.0f}). Now placing UP hedge."
+                            )
+                            # FORCE hedge even if up_order is None (buy_up was blocked)
+                            if up_order:
+                                pending_trades.append(up_order)
+                            else:
+                                # Create forced hedge order with PROFIT CEILING
+                                hedge_size = min(filled_amount, up_buy_size) if up_buy_size > 0 else filled_amount
+                                hedge_size = max(5, int(hedge_size))
+                                hedge_price = up_price if up_price > 0 else raw_up_ask
+
+                                # Apply profit ceiling: never pay more than would wipe out edge
+                                expensive_price = pending_info.get("expensive_price", 0)
+                                if expensive_price > 0:
+                                    MIN_PROFIT = 0.005
+                                    max_hedge_price = 1.00 - expensive_price - MIN_PROFIT
+                                    if hedge_price > max_hedge_price:
+                                        logger.warning(f"[FORCED_HEDGE] UP capped @ ${max_hedge_price:.4f} (was ${hedge_price:.4f})")
+                                        hedge_price = max_hedge_price
+
+                                forced_order = {
+                                    "side": "UP",
+                                    "price": hedge_price,
+                                    "size": hedge_size,
+                                    "best_ask": raw_up_ask,
+                                    "best_bid": raw_up_bid,
+                                }
+                                pending_trades.append(forced_order)
+                                logger.info(f"[SEQ_PAIR] FORCED UP hedge @ ${hedge_price:.4f} (buy_up was blocked)")
                     elif pending_age > 30:
                         # Timeout
                         del self._pending_expensive_orders[pending_key]
@@ -3749,12 +3789,22 @@ class PaperTradingBot:
                     expensive_order = up_order if expensive_side == "UP" else down_order
                     if expensive_order:
                         pending_trades.append(expensive_order)
-                        # Track this as pending
+                        # Track this as pending (includes cheap side info for instant hedge)
+                        cheap_order = down_order if expensive_side == "UP" else up_order
                         self._pending_expensive_orders[pending_key] = {
                             "side": expensive_side,
                             "placed_at": time.time(),
                             "position_when_placed": current_up if expensive_side == "UP" else current_down,
                             "expected_size": expensive_order["size"],
+                            # INSTANT HEDGE: Store cheap side info for WebSocket trigger
+                            "cheap_side": cheap_side,
+                            "cheap_price": cheap_order["price"] if cheap_order else (down_price if expensive_side == "UP" else up_price),
+                            "cheap_size": cheap_order["size"] if cheap_order else buy_size,
+                            "market_slug": market.slug,
+                            "up_token_id": market.up_token_id,
+                            "down_token_id": market.down_token_id,
+                            # PROFIT CEILING: Store expensive price to calculate max hedge price
+                            "expensive_price": expensive_order["price"],
                         }
                         logger.info(
                             f"[SEQ_PAIR] Placing expensive {expensive_side} @ ${expensive_order['price']:.4f} "
@@ -4025,6 +4075,28 @@ class PaperTradingBot:
                         else:
                             # Not ready to chase yet - keep original price
                             chase_price = original_price
+
+                # PROFIT-PRESERVING CHASE CEILING
+                # Never chase hedge above price that would wipe out profit
+                if hasattr(self, '_pending_expensive_orders') and self._pending_expensive_orders:
+                    pending = self._pending_expensive_orders.get(market.slug)
+                    if pending:
+                        # Check if this is the hedge side (not the expensive side)
+                        if pending.get("cheap_side") == side:
+                            max_hedge_price = pending.get("max_hedge_price")
+                            expensive_price = pending.get("expensive_price", 0)
+
+                            # Calculate max if not already stored
+                            if not max_hedge_price and expensive_price > 0:
+                                MIN_PROFIT = 0.005
+                                max_hedge_price = 1.00 - expensive_price - MIN_PROFIT
+
+                            if max_hedge_price and chase_price > max_hedge_price:
+                                logger.warning(
+                                    f"[CHASE_CEILING] {side} capped @ ${max_hedge_price:.4f} "
+                                    f"(chase wanted ${chase_price:.4f}, exp=${expensive_price:.4f})"
+                                )
+                                chase_price = max_hedge_price
 
                 # CALC: depth-based timeout (5-30s), FV: fixed 10s
                 if self.accum_mode == "calculus_maker":
@@ -4592,7 +4664,12 @@ class PaperTradingBot:
 
             # Register fill callback
             def on_fill(fill: OrderFill):
-                """Handle fill notification from WebSocket."""
+                """
+                Handle fill notification from WebSocket.
+
+                INSTANT HEDGE: When expensive order fills, spawn async task
+                to place hedge immediately (~100-200ms total).
+                """
                 try:
                     # Map outcome to side
                     outcome_upper = fill.outcome.upper() if fill.outcome else ""
@@ -4613,16 +4690,33 @@ class PaperTradingBot:
                         "timestamp": fill.timestamp,
                     })
 
-                    # If this is a full fill for our pending expensive order, clear it immediately
-                    if hasattr(self, '_pending_expensive_orders'):
+                    # INSTANT HEDGE: Check if this fill is for our pending expensive order
+                    if hasattr(self, '_pending_expensive_orders') and self._pending_expensive_orders:
                         for market_slug, info in list(self._pending_expensive_orders.items()):
-                            if info.get("side") == fill_side and fill.is_fully_filled:
-                                logger.info(
-                                    f"[USER_WS] ✓ Expensive {fill_side} confirmed filled via WebSocket! "
-                                    f"Clearing pending, hedge will be placed next cycle."
-                                )
-                                # Don't delete here - let the main loop handle it
-                                # to avoid race conditions
+                            if info.get("side") == fill_side:
+                                # This fill matches our expensive side!
+                                if fill.size_matched > 0:
+                                    logger.info(
+                                        f"[USER_WS] 🔔 Expensive {fill_side} fill detected! "
+                                        f"{fill.size_matched:.0f} shares @ ${fill.price:.4f}. "
+                                        f"Spawning INSTANT hedge..."
+                                    )
+                                    # Spawn instant hedge task - this is the key to sub-second hedging!
+                                    try:
+                                        loop = asyncio.get_event_loop()
+                                        loop.create_task(
+                                            self._instant_hedge_from_ws(
+                                                fill_side=fill_side,
+                                                fill_size=fill.size_matched,
+                                                pending_info=info.copy(),  # Copy to avoid mutation
+                                            )
+                                        )
+                                    except RuntimeError:
+                                        # No event loop - fall back to next cycle
+                                        logger.warning(
+                                            f"[USER_WS] No event loop for instant hedge, "
+                                            f"falling back to next cycle"
+                                        )
                                 break
 
                 except Exception as e:
@@ -4661,6 +4755,112 @@ class PaperTradingBot:
             self._user_ws_task = None
 
         logger.debug("[USER_WS] Disconnected")
+
+    async def _instant_hedge_from_ws(self, fill_side: str, fill_size: float, pending_info: dict) -> None:
+        """
+        Place hedge order INSTANTLY when expensive order fill is detected via WebSocket.
+
+        This is the key to Gabagool-style sub-second hedging (~100-200ms total).
+        Called directly from WebSocket fill callback via asyncio.create_task().
+
+        Uses PROFIT-PRESERVING CEILING: Never chase hedge above the price that
+        would wipe out the edge. Formula: max_hedge = $1.00 - expensive_price - min_profit
+
+        Args:
+            fill_side: Which side filled ("UP" or "DOWN")
+            fill_size: How many shares filled
+            pending_info: The pending expensive order info with cheap side details
+        """
+        try:
+            start_time = time.time()
+
+            cheap_side = pending_info.get("cheap_side")
+            cheap_price = pending_info.get("cheap_price", 0)
+            cheap_size = pending_info.get("cheap_size", 0)
+            market_slug = pending_info.get("market_slug")
+            expensive_price = pending_info.get("expensive_price", 0)
+
+            if not all([cheap_side, cheap_price, market_slug]):
+                logger.warning(f"[INSTANT_HEDGE] Missing info: side={cheap_side}, price={cheap_price}, slug={market_slug}")
+                return
+
+            # PROFIT-PRESERVING CEILING
+            # Never pay more for hedge than would wipe out profit
+            MIN_PROFIT = 0.005  # Half cent minimum profit per pair
+            max_hedge_price = 1.00 - expensive_price - MIN_PROFIT if expensive_price > 0 else 0.99
+
+            # Start with stored price (fastest, most profitable)
+            hedge_price = cheap_price
+
+            # Cap at profit ceiling if needed
+            if hedge_price > max_hedge_price:
+                logger.warning(
+                    f"[INSTANT_HEDGE] Stored ${cheap_price:.4f} > max ${max_hedge_price:.4f}, "
+                    f"capping to preserve profit"
+                )
+                hedge_price = max_hedge_price
+
+            # Use the filled size for hedge (match what actually filled)
+            hedge_size = min(fill_size, cheap_size) if cheap_size > 0 else fill_size
+            hedge_size = max(5, int(hedge_size))  # Minimum 5 shares
+
+            # Get current market for token IDs
+            current_market = self._rotator.current_market if hasattr(self, '_rotator') else None
+            if not current_market or current_market.slug != market_slug:
+                logger.warning(f"[INSTANT_HEDGE] Market mismatch: {market_slug} vs current")
+                return
+
+            expected_profit = 1.00 - expensive_price - hedge_price if expensive_price > 0 else 0
+            logger.info(
+                f"[INSTANT_HEDGE] 🚀 WebSocket triggered! {cheap_side} hedge "
+                f"{hedge_size} @ ${hedge_price:.4f} (max=${max_hedge_price:.4f}, exp_profit=${expected_profit:.4f})"
+            )
+
+            # Place hedge order via engine
+            if self.trading_mode == "live" and hasattr(self._engine, 'cancel_and_replace'):
+                result = await self._engine.cancel_and_replace(
+                    market=current_market,
+                    side=cheap_side,
+                    new_price=hedge_price,
+                    new_size=hedge_size,
+                    price_tolerance=0.01,  # Accept 1% price movement
+                    stale_seconds=0.0,  # Force immediate placement
+                )
+
+                elapsed_ms = (time.time() - start_time) * 1000
+
+                if result.get("action") in ("placed", "replaced", "filled"):
+                    actual_price = result.get("price", hedge_price)
+                    actual_profit = 1.00 - expensive_price - actual_price if expensive_price > 0 else 0
+                    logger.info(
+                        f"[INSTANT_HEDGE] ✅ {cheap_side} hedge {result['action']} in {elapsed_ms:.0f}ms! "
+                        f"Profit=${actual_profit:.4f}/pair"
+                    )
+                    # DON'T clear pending tracking yet - let regular cycle verify fill
+                    # Store max_hedge_price for chase ceiling
+                    if hasattr(self, '_pending_expensive_orders') and market_slug in self._pending_expensive_orders:
+                        self._pending_expensive_orders[market_slug]["max_hedge_price"] = max_hedge_price
+                        self._pending_expensive_orders[market_slug]["hedge_placed"] = True
+                else:
+                    logger.warning(
+                        f"[INSTANT_HEDGE] ⚠️ Hedge placement failed: {result.get('action')} "
+                        f"in {elapsed_ms:.0f}ms"
+                    )
+            else:
+                # Paper mode or no engine - just log
+                elapsed_ms = (time.time() - start_time) * 1000
+                logger.info(
+                    f"[INSTANT_HEDGE] 📝 Paper mode - would place {cheap_side} {hedge_size} "
+                    f"@ ${cheap_price:.4f} in {elapsed_ms:.0f}ms"
+                )
+                # Clear tracking
+                if hasattr(self, '_pending_expensive_orders') and market_slug in self._pending_expensive_orders:
+                    del self._pending_expensive_orders[market_slug]
+
+        except Exception as e:
+            logger.error(f"[INSTANT_HEDGE] Error: {e}")
+            import traceback
+            traceback.print_exc()
 
     async def _handle_market_rotation(self, market) -> None:
         """Handle market rotation and position resolution with resilience."""
