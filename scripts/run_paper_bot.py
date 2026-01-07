@@ -3087,6 +3087,10 @@ class PaperTradingBot:
         max_side = max(current_up, current_down)
         near_target = max_side >= self.accum_target_shares
 
+        # Initialize trend_signal here so it's defined in ALL code paths
+        # (fixes UnboundLocalError when near_target branch is taken)
+        trend_signal = None
+
         if near_target:
             # One side is at target - check if perfectly balanced or need more
             if share_imbalance == 0:
