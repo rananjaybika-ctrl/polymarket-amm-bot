@@ -75,6 +75,7 @@ from src.api.websocket_client import UserWebSocketClient, OrderFill
 from src.utils.market_detector import MarketTypeDetector
 from src.services.health_monitor import get_health_monitor, HealthMonitor
 from src.services.auto_redeemer import AutoRedeemer
+from src.services.orderbook_cache import OrderbookManager
 
 
 # Configure logging
@@ -603,6 +604,7 @@ class PaperTradingBot:
         self._finder: Optional[MarketFinder] = None
         self._rotator: Optional[MarketRotator] = None
         self._analyzer: Optional[PairAnalyzer] = None
+        self._orderbook_manager: Optional[OrderbookManager] = None
         self._engine: Optional[PaperTradingEngine | LiveTradingEngine] = None
 
         # Directional mode components
@@ -1325,7 +1327,17 @@ class PaperTradingBot:
             logger.info("[STATE] Starting with fresh state")
 
         self._finder = MarketFinder()
-        self._analyzer = PairAnalyzer(self._client)
+
+        # Initialize WebSocket orderbook manager for low-latency orderbook data
+        self._orderbook_manager = OrderbookManager(
+            rest_client=self._client,
+            max_cache_age_ms=5000,  # 5s cache staleness threshold
+            custom_features=True,   # Enable market_resolved events
+        )
+        await self._orderbook_manager.start()
+        logger.info(f"OrderbookManager started (WS: {self._orderbook_manager.connected})")
+
+        self._analyzer = PairAnalyzer(self._client, orderbook_manager=self._orderbook_manager)
 
         # Create trading engine based on mode
         if self.trading_mode == "live":
@@ -2695,6 +2707,10 @@ class PaperTradingBot:
 
                 # Set up event-driven quote pulling for 100-200ms reaction time
                 self._setup_event_driven_pull(market.slug)
+
+            # Subscribe orderbook WebSocket to new market's tokens
+            if self._orderbook_manager:
+                await self._orderbook_manager.rotate_to_market(market)
 
             self._is_new_market = False
 
@@ -4307,6 +4323,11 @@ class PaperTradingBot:
                 if strike > 0:
                     set_shared_strike(market.slug, strike, "directional")
             self._directional_strategy.reset_for_new_market()
+
+            # Subscribe orderbook WebSocket to new market's tokens
+            if self._orderbook_manager:
+                await self._orderbook_manager.rotate_to_market(market)
+
             self._is_new_market = False
 
         # Get time remaining
@@ -5130,6 +5151,11 @@ class PaperTradingBot:
             await self._finder.close()
         if self._binance_client:
             await self._binance_client.disconnect()
+
+        # Stop orderbook WebSocket manager
+        if self._orderbook_manager:
+            await self._orderbook_manager.stop()
+            logger.info(f"OrderbookManager stats: {self._orderbook_manager.stats}")
 
         # Disconnect user WebSocket
         await self._teardown_user_websocket()

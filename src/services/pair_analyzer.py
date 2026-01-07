@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 if TYPE_CHECKING:
     from src.models.position import Position
+    from src.services.orderbook_cache import OrderbookManager
 
 from src.models.market import BTCMarket
 from src.models.orderbook import Orderbook, Order
@@ -437,14 +438,20 @@ class PairAnalyzer:
             print(f"Profit: ${opportunity.profit_per_pair}")
     """
 
-    def __init__(self, client: PolymarketClient):
+    def __init__(
+        self,
+        client: PolymarketClient,
+        orderbook_manager: Optional["OrderbookManager"] = None,
+    ):
         """
         Initialize PairAnalyzer.
 
         Args:
             client: Connected PolymarketClient for API calls
+            orderbook_manager: Optional OrderbookManager for WebSocket orderbooks
         """
         self.client = client
+        self._orderbook_manager = orderbook_manager
 
     async def analyze_market(self, market: BTCMarket) -> PairOpportunity:
         """
@@ -483,9 +490,12 @@ class PairAnalyzer:
         self, market: BTCMarket
     ) -> tuple[Orderbook, Orderbook]:
         """
-        Fetch orderbooks with fallback to CLOB /markets endpoint.
+        Fetch orderbooks with WebSocket primary, REST fallback.
 
-        If /book returns garbage data, falls back to /markets for accurate prices.
+        Priority:
+        1. WebSocket cache (if manager connected and data fresh)
+        2. REST /book endpoint
+        3. REST /markets endpoint (if /book returns garbage)
 
         Args:
             market: BTCMarket to fetch orderbooks for
@@ -493,7 +503,24 @@ class PairAnalyzer:
         Returns:
             Tuple of (up_orderbook, down_orderbook)
         """
-        # Fetch both orderbooks in parallel for speed
+        up_orderbook = None
+        down_orderbook = None
+
+        # Try WebSocket cache first (fastest path)
+        if self._orderbook_manager and self._orderbook_manager.connected:
+            up_orderbook, down_orderbook = await self._orderbook_manager.get_orderbooks(
+                market.up_token_id,
+                market.down_token_id,
+            )
+            if up_orderbook and down_orderbook:
+                # Validate not garbage
+                if not up_orderbook.is_garbage() and not down_orderbook.is_garbage():
+                    return up_orderbook, down_orderbook
+                logger.warning("WebSocket orderbook is garbage, falling back to REST")
+                up_orderbook = None
+                down_orderbook = None
+
+        # Fallback to REST: Fetch both orderbooks in parallel
         up_response, down_response = await asyncio.gather(
             self.client.get_orderbook(market.up_token_id),
             self.client.get_orderbook(market.down_token_id),

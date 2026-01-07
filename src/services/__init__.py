@@ -41,6 +41,7 @@ from src.services.dry_run import (
     run_dry_run,
 )
 from src.services.auto_redeemer import AutoRedeemer
+from src.services.orderbook_cache import OrderbookCache, OrderbookManager
 
 __all__ = [
     "MarketFinder",
@@ -70,4 +71,6 @@ __all__ = [
     "SimulationReport",
     "run_dry_run",
     "AutoRedeemer",
+    "OrderbookCache",
+    "OrderbookManager",
 ]

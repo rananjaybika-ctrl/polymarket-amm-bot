@@ -29,6 +29,7 @@ from src.api.polymarket_client import PolymarketClient
 from src.services.market_finder import MarketFinder
 from src.services.market_rotator import MarketRotator
 from src.services.pair_analyzer import PairAnalyzer
+from src.services.orderbook_cache import OrderbookManager
 from src.strategies.simple_hedger import SimpleHedgerStrategy, Phase
 from src.services.paper_trading import PaperTradingEngine, FillType
 from src.services.live_trading import LiveTradingEngine
@@ -69,6 +70,7 @@ class SimpleHedgerBot:
         self._finder: Optional[MarketFinder] = None
         self._rotator: Optional[MarketRotator] = None
         self._analyzer: Optional[PairAnalyzer] = None
+        self._orderbook_manager: Optional[OrderbookManager] = None
         self._engine = None  # Paper or Live engine
 
         self._strategy: Optional[SimpleHedgerStrategy] = None
@@ -118,7 +120,17 @@ class SimpleHedgerBot:
         await self._client.connect()
 
         self._finder = MarketFinder()
-        self._analyzer = PairAnalyzer(self._client)
+
+        # Initialize WebSocket orderbook manager
+        self._orderbook_manager = OrderbookManager(
+            rest_client=self._client,
+            max_cache_age_ms=5000,
+            custom_features=True,
+        )
+        await self._orderbook_manager.start()
+        logger.info(f"OrderbookManager started (WS: {self._orderbook_manager.connected})")
+
+        self._analyzer = PairAnalyzer(self._client, orderbook_manager=self._orderbook_manager)
 
         # Use continuous mode for ongoing trading
         # Pass session time window to allow market selection within bounds
@@ -348,7 +360,7 @@ class SimpleHedgerBot:
 
                 # Check if market has enough time remaining
                 time_remaining = market.time_remaining()
-                if time_remaining < 30:
+                if time_remaining < 10:
                     logger.info(f"Market {market.slug} expiring ({time_remaining:.0f}s), rotating...")
                     await self._rotator.rotate()
                     current_market_slug = None
@@ -365,6 +377,9 @@ class SimpleHedgerBot:
                     # Initialize new strategy for this market
                     self._strategy = SimpleHedgerStrategy()
                     self._market_start_time = time.time()
+                    # Subscribe orderbook WebSocket to new market's tokens
+                    if self._orderbook_manager:
+                        await self._orderbook_manager.rotate_to_market(market)
 
                 # Run one iteration of strategy (not full cycle)
                 success = await self._run_strategy_iteration(market)
@@ -392,6 +407,9 @@ class SimpleHedgerBot:
         """Cleanup resources."""
         logger.info("Cleaning up...")
         self._running = False
+        if self._orderbook_manager:
+            await self._orderbook_manager.stop()
+            logger.info(f"OrderbookManager stats: {self._orderbook_manager.stats}")
         if self._finder:
             await self._finder.close()
         if self._client:
