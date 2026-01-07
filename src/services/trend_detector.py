@@ -174,9 +174,14 @@ class TrendDetector:
         Implements professional MM behavior from Telegram alpha:
         "You get rolled over if you're not quick enough to pull your quotes when Binance moves"
 
-        Logic:
-        - If we have a DOWN bid and Binance is spiking UP -> Pull DOWN
-        - If we have an UP bid and Binance is crashing DOWN -> Pull UP
+        Logic (OR filter - pull if EITHER condition true):
+        1. Z-SCORE: |z| >= 2.0 (STRONG/EXTREME) AND trending against our order
+        2. VELOCITY: Price moving fast (> threshold bps/sec) against our order
+
+        Why OR filter needed:
+        - Velocity catches rapid spikes (e.g., BTC jumps $50 in 2 seconds)
+        - Z-score catches sustained positions (e.g., BTC $100 above strike, velocity low after stabilizing)
+        - Lost $1.90 on Jan 7 because z=2.56 but velocity was low - order filled on losing side
 
         Args:
             side: "UP" or "DOWN" - which side's quote we're evaluating
@@ -196,16 +201,31 @@ class TrendDetector:
 
         side_upper = side.upper()
 
-        # Pull if Binance moving AGAINST our pending quote
-        # DOWN bid + UP trend = pull (about to buy losing side)
-        # UP bid + DOWN trend = pull (about to buy losing side)
-        if side_upper == "DOWN" and signal.direction == TrendDirection.UP:
-            return abs(signal.velocity_bps) > velocity_threshold_bps
+        # Check if trend direction is AGAINST our order
+        trend_against_down = (side_upper == "DOWN" and signal.direction == TrendDirection.UP)
+        trend_against_up = (side_upper == "UP" and signal.direction == TrendDirection.DOWN)
 
-        if side_upper == "UP" and signal.direction == TrendDirection.DOWN:
-            return abs(signal.velocity_bps) > velocity_threshold_bps
+        if not (trend_against_down or trend_against_up):
+            return False  # Trend is WITH our order, keep it
 
-        return False
+        # OR FILTER: Pull if EITHER condition is true
+        # Condition 1: Z-SCORE - Strong/Extreme trend against us (immediate pull)
+        z_score_trigger = signal.state in (TrendState.STRONG, TrendState.EXTREME)
+
+        # Condition 2: VELOCITY - Rapid movement against us
+        velocity_trigger = abs(signal.velocity_bps) > velocity_threshold_bps
+
+        should_pull = z_score_trigger or velocity_trigger
+
+        if should_pull:
+            reason = []
+            if z_score_trigger:
+                reason.append(f"z={signal.z_score:.2f}")
+            if velocity_trigger:
+                reason.append(f"vel={signal.velocity_bps:.1f}bps")
+            logger.info(f"PULL {side_upper}: {' + '.join(reason)} | dir={signal.direction.value}")
+
+        return should_pull
 
     def get_priority_side(self) -> Optional[str]:
         """
