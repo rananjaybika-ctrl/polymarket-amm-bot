@@ -23,7 +23,10 @@ from zoneinfo import ZoneInfo
 # Kill switch file - when this exists, bot refuses to start
 KILL_SWITCH_FILE = Path("/tmp/polymarket_killed")
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+import secrets
+import hashlib
 
 
 def normalize_datetime_to_utc(dt_str: str, assume_tz: str = "Asia/Kolkata") -> datetime:
@@ -142,6 +145,42 @@ def clear_kill_switch() -> bool:
 def is_kill_switch_active() -> bool:
     """Check if kill switch is currently active."""
     return KILL_SWITCH_FILE.exists()
+
+
+# =============================================================================
+# HTTP BASIC AUTHENTICATION - Protect all endpoints
+# =============================================================================
+# Set these environment variables on your server:
+#   POLYBOT_USERNAME=your_username
+#   POLYBOT_PASSWORD=your_secure_password
+# =============================================================================
+
+security = HTTPBasic()
+
+# Get credentials from environment (with secure defaults that MUST be changed)
+AUTH_USERNAME = os.environ.get("POLYBOT_USERNAME", "admin")
+AUTH_PASSWORD = os.environ.get("POLYBOT_PASSWORD", "CHANGE_ME_IMMEDIATELY")
+
+def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
+    """Verify HTTP Basic Auth credentials."""
+    # Use constant-time comparison to prevent timing attacks
+    username_correct = secrets.compare_digest(
+        credentials.username.encode("utf8"),
+        AUTH_USERNAME.encode("utf8")
+    )
+    password_correct = secrets.compare_digest(
+        credentials.password.encode("utf8"),
+        AUTH_PASSWORD.encode("utf8")
+    )
+
+    if not (username_correct and password_correct):
+        logger.warning(f"[AUTH] Failed login attempt for user: {credentials.username}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
 
 
 app = FastAPI(title="Polymarket Trading Bot", version="1.0.0")
@@ -708,8 +747,8 @@ async def validate_config(config: BotConfig):
 
 
 @app.post("/api/start")
-async def start_bot(config: BotConfig):
-    """Start the trading bot with given configuration."""
+async def start_bot(config: BotConfig, username: str = Depends(verify_credentials)):
+    """Start the trading bot with given configuration. Requires authentication."""
     global bot_task, bot_status
 
     # Don't start if already running
@@ -746,8 +785,8 @@ async def start_bot(config: BotConfig):
 
 
 @app.post("/api/stop")
-async def stop_bot():
-    """Stop the trading bot."""
+async def stop_bot(username: str = Depends(verify_credentials)):
+    """Stop the trading bot. Requires authentication."""
     global bot_task, bot_status, bot_instance
 
     if bot_instance:
@@ -790,8 +829,8 @@ async def stop_bot():
 
 
 @app.post("/api/emergency-stop")
-async def emergency_stop():
-    """Cancel all orders and stop ALL bots (NUKE ALL). Does NOT sell positions."""
+async def emergency_stop(username: str = Depends(verify_credentials)):
+    """Cancel all orders and stop ALL bots (NUKE ALL). Requires authentication."""
     global bot_task, bot_status, bot_instance
 
     results = {
@@ -905,8 +944,8 @@ async def emergency_stop():
 # =============================================================================
 
 @app.post("/api/start/accumulation")
-async def start_accumulation(config: AccumulationBotConfig):
-    """Start an Accumulation trading strategy (standard or volume_weighted based on config)."""
+async def start_accumulation(config: AccumulationBotConfig, username: str = Depends(verify_credentials)):
+    """Start an Accumulation trading strategy. Requires authentication."""
     # Determine which strategy slot to use based on accum_mode
     strategy_name = config.accum_mode  # "standard" or "volume_weighted"
     if strategy_name not in ["standard", "volume_weighted"]:
@@ -987,22 +1026,22 @@ async def start_accumulation(config: AccumulationBotConfig):
 
 
 @app.post("/api/start/standard")
-async def start_standard(config: AccumulationBotConfig):
-    """Start Standard accumulation mode."""
+async def start_standard(config: AccumulationBotConfig, username: str = Depends(verify_credentials)):
+    """Start Standard accumulation mode. Requires authentication."""
     config.accum_mode = "standard"
     return await start_accumulation(config)
 
 
 @app.post("/api/start/volume_weighted")
-async def start_volume_weighted(config: AccumulationBotConfig):
-    """Start Volume Weighted (Gabagool-style) accumulation mode."""
+async def start_volume_weighted(config: AccumulationBotConfig, username: str = Depends(verify_credentials)):
+    """Start Volume Weighted mode. Requires authentication."""
     config.accum_mode = "volume_weighted"
     return await start_accumulation(config)
 
 
 @app.post("/api/start/directional")
-async def start_directional(config: DirectionalBotConfig):
-    """Start the Directional trading strategy."""
+async def start_directional(config: DirectionalBotConfig, username: str = Depends(verify_credentials)):
+    """Start the Directional trading strategy. Requires authentication."""
     strategy = strategies["directional"]
 
     # Check if actually running (task exists and not done) vs just stale status
@@ -1080,8 +1119,8 @@ async def start_directional(config: DirectionalBotConfig):
 
 
 @app.post("/api/start/calculus_maker")
-async def start_calculus_maker(config: CalculusMakerBotConfig):
-    """Start the Calculus MAKER trading strategy."""
+async def start_calculus_maker(config: CalculusMakerBotConfig, username: str = Depends(verify_credentials)):
+    """Start the Calculus MAKER trading strategy. Requires authentication."""
     # Clear kill switch when user explicitly starts - they want to run
     clear_kill_switch()
 
@@ -1166,8 +1205,8 @@ async def start_calculus_maker(config: CalculusMakerBotConfig):
 
 
 @app.post("/api/start/fair_value_mm")
-async def start_fair_value_mm(config: FairValueMMBotConfig):
-    """Start the Fair Value MM trading strategy."""
+async def start_fair_value_mm(config: FairValueMMBotConfig, username: str = Depends(verify_credentials)):
+    """Start the Fair Value MM trading strategy. Requires authentication."""
     strategy = strategies["fair_value_mm"]
 
     # Check if actually running (task exists and not done) vs just stale status
@@ -1249,8 +1288,8 @@ async def start_fair_value_mm(config: FairValueMMBotConfig):
 
 
 @app.post("/api/start/simple_hedger")
-async def start_simple_hedger(config: SimpleHedgerBotConfig):
-    """Start the Simple Hedger trading strategy."""
+async def start_simple_hedger(config: SimpleHedgerBotConfig, username: str = Depends(verify_credentials)):
+    """Start the Simple Hedger trading strategy. Requires authentication."""
     strategy = strategies["simple_hedger"]
 
     # Check if actually running
@@ -1330,8 +1369,8 @@ async def start_simple_hedger(config: SimpleHedgerBotConfig):
 
 
 @app.post("/api/stop/{strategy_name}")
-async def stop_strategy(strategy_name: str):
-    """Gracefully stop a strategy - cancels all open orders first, then stops."""
+async def stop_strategy(strategy_name: str, username: str = Depends(verify_credentials)):
+    """Gracefully stop a strategy. Requires authentication."""
     if strategy_name not in strategies:
         return JSONResponse(status_code=404, content={"error": f"Unknown strategy: {strategy_name}"})
 
@@ -1377,8 +1416,8 @@ async def stop_strategy(strategy_name: str):
 
 
 @app.post("/api/graceful-stop/{strategy_name}")
-async def graceful_stop_strategy(strategy_name: str):
-    """Request graceful stop - cancels open orders, then stops after current market ends."""
+async def graceful_stop_strategy(strategy_name: str, username: str = Depends(verify_credentials)):
+    """Request graceful stop. Requires authentication."""
     if strategy_name not in strategies:
         return JSONResponse(status_code=404, content={"error": f"Unknown strategy: {strategy_name}"})
 
@@ -1418,8 +1457,8 @@ async def graceful_stop_strategy(strategy_name: str):
 
 
 @app.post("/api/emergency-stop/{strategy_name}")
-async def emergency_stop_strategy(strategy_name: str):
-    """Cancel all orders and stop a specific strategy. Does NOT sell positions."""
+async def emergency_stop_strategy(strategy_name: str, username: str = Depends(verify_credentials)):
+    """Cancel all orders and stop a specific strategy. Requires authentication."""
     try:
         if strategy_name not in strategies:
             return JSONResponse(status_code=404, content={"error": f"Unknown strategy: {strategy_name}"})

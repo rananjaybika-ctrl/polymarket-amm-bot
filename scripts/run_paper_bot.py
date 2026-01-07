@@ -3535,9 +3535,25 @@ class PaperTradingBot:
         mode_label = "[VW]" if self.accum_mode == "volume_weighted" else ""
 
         if self.accum_mode == "fair_value_mm":
-            # FAIR VALUE MM: Skip ALL imbalance checks - this strategy is DESIGNED to be directional
-            # It only buys undervalued sides, so imbalance is expected and intentional
-            logger.debug(f"[FV_MM] Skipping imbalance check - directional strategy")
+            # FAIR VALUE MM: Still enforce HARD MAX imbalance limit for safety
+            # Even directional strategies must respect absolute risk limits
+            current_imbalance = abs(current_up - current_down)
+            # Hard limit: max 10 shares imbalance OR 200% of target (whichever is larger)
+            fv_hard_limit = max(10, int(self.accum_target_shares * 2))
+
+            if current_imbalance >= fv_hard_limit:
+                # Determine which side is surplus
+                surplus_side = "UP" if current_up > current_down else "DOWN"
+
+                # Block the surplus side, allow deficit side
+                if surplus_side == "UP" and buy_up:
+                    buy_up = False
+                    logger.warning(f"⛔ [FV_MM] BLOCKED UP: hard limit {current_imbalance:.0f} >= {fv_hard_limit}")
+                elif surplus_side == "DOWN" and buy_down:
+                    buy_down = False
+                    logger.warning(f"⛔ [FV_MM] BLOCKED DOWN: hard limit {current_imbalance:.0f} >= {fv_hard_limit}")
+            else:
+                logger.debug(f"[FV_MM] Imbalance {current_imbalance:.0f} < hard limit {fv_hard_limit}")
         else:
             # ============================================================================
             # IMBALANCE BLOCKING (FIXED: Block BOTH sides when imbalanced)
