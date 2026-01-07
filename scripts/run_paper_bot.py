@@ -609,6 +609,10 @@ class PaperTradingBot:
         # Trend detection for quote pulling and direction-aware trading
         self._trend_detector: Optional[TrendDetector] = None
 
+        # Event-driven quote pull tracking (100-200ms reaction time)
+        self._event_pull_market: Optional[str] = None  # Current market for event callbacks
+        self._event_pull_callback: Optional[Callable] = None  # Stored callback reference
+
         # Calculus MAKER strategy instance (also used by fair_value_mm mode)
         self._calculus_strategy: Optional[CalculusMakerStrategy] = None
         if self.accum_mode in ("calculus_maker", "fair_value_mm"):
@@ -2669,6 +2673,10 @@ class PaperTradingBot:
                     strike = await self._binance_client.set_strike_from_previous_candle(interval="15m")
                     if strike > 0:
                         set_shared_strike(market.slug, strike, f"{self.strategy_name}_accum")
+
+                # Set up event-driven quote pulling for 100-200ms reaction time
+                self._setup_event_driven_pull(market.slug)
+
             self._is_new_market = False
 
         # Get current position
@@ -4230,10 +4238,78 @@ class PaperTradingBot:
                 status["z_score"],
             ])
 
+    def _setup_event_driven_pull(self, market_slug: str) -> None:
+        """
+        Set up event-driven quote pulling for a market.
+
+        Registers a callback with BinanceClient that fires when z-score crosses
+        the STRONG threshold (2.0). This enables ~100-200ms reaction time to
+        Binance price moves, compared to 1-2 second polling.
+
+        Only active in LIVE mode with LiveTradingEngine.
+
+        Args:
+            market_slug: The market to set up event-driven pulling for
+        """
+        # Only for live mode with LiveTradingEngine
+        if self.trading_mode != "live":
+            return
+        if not self._binance_client:
+            return
+        if not hasattr(self._engine, 'event_driven_pull'):
+            return
+
+        # Clear any existing callback
+        if self._event_pull_callback:
+            self._binance_client.remove_z_threshold_callback(self._event_pull_callback)
+            self._event_pull_callback = None
+
+        # Reset z-state for new market
+        self._binance_client.reset_z_state()
+
+        # Store market slug for closure
+        self._event_pull_market = market_slug
+        engine = self._engine
+
+        def on_z_threshold(z_score: float, direction: str, trend_state: str) -> None:
+            """
+            Callback fired when z-score crosses STRONG threshold.
+
+            Schedules async cancel on the event loop. This runs within ~100ms
+            of the Binance price tick that crossed the threshold.
+            """
+            if direction == "FLAT":
+                return  # No clear direction, don't pull
+
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(
+                    engine.event_driven_pull(direction, market_slug, z_score)
+                )
+            except RuntimeError:
+                # No running loop (shouldn't happen but safety)
+                logger.debug("[EVENT_PULL] No running loop for callback")
+
+        # Register the callback
+        self._event_pull_callback = on_z_threshold
+        self._binance_client.on_z_threshold_crossed(on_z_threshold)
+        logger.info(f"[EVENT_PULL] Enabled for {market_slug} (100-200ms reaction)")
+
+    def _teardown_event_driven_pull(self) -> None:
+        """Remove event-driven quote pull callback."""
+        if self._event_pull_callback and self._binance_client:
+            self._binance_client.remove_z_threshold_callback(self._event_pull_callback)
+            logger.debug(f"[EVENT_PULL] Disabled for {self._event_pull_market}")
+        self._event_pull_callback = None
+        self._event_pull_market = None
+
     async def _handle_market_rotation(self, market) -> None:
         """Handle market rotation and position resolution with resilience."""
         old_market_slug = market.slug
         logger.info(f"[{self.strategy_name}] Rotating from {market.slug}")
+
+        # Teardown event-driven quote pulling for old market
+        self._teardown_event_driven_pull()
 
         # Cancel any pending orders for this market before rotation
         if self.trading_mode == "live" and hasattr(self._engine, 'cancel_all_pending'):
