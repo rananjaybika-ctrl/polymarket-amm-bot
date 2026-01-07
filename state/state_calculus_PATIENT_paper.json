@@ -1,0 +1,26 @@
+{
+  "strategy_name": "calculus_PATIENT",
+  "trading_mode": "paper",
+  "balance": 170.3,
+  "initial_balance": 180.0,
+  "realized_pnl": 0.0,
+  "session_start": "2026-01-03T12:10:21.331836+00:00",
+  "last_save": "2026-01-03T12:10:46.859495+00:00",
+  "trade_count": 1,
+  "current_market_slug": "btc-updown-15m-1767441600",
+  "positions": {
+    "btc-updown-15m-1767441600": {
+      "market_slug": "btc-updown-15m-1767441600",
+      "up_shares": 0.0,
+      "up_avg_price": 0.0,
+      "down_shares": 10.0,
+      "down_avg_price": 0.97,
+      "hedged_pairs": 0.0,
+      "pair_cost": 0,
+      "locked_profit": 0.0,
+      "last_updated": "2026-01-03T12:10:46.859470+00:00"
+    }
+  },
+  "recent_trades": [],
+  "version": 1
+}

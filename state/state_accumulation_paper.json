@@ -1,0 +1,37 @@
+{
+  "strategy_name": "accumulation",
+  "trading_mode": "paper",
+  "balance": 85.8,
+  "initial_balance": 100.0,
+  "realized_pnl": 0.0,
+  "session_start": "2025-12-27T14:00:47.751879+00:00",
+  "last_save": "2026-01-06T14:21:40.646469+00:00",
+  "trade_count": 2,
+  "current_market_slug": "btc-updown-15m-1767708900",
+  "positions": {
+    "btc-updown-15m-1766844000": {
+      "market_slug": "btc-updown-15m-1766844000",
+      "up_shares": 15.0,
+      "up_avg_price": 0.48000000000000004,
+      "down_shares": 15.0,
+      "down_avg_price": 0.44666666666666666,
+      "hedged_pairs": 15.0,
+      "pair_cost": 0.9266666666666667,
+      "locked_profit": 1.0999999999999988,
+      "last_updated": "2025-12-27T14:00:56.180197+00:00"
+    },
+    "btc-updown-15m-1767708900": {
+      "market_slug": "btc-updown-15m-1767708900",
+      "up_shares": 15.0,
+      "up_avg_price": 0.88,
+      "down_shares": 10.0,
+      "down_avg_price": 0.1,
+      "hedged_pairs": 10.0,
+      "pair_cost": 0.98,
+      "locked_profit": 0.20000000000000018,
+      "last_updated": "2026-01-06T14:21:40.646460+00:00"
+    }
+  },
+  "recent_trades": [],
+  "version": 1
+}

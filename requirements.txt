@@ -1,8 +1,8 @@
 # Polymarket AMM Bot - Dependencies
 # Install with: pip install -r requirements.txt
 
-# Polymarket API Client
-py-clob-client>=0.1.0
+# Polymarket API Client (0.34.4+ required for Maker Rebates fee handling)
+py-clob-client>=0.34.4
 
 # Environment Configuration
 python-dotenv>=1.0.0
@@ -21,3 +21,15 @@ rich>=13.0.0
 
 # Additional utilities
 requests>=2.31.0
+
+# Chart Generation
+matplotlib>=3.7.0
+numpy>=1.24.0
+
+# Web UI
+fastapi>=0.104.0
+uvicorn>=0.24.0
+# SECURITY: polymarket-apis is VENDORED locally in /vendor/
+# DO NOT pip install/upgrade - we use the frozen local copy
+# See vendor/README.md before updating
+# polymarket-apis==0.4.3  # DISABLED - using vendored copy instead

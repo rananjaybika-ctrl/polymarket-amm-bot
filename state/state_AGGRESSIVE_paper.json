@@ -1,0 +1,70 @@
+{
+  "strategy_name": "AGGRESSIVE",
+  "trading_mode": "paper",
+  "balance": 166.66257268670705,
+  "initial_balance": 180.0,
+  "realized_pnl": 0.0,
+  "session_start": "2026-01-03T12:12:07.566636+00:00",
+  "last_save": "2026-01-03T13:00:50.954040+00:00",
+  "trade_count": 27,
+  "current_market_slug": "btc-updown-15m-1767445200",
+  "positions": {
+    "btc-updown-15m-1767441600": {
+      "market_slug": "btc-updown-15m-1767441600",
+      "up_shares": 15.0,
+      "up_avg_price": 0.41333333333333333,
+      "down_shares": 15.0,
+      "down_avg_price": 0.8433333333333333,
+      "hedged_pairs": 15.0,
+      "pair_cost": 1.2566666666666666,
+      "locked_profit": -3.8499999999999988,
+      "last_updated": "2026-01-03T12:12:33.184751+00:00"
+    },
+    "btc-updown-15m-1767442500": {
+      "market_slug": "btc-updown-15m-1767442500",
+      "up_shares": 13.0,
+      "up_avg_price": 0.5215384615384615,
+      "down_shares": 13.0,
+      "down_avg_price": 0.43833687213397365,
+      "hedged_pairs": 13.0,
+      "pair_cost": 0.9598753336724352,
+      "locked_profit": 0.5216206622583429,
+      "last_updated": "2026-01-03T12:15:35.816533+00:00"
+    },
+    "btc-updown-15m-1767443400": {
+      "market_slug": "btc-updown-15m-1767443400",
+      "up_shares": 15.0,
+      "up_avg_price": 0.32999999999999996,
+      "down_shares": 12.0,
+      "down_avg_price": 0.5966666666666666,
+      "hedged_pairs": 12.0,
+      "pair_cost": 0.9266666666666665,
+      "locked_profit": 0.8800000000000017,
+      "last_updated": "2026-01-03T12:30:38.748689+00:00"
+    },
+    "btc-updown-15m-1767444300": {
+      "market_slug": "btc-updown-15m-1767444300",
+      "up_shares": 15.0,
+      "up_avg_price": 0.45,
+      "down_shares": 15.0,
+      "down_avg_price": 0.4766031983700845,
+      "hedged_pairs": 15.0,
+      "pair_cost": 0.9266031983700845,
+      "locked_profit": 1.1009520244487319,
+      "last_updated": "2026-01-03T12:45:35.609651+00:00"
+    },
+    "btc-updown-15m-1767445200": {
+      "market_slug": "btc-updown-15m-1767445200",
+      "up_shares": 15.0,
+      "up_avg_price": 0.3266666666666667,
+      "down_shares": 15.0,
+      "down_avg_price": 0.6066666666666667,
+      "hedged_pairs": 15.0,
+      "pair_cost": 0.9333333333333333,
+      "locked_profit": 0.9999999999999998,
+      "last_updated": "2026-01-03T13:00:50.954019+00:00"
+    }
+  },
+  "recent_trades": [],
+  "version": 1
+}

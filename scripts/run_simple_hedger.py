@@ -56,11 +56,13 @@ class SimpleHedgerBot:
         initial_balance: float = 100.0,
         session_start_utc: Optional[datetime] = None,
         session_end_utc: Optional[datetime] = None,
+        web_callback: Optional[callable] = None,
     ):
         self.live_mode = live_mode
         self.initial_balance = initial_balance
         self.session_start_utc = session_start_utc
         self.session_end_utc = session_end_utc
+        self._web_callback = web_callback
 
         self._config: Optional[Config] = None
         self._client: Optional[PolymarketClient] = None
@@ -81,6 +83,13 @@ class SimpleHedgerBot:
 
         # Paper trading: pending order tuple (side, price, size)
         self._pending_paper_order: Optional[tuple] = None
+
+        # Track prices for web UI
+        self._last_up_price: float = 0.0
+        self._last_down_price: float = 0.0
+        self._trade_count: int = 0
+        self._total_pairs: int = 0
+        self._session_realized_pnl: float = 0.0  # Track cumulative session PnL
 
     @property
     def client(self):
@@ -151,145 +160,159 @@ class SimpleHedgerBot:
 
         logger.info("Initialization complete")
 
-    async def run_strategy_cycle(self, market):
-        """Run one complete strategy cycle on a market."""
-        self._strategy = SimpleHedgerStrategy()
-        self._market_start_time = time.time()
-        position = Position(market_slug=market.slug)
-
-        logger.info(f"Starting Simple Hedger on {market.slug}")
-
+    async def _run_strategy_iteration(self, market):
+        """Run one iteration of the strategy loop. Returns True if hedge was just completed."""
         poll_interval = 0.5  # 500ms polling
 
-        while not self._shutdown_event.is_set():
-            # Check if strategy is done
-            if self._strategy.is_done():
-                pair_cost = self._strategy.get_pair_cost()
-                logger.info(
-                    f"CYCLE COMPLETE! Pair cost: ${pair_cost:.4f} | "
-                    f"Profit: ${1.0 - pair_cost:.4f} per pair"
-                )
-                break
+        # Already done - don't trade more, just keep position and wait for market end
+        if self._strategy.is_done():
+            self._send_web_update()
+            await asyncio.sleep(1)  # Slow poll while waiting
+            return False  # Not a new completion, just waiting
 
-            # Check market expiry
-            time_remaining = market.time_remaining()
-            if time_remaining < 5:
-                logger.warning(f"Market expiring, stopping strategy")
-                break
-
-            # Get prices via PairAnalyzer
-            try:
-                opportunity = await self._analyzer.analyze_asymmetric_opportunity(
-                    market=market,
-                    current_up_size=0,
-                    current_down_size=0,
-                )
-            except Exception as e:
-                logger.error(f"Price fetch failed: {e}")
-                await asyncio.sleep(poll_interval)
-                continue
-
-            if opportunity is None or opportunity.up_ask is None or opportunity.down_ask is None:
-                logger.debug("No valid prices, waiting...")
-                await asyncio.sleep(poll_interval)
-                continue
-
-            # Extract prices
-            up_ask = opportunity.up_ask
-            down_ask = opportunity.down_ask
-            up_bid = opportunity.up_bid or (up_ask * 0.98 if up_ask else 0.48)
-            down_bid = opportunity.down_bid or (down_ask * 0.98 if down_ask else 0.48)
-
-            # Get strategy decision
-            time_in_market = time.time() - self._market_start_time
-            current_time = time.time()
-
-            # Paper trading: check pending order for fill
-            if not self.live_mode and self._pending_paper_order:
-                state = self._strategy.state
-                if state.can_paper_fill(current_time, min_delay=0.5):
-                    # Attempt fill simulation
-                    fill_type = self._engine._simulate_fill()
-                    if fill_type != FillType.NONE:
-                        side, price, size = self._pending_paper_order
-                        # Partial fill handling
-                        if fill_type == FillType.PARTIAL:
-                            filled_size = int(size * 0.6)  # 60% partial
-                            logger.info(f"PAPER PARTIAL: {filled_size}/{size} {side} @ ${price:.4f}")
-                        else:
-                            filled_size = size
-                            logger.info(f"PAPER FILL: {size} {side} @ ${price:.4f}")
-                        self._strategy.on_fill(side, price, filled_size)
-                        self._pending_paper_order = None
-                        state.paper_order_placed_at = 0
-                        state.paper_fill_attempts = 0
-                    else:
-                        state.paper_fill_attempts += 1
-                        if state.paper_fill_attempts % 5 == 0:
-                            logger.debug(f"Paper order still pending ({state.paper_fill_attempts} attempts)")
-
-            action = self._strategy.decide(
-                time_in_market=time_in_market,
-                up_bid=up_bid,
-                up_ask=up_ask,
-                down_bid=down_bid,
-                down_ask=down_ask,
-                current_time=current_time,
+        # Get prices via PairAnalyzer
+        try:
+            opportunity = await self._analyzer.analyze_asymmetric_opportunity(
+                market=market,
+                current_up_size=0,
+                current_down_size=0,
             )
+        except Exception as e:
+            logger.error(f"Price fetch failed: {e}")
+            await asyncio.sleep(poll_interval)
+            return False
 
-            # Check for order timeout (needs cancel)
-            if self._strategy.should_cancel_pending(current_time):
-                if self._pending_order_id:
-                    logger.info(f"Order timeout - cancelling {self._pending_order_id[:16]}...")
-                    try:
-                        if self.live_mode:
-                            await self._engine.cancel_order(self._pending_order_id)
-                    except Exception as e:
-                        logger.warning(f"Cancel failed: {e}")
-                    self._pending_order_id = None
+        if opportunity is None or opportunity.up_ask is None or opportunity.down_ask is None:
+            logger.debug("No valid prices, waiting...")
+            await asyncio.sleep(poll_interval)
+            return False
 
-            # Execute action if any
-            if action:
-                side, price, size = action
-                logger.info(f"Placing order: {size} {side} @ ${price:.4f}")
+        # Extract prices
+        up_ask = opportunity.up_ask
+        down_ask = opportunity.down_ask
+        up_bid = opportunity.up_bid or (up_ask * 0.98 if up_ask else 0.48)
+        down_bid = opportunity.down_bid or (down_ask * 0.98 if down_ask else 0.48)
 
+        # Store for web UI
+        self._last_up_price = up_ask
+        self._last_down_price = down_ask
+
+        # Get strategy decision
+        time_in_market = time.time() - self._market_start_time
+        current_time = time.time()
+
+        # Paper trading: check pending order for fill
+        if not self.live_mode and self._pending_paper_order:
+            state = self._strategy.state
+            if state.can_paper_fill(current_time, min_delay=0.5):
+                # Attempt fill simulation
+                fill_type = self._engine._simulate_fill()
+                if fill_type != FillType.NONE:
+                    side, price, size = self._pending_paper_order
+                    # Partial fill handling
+                    if fill_type == FillType.PARTIAL:
+                        filled_size = int(size * 0.6)  # 60% partial
+                        logger.info(f"PAPER PARTIAL: {filled_size}/{size} {side} @ ${price:.4f}")
+                    else:
+                        filled_size = size
+                        logger.info(f"PAPER FILL: {size} {side} @ ${price:.4f}")
+                    self._strategy.on_fill(side, price, filled_size)
+                    self._trade_count += 1
+                    self._pending_paper_order = None
+                    state.paper_order_placed_at = 0
+                    state.paper_fill_attempts = 0
+                    # Check if hedge is now complete
+                    if self._strategy.is_done():
+                        pair_cost = self._strategy.get_pair_cost()
+                        num_pairs = min(self._strategy.state.first_fill_size, filled_size)
+                        if self._strategy.state.flipped:
+                            num_pairs = self._strategy.state.flip_fill_size
+                        profit = (1.0 - pair_cost) * num_pairs
+                        self._session_realized_pnl += profit
+                        self._total_pairs += 1
+                        logger.info(
+                            f"HEDGE COMPLETE! Pair cost: ${pair_cost:.4f} | "
+                            f"Profit: ${profit:.4f} ({num_pairs} pairs) | "
+                            f"Session PnL: ${self._session_realized_pnl:.4f} | "
+                            f"Holding position until market expires"
+                        )
+                else:
+                    state.paper_fill_attempts += 1
+                    if state.paper_fill_attempts % 5 == 0:
+                        logger.debug(f"Paper order still pending ({state.paper_fill_attempts} attempts)")
+
+        action = self._strategy.decide(
+            time_in_market=time_in_market,
+            up_bid=up_bid,
+            up_ask=up_ask,
+            down_bid=down_bid,
+            down_ask=down_ask,
+            current_time=current_time,
+        )
+
+        # Check for order timeout (needs cancel)
+        if self._strategy.should_cancel_pending(current_time):
+            if self._pending_order_id:
+                logger.info(f"Order timeout - cancelling {self._pending_order_id[:16]}...")
                 try:
                     if self.live_mode:
-                        result = await self._engine.execute_single_side_trade(
-                            market=market,
-                            side=side,
-                            price=price,
-                            size=size,
-                        )
-
-                        if result.get("success"):
-                            filled_price = result.get("filled_price", price)
-                            filled_size = result.get("filled_size", size)
-                            self._strategy.on_fill(side, filled_price, filled_size)
-                            logger.info(f"FILLED: {filled_size} {side} @ ${filled_price:.4f}")
-                        else:
-                            self._pending_order_id = result.get("order_id")
-                    else:
-                        # Paper trading - create pending order (competitive simulation)
-                        self._pending_paper_order = (side, price, size)
-                        self._strategy.state.paper_order_placed_at = current_time
-                        self._strategy.state.paper_fill_attempts = 0
-                        logger.info(f"PAPER ORDER: {size} {side} @ ${price:.4f} (pending)")
-
+                        await self._engine.cancel_order(self._pending_order_id)
                 except Exception as e:
-                    logger.error(f"Order failed: {e}")
+                    logger.warning(f"Cancel failed: {e}")
+                self._pending_order_id = None
 
-            # Log status periodically
-            state = self._strategy.state
-            if int(time_in_market) % 5 == 0:
-                logger.debug(
-                    f"Status: {state.phase.value} | "
-                    f"UP: ${up_ask:.2f} | DOWN: ${down_ask:.2f}"
-                )
+        # Execute action if any
+        if action:
+            side, price, size = action
+            logger.info(f"Placing order: {size} {side} @ ${price:.4f}")
 
-            await asyncio.sleep(poll_interval)
+            try:
+                if self.live_mode:
+                    result = await self._engine.execute_single_side_trade(
+                        market=market,
+                        side=side,
+                        price=price,
+                        size=size,
+                    )
 
-        return self._strategy.is_done()
+                    if result.get("success"):
+                        filled_price = result.get("filled_price", price)
+                        filled_size = result.get("filled_size", size)
+                        self._strategy.on_fill(side, filled_price, filled_size)
+                        self._trade_count += 1
+                        logger.info(f"FILLED: {filled_size} {side} @ ${filled_price:.4f}")
+                        # Check if hedge is now complete
+                        if self._strategy.is_done():
+                            pair_cost = self._strategy.get_pair_cost()
+                            num_pairs = min(self._strategy.state.first_fill_size, filled_size)
+                            if self._strategy.state.flipped:
+                                num_pairs = self._strategy.state.flip_fill_size
+                            profit = (1.0 - pair_cost) * num_pairs
+                            self._session_realized_pnl += profit
+                            self._total_pairs += 1
+                            logger.info(
+                                f"HEDGE COMPLETE! Pair cost: ${pair_cost:.4f} | "
+                                f"Profit: ${profit:.4f} ({num_pairs} pairs) | "
+                                f"Session PnL: ${self._session_realized_pnl:.4f} | "
+                                f"Holding position until market expires"
+                            )
+                    else:
+                        self._pending_order_id = result.get("order_id")
+                else:
+                    # Paper trading - create pending order (competitive simulation)
+                    self._pending_paper_order = (side, price, size)
+                    self._strategy.state.paper_order_placed_at = current_time
+                    self._strategy.state.paper_fill_attempts = 0
+                    logger.info(f"PAPER ORDER: {size} {side} @ ${price:.4f} (pending)")
+
+            except Exception as e:
+                logger.error(f"Order failed: {e}")
+
+        # Send update to web UI
+        self._send_web_update()
+
+        await asyncio.sleep(poll_interval)
+        return False
 
     async def run(self, duration_minutes: float = 60):
         """Main run loop."""
@@ -305,6 +328,7 @@ class SimpleHedgerBot:
 
         markets_traded = 0
         pairs_completed = 0
+        current_market_slug = None
 
         try:
             while self._running and time.time() < end_time:
@@ -319,6 +343,7 @@ class SimpleHedgerBot:
                     await asyncio.sleep(10)
                     # Try to rotate to get a new market
                     await self._rotator.rotate()
+                    current_market_slug = None
                     continue
 
                 # Check if market has enough time remaining
@@ -326,28 +351,32 @@ class SimpleHedgerBot:
                 if time_remaining < 30:
                     logger.info(f"Market {market.slug} expiring ({time_remaining:.0f}s), rotating...")
                     await self._rotator.rotate()
+                    current_market_slug = None
                     continue
 
-                logger.info(
-                    f"Trading: {market.slug} | "
-                    f"Time remaining: {time_remaining:.0f}s"
-                )
+                # Only create new strategy when market changes
+                if market.slug != current_market_slug:
+                    logger.info(
+                        f"Trading: {market.slug} | "
+                        f"Time remaining: {time_remaining:.0f}s"
+                    )
+                    current_market_slug = market.slug
+                    markets_traded += 1
+                    # Initialize new strategy for this market
+                    self._strategy = SimpleHedgerStrategy()
+                    self._market_start_time = time.time()
 
-                # Run strategy on market
-                markets_traded += 1
-                success = await self.run_strategy_cycle(market)
+                # Run one iteration of strategy (not full cycle)
+                success = await self._run_strategy_iteration(market)
 
                 if success:
                     pairs_completed += 1
-
-                # Wait for next market
-                logger.info(f"Cycle done. Markets: {markets_traded}, Pairs: {pairs_completed}")
+                    logger.info(f"Pair completed. Markets: {markets_traded}, Pairs: {pairs_completed}")
 
                 # Check if we should rotate
                 if self._rotator.should_rotate():
                     await self._rotator.rotate()
-                else:
-                    await asyncio.sleep(5)
+                    current_market_slug = None
 
         except asyncio.CancelledError:
             logger.info("Bot cancelled")
@@ -372,6 +401,123 @@ class SimpleHedgerBot:
         """Request graceful shutdown."""
         logger.info("Shutdown requested")
         self._shutdown_event.set()
+
+    def _build_web_state(self) -> dict:
+        """Build trading state as JSON for web UI."""
+        market = self._rotator.current_market if self._rotator else None
+
+        # Calculate time remaining
+        time_remaining = "N/A"
+        time_remaining_secs = 0
+        if market:
+            remaining = market.time_remaining()
+            if remaining > 0:
+                mins = int(remaining // 60)
+                secs = int(remaining % 60)
+                time_remaining = f"{mins}:{secs:02d}"
+                time_remaining_secs = remaining
+            else:
+                time_remaining = "EXPIRED"
+
+        # Get strategy state directly - ONE hedge per market, no reset
+        state = self._strategy.state if self._strategy else None
+        phase = state.phase.value if state else "idle"
+        flip_count = state.flip_count if state else 0
+
+        # Build position from strategy state (all fills for this market)
+        up_filled = 0
+        down_filled = 0
+        up_cost = 0.0
+        down_cost = 0.0
+        up_price = 0.0
+        down_price = 0.0
+
+        if state:
+            # First fill
+            if state.first_fill_side == "UP" and state.first_fill_size > 0:
+                up_filled += int(state.first_fill_size)
+                up_cost += state.first_fill_price * state.first_fill_size
+                up_price = state.first_fill_price
+            elif state.first_fill_side == "DOWN" and state.first_fill_size > 0:
+                down_filled += int(state.first_fill_size)
+                down_cost += state.first_fill_price * state.first_fill_size
+                down_price = state.first_fill_price
+
+            # Hedge fill (opposite of first)
+            if state.hedge_fill_size > 0:
+                if state.first_fill_side == "UP":
+                    down_filled += int(state.hedge_fill_size)
+                    down_cost += state.hedge_fill_price * state.hedge_fill_size
+                    down_price = state.hedge_fill_price
+                else:
+                    up_filled += int(state.hedge_fill_size)
+                    up_cost += state.hedge_fill_price * state.hedge_fill_size
+                    up_price = state.hedge_fill_price
+
+            # Flip fills (2x on side that moved)
+            if state.flip_fill_size > 0:
+                if state.flip_fill_side == "UP":
+                    up_filled += int(state.flip_fill_size)
+                    up_cost += state.flip_fill_price * state.flip_fill_size
+                elif state.flip_fill_side == "DOWN":
+                    down_filled += int(state.flip_fill_size)
+                    down_cost += state.flip_fill_price * state.flip_fill_size
+
+        # Calculate average prices
+        up_avg = up_cost / up_filled if up_filled > 0 else 0.0
+        down_avg = down_cost / down_filled if down_filled > 0 else 0.0
+        pair_cost = up_price + down_price if up_price > 0 and down_price > 0 else 0.0
+
+        # Position data
+        pos_data = {
+            "up_qty": up_filled,
+            "up_avg_price": up_avg,
+            "up_cost": up_cost,
+            "up_current": self._last_up_price,
+            "down_qty": down_filled,
+            "down_avg_price": down_avg,
+            "down_cost": down_cost,
+            "down_current": self._last_down_price,
+        }
+
+        # Metrics
+        current_pairs = min(up_filled, down_filled)  # Current market's hedged pairs
+        locked_profit = (1.0 - pair_cost) * current_pairs if pair_cost > 0 else 0
+        metrics = {
+            "pairs": current_pairs,  # Show current market pairs, not session total
+            "pair_cost": pair_cost,
+            "locked_profit": locked_profit,
+            "imbalance_pct": 0,
+            "spread": abs(self._last_up_price - self._last_down_price) if self._last_up_price and self._last_down_price else 0,
+            "pnl_min": locked_profit,
+            "pnl_max": locked_profit,
+            "balance": self._engine.balance if self._engine else 0,
+            "target_shares": 0,
+            "realized_pnl": self._session_realized_pnl,  # Actual session PnL
+        }
+
+        return {
+            "type": "trading_update",
+            "strategy": "simple_hedger",
+            "market_slug": market.slug if market else "No market",
+            "time_remaining": time_remaining,
+            "time_remaining_secs": time_remaining_secs,
+            "position": pos_data,
+            "metrics": metrics,
+            "trade_count": self._trade_count,
+            "total_pairs": self._total_pairs,
+            "phase": phase,
+            "flip_count": flip_count,
+        }
+
+    def _send_web_update(self) -> None:
+        """Send trading state to web UI if callback is set."""
+        if self._web_callback:
+            try:
+                state = self._build_web_state()
+                self._web_callback(state)
+            except Exception as e:
+                logger.warning(f"Failed to send web update: {e}")
 
 
 async def main():

@@ -1,0 +1,26 @@
+[Unit]
+Description=Polymarket AMM Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/polymarket-amm-bot
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/ubuntu/polymarket-amm-bot/.env
+ExecStart=/home/ubuntu/polymarket-amm-bot/venv/bin/python scripts/run_paper_bot.py --mode live --strategy calculus_maker
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ubuntu/polymarket-amm-bot/logs/bot.log
+StandardError=append:/home/ubuntu/polymarket-amm-bot/logs/bot.log
+
+# Resource limits
+MemoryMax=1G
+CPUQuota=50%
+
+# Auto-restart on failure
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

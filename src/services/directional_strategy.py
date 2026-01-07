@@ -46,16 +46,19 @@ class DirectionalConfig:
     """Configuration for directional trading mode."""
 
     # Flip detection
-    sigma_threshold: float = 2.5          # Base std devs for impulsive move (2.5σ = ~1.2% of moves)
-    sustained_seconds: float = 30.0       # Seconds to confirm flip
+    sigma_threshold: float = 2.0          # 2 sigma for impulsive move detection
+    sustained_seconds: float = 45.0       # Seconds to confirm flip (increased from 30 for more confirmation)
     window_seconds: int = 60              # Rolling window for stats
-    flip_cooldown_seconds: float = 120.0  # Min time between flips
-    time_conviction_threshold: float = 8.0  # Time conviction needed to flip (higher = harder)
-    max_flips_per_market: int = 5         # Hard cap on flips per market (0 = unlimited)
+    flip_cooldown_seconds: float = 180.0  # Min time between flips (increased from 120s)
+    time_conviction_threshold: float = 10.0  # Time conviction needed to flip (increased from 8.0)
+    max_flips_per_market: int = 2         # Hard cap on flips per market (reduced from 5)
+    min_flip_time_remaining_secs: int = 420  # Don't flip with <7 minutes remaining (new parameter)
 
     # Position sizing (% of starting balance)
-    max_position_pct: float = 0.15        # 15% of balance per side
+    max_position_pct: float = 0.17        # 17% of balance per side (final safety limit)
+    target_shares: int = 15               # Target shares per side (first line of defense)
     # Example: $100 balance → max 15 UP + 15 DOWN
+    trade_size_pct: float = 0.3333        # Each trade = 33.33% of max shares (e.g., 5 of 15)
 
     # Trading - Time-decayed attractive price
     # Early in market: more selective (lower threshold)
@@ -173,6 +176,19 @@ class FlipDetector:
                 should_flip=False,
                 new_bias=current_bias,
                 reason=f"Max flips reached ({current_flip_count}/{self.config.max_flips_per_market})",
+                confidence=0.0,
+                price_vs_strike_pct=self.client.price_vs_strike_pct,
+                z_score=0.0,
+                time_conviction=0.0,
+                sustained_seconds=0.0,
+            )
+
+        # Check time-based flip lockout (don't flip too close to resolution)
+        if time_remaining_secs < self.config.min_flip_time_remaining_secs:
+            return FlipSignal(
+                should_flip=False,
+                new_bias=current_bias,
+                reason=f"Too late to flip ({time_remaining_secs}s < {self.config.min_flip_time_remaining_secs}s)",
                 confidence=0.0,
                 price_vs_strike_pct=self.client.price_vs_strike_pct,
                 z_score=0.0,
@@ -320,6 +336,12 @@ class DirectionalTradingStrategy:
         # Calculate max shares per side
         self.max_shares_per_side = int(starting_balance * config.max_position_pct)
 
+        # Calculate trade size from percentage of max shares
+        # trade_size_pct=0.3333 means each trade is 33.33% of max (e.g., 5 of 15)
+        calculated_trade_size = max(1, int(self.max_shares_per_side * config.trade_size_pct))
+        # Use calculated size, fallback to config.trade_size if trade_size_pct not set
+        self.trade_size = calculated_trade_size if hasattr(config, 'trade_size_pct') else config.trade_size
+
         self.state = DirectionalState(
             bias=initial_bias,
             phase=DirectionalPhase.ACCUMULATE,
@@ -330,7 +352,7 @@ class DirectionalTradingStrategy:
 
         logger.info(
             f"DirectionalStrategy initialized: bias={initial_bias.value}, "
-            f"max_shares={self.max_shares_per_side}/side, "
+            f"max_shares={self.max_shares_per_side}/side, trade_size={self.trade_size}, "
             f"attractive_price={config.attractive_price_early:.2f}-{config.attractive_price_late:.2f}"
         )
 
@@ -380,6 +402,34 @@ class DirectionalTradingStrategy:
         attractive = early + (late - early) * (1 - time_factor)
 
         return attractive
+
+    def get_volume_weighted_size(self, price: float, base_size: int) -> int:
+        """
+        Volume-weighted trade size for bias accumulation.
+
+        Gabagool-style: buy MORE shares when cheap, FEWER when expensive.
+        This maximizes position at lower average cost.
+
+        Price tiers:
+            < $0.35: 3x base size (load up on cheap bias!)
+            $0.35-0.50: 2x base size (still good value)
+            $0.50+: 1x base size (fair value or hedging)
+
+        Args:
+            price: Current ask price for the side
+            base_size: Base trade size from config
+
+        Returns:
+            Adjusted trade size (capped by max_shares_per_side)
+        """
+        if price < 0.35:
+            multiplier = 3
+        elif price < 0.50:
+            multiplier = 2
+        else:
+            multiplier = 1
+
+        return base_size * multiplier
 
     def reset_for_new_market(self) -> None:
         """Reset state for a new market cycle."""
@@ -515,7 +565,7 @@ class DirectionalTradingStrategy:
         up_ask: float,
         down_ask: float,
     ) -> Optional[TradeDecision]:
-        """Phase 1: Buy bias side at attractive prices."""
+        """Phase 1: Buy bias side at attractive prices with volume weighting."""
         bias_side = self._get_bias_side()
         price = up_ask if bias_side == "UP" else down_ask
         current_shares = self.state.up_shares if bias_side == "UP" else self.state.down_shares
@@ -533,11 +583,15 @@ class DirectionalTradingStrategy:
         if price > attractive:
             return None
 
+        # Volume-weighted size: buy more when cheap, less when expensive
+        weighted_size = self.get_volume_weighted_size(price, self.trade_size)
+        trade_size = min(weighted_size, self.max_shares_per_side - current_shares)
+
         return TradeDecision(
             side=bias_side,
             price=price,
-            size=min(self.config.trade_size, self.max_shares_per_side - current_shares),
-            reason=f"Accumulate {bias_side} ({self.state.bias.value} bias) [thresh=${attractive:.2f}]",
+            size=trade_size,
+            reason=f"Accumulate {bias_side} ({self.state.bias.value} bias) [thresh=${attractive:.2f}, size={trade_size}]",
             phase=DirectionalPhase.ACCUMULATE,
             is_hedge=False,
         )
@@ -579,7 +633,7 @@ class DirectionalTradingStrategy:
         up_ask: float,
         down_ask: float,
     ) -> Optional[TradeDecision]:
-        """Phase 3: Average down on bias side after balanced."""
+        """Phase 3: Average down on bias side after balanced (with volume weighting)."""
         bias_side = self._get_bias_side()
         price = up_ask if bias_side == "UP" else down_ask
         current_shares = self.state.up_shares if bias_side == "UP" else self.state.down_shares
@@ -603,11 +657,15 @@ class DirectionalTradingStrategy:
         if price > attractive:
             return None
 
+        # Volume-weighted size: buy more when cheap (dips are great opportunities!)
+        weighted_size = self.get_volume_weighted_size(price, self.trade_size)
+        trade_size = min(weighted_size, self.max_shares_per_side - current_shares)
+
         return TradeDecision(
             side=bias_side,
             price=price,
-            size=min(self.config.trade_size, self.max_shares_per_side - current_shares),
-            reason=f"Avg down {bias_side} (was ${self.state.last_buy_price:.2f}) [thresh=${attractive:.2f}]",
+            size=trade_size,
+            reason=f"Avg down {bias_side} (was ${self.state.last_buy_price:.2f}) [thresh=${attractive:.2f}, size={trade_size}]",
             phase=DirectionalPhase.AVERAGE_DOWN,
             is_hedge=False,
         )

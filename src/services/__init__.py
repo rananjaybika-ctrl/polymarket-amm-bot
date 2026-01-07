@@ -40,6 +40,7 @@ from src.services.dry_run import (
     SimulationReport,
     run_dry_run,
 )
+from src.services.auto_redeemer import AutoRedeemer
 
 __all__ = [
     "MarketFinder",
@@ -68,4 +69,5 @@ __all__ = [
     "DryRunSimulator",
     "SimulationReport",
     "run_dry_run",
+    "AutoRedeemer",
 ]

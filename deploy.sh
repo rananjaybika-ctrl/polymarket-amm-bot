@@ -1,0 +1,53 @@
+#!/bin/bash
+# One-command deploy to AWS Ireland
+# Usage: ./deploy.sh "commit message"
+
+set -e
+
+AWS_IP="18.203.188.18"
+AWS_KEY="$HOME/Downloads/polymarket-key.pem"
+LOCAL_PATH="/Users/rananjaybika/polymarket-amm-bot/"
+REMOTE_PATH="ubuntu@$AWS_IP:~/polymarket-amm-bot/"
+
+echo "=== Polymarket Bot Deploy ==="
+echo ""
+
+# 1. Git commit & push (if message provided)
+if [ -n "$1" ]; then
+    echo "[1/4] Committing: $1"
+    git add .
+    git commit -m "$1" || echo "Nothing to commit"
+    git push origin main
+else
+    echo "[1/4] Skipping git (no message provided)"
+fi
+
+# 2. Sync to AWS
+echo ""
+echo "[2/4] Syncing to AWS Ireland..."
+rsync -avz --delete \
+    --exclude 'venv' \
+    --exclude '__pycache__' \
+    --exclude '.git' \
+    --exclude '.env' \
+    --exclude '*.pyc' \
+    --exclude 'logs/*.log' \
+    --exclude 'state/*.json' \
+    -e "ssh -i $AWS_KEY" \
+    "$LOCAL_PATH" "$REMOTE_PATH"
+
+# 3. Restart bot
+echo ""
+echo "[3/4] Restarting bot..."
+ssh -i "$AWS_KEY" "ubuntu@$AWS_IP" 'sudo systemctl restart polymarket-bot'
+
+# 4. Verify
+echo ""
+echo "[4/4] Verifying..."
+sleep 2
+ssh -i "$AWS_KEY" "ubuntu@$AWS_IP" 'sudo systemctl status polymarket-bot --no-pager | head -10'
+
+echo ""
+echo "=== Deploy Complete ==="
+echo "Dashboard: http://$AWS_IP:8000"
+echo "Logs: ssh -i $AWS_KEY ubuntu@$AWS_IP 'journalctl -u polymarket-bot -f'"

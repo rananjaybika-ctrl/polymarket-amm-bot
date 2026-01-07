@@ -522,10 +522,12 @@ class MarketFinder:
             return []
 
         # Generate slugs for all markets that END within the range
+        # Slug uses START time, so subtract 900 from END time to get the correct slug
         slugs = []
         ts = first_boundary
         while ts <= last_boundary:
-            slugs.append(f"btc-updown-15m-{ts}")
+            start_time = ts - 900  # Market that ENDS at ts STARTS 15 min earlier
+            slugs.append(f"btc-updown-15m-{start_time}")
             ts += 900  # Next 15-min boundary
 
         logger.info(

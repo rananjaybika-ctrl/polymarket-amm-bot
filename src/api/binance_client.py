@@ -360,7 +360,16 @@ class BinanceClient:
         """
         Calculate z-score of current price vs strike deviation.
 
-        How many standard deviations is the current move from the mean?
+        Measures how many standard deviations the current move from strike is,
+        scaled by the number of observations (random walk adjustment).
+
+        The calculation accounts for the fact that price changes accumulate over time:
+        - current_deviation: Total % move from strike
+        - std_dev: Per-tick volatility
+        - num_ticks: Number of price observations in window
+
+        For a random walk, expected deviation after N steps ~ std_dev * sqrt(N).
+        Z-score = current_deviation / (std_dev * sqrt(N))
 
         Args:
             window_seconds: Window size for std dev calculation
@@ -368,12 +377,36 @@ class BinanceClient:
         Returns:
             Z-score (absolute value), or 0.0 if insufficient data
         """
-        std_dev = self.get_std_dev(window_seconds)
+        window = window_seconds or self._window_seconds
+        changes = self.get_price_changes(window)
+
+        if len(changes) < 2:
+            return 0.0
+
+        try:
+            std_dev = statistics.stdev(changes)
+        except statistics.StatisticsError:
+            return 0.0
 
         if std_dev <= 0:
             return 0.0
 
-        mean_change = self.get_mean_change(window_seconds)
-        current_deviation = self.price_vs_strike_pct
+        # Number of ticks in the window
+        num_ticks = len(changes)
 
-        return abs(current_deviation - mean_change) / std_dev
+        # Expected deviation for a random walk: std_dev * sqrt(N)
+        # This normalizes the z-score to account for time elapsed
+        expected_deviation = std_dev * (num_ticks ** 0.5)
+
+        if expected_deviation <= 0:
+            return 0.0
+
+        # Current move from strike (absolute value)
+        current_deviation = abs(self.price_vs_strike_pct)
+
+        # Z-score: how many "expected deviations" is the current move?
+        raw_z = current_deviation / expected_deviation
+
+        # Cap z-score to reasonable range (standard practice)
+        # Raw z can be huge when per-tick volatility is tiny but total move is large
+        return min(raw_z, 5.0)

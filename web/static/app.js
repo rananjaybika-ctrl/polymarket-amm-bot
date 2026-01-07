@@ -1,6 +1,6 @@
 /**
  * Polymarket Trading Bot - Card-Based Dashboard Controller
- * Manages 3 independent trading modes: Standard, Volume Weighted, Directional
+ * Manages 4 trading modes: Calculus Maker, Simple Hedger, Volume Weighted, Directional
  */
 
 // ============================================
@@ -8,8 +8,24 @@
 // ============================================
 
 const modes = {
-    standard: {
+    'calculus-maker': {
         status: 'stopped',  // stopped | paper | live
+        running: false,
+        config: {},
+        liveData: {},
+        timeRemaining: 0,
+        countdownInterval: null
+    },
+    'fair-value-mm': {
+        status: 'stopped',
+        running: false,
+        config: {},
+        liveData: {},
+        timeRemaining: 0,
+        countdownInterval: null
+    },
+    'simple-hedger': {
+        status: 'stopped',
         running: false,
         config: {},
         liveData: {},
@@ -42,12 +58,59 @@ let reconnectTimeout = null;
 // INITIALIZATION
 // ============================================
 
+/**
+ * Clear all position displays on page load to prevent stale data.
+ * Called before WebSocket connects to ensure clean slate.
+ */
+function clearAllPositionDisplays() {
+    ['calculus-maker', 'fair-value-mm', 'simple-hedger', 'volume-weighted', 'directional'].forEach(mode => {
+        // Position quantities and prices
+        setElementText(`${mode}-up-qty`, '--');
+        setElementText(`${mode}-down-qty`, '--');
+        setElementText(`${mode}-up-avg`, '--');
+        setElementText(`${mode}-down-avg`, '--');
+        setElementText(`${mode}-up-cost`, '--');
+        setElementText(`${mode}-down-cost`, '--');
+
+        // Metrics
+        setElementText(`${mode}-pairs`, '--');
+        setElementText(`${mode}-avg-pair-cost`, '--');
+        setElementText(`${mode}-balance`, '--');
+
+        // PNL displays
+        const lockedEl = document.getElementById(`${mode}-locked-pnl`);
+        if (lockedEl) {
+            lockedEl.textContent = '--';
+            lockedEl.classList.remove('profit', 'loss');
+        }
+
+        const rangeEl = document.getElementById(`${mode}-pnl-range`);
+        if (rangeEl) {
+            rangeEl.textContent = '--';
+            rangeEl.classList.remove('profit', 'loss');
+        }
+
+        const realizedEl = document.getElementById(`${mode}-realized-pnl`);
+        if (realizedEl) {
+            realizedEl.textContent = '--';
+            realizedEl.classList.remove('profit', 'loss');
+        }
+
+        // Time display
+        const timeEl = document.getElementById(`${mode}-time`);
+        if (timeEl) timeEl.textContent = '--:--';
+    });
+}
+
 function init() {
+    // Clear stale position data first (prevents old data showing after refresh)
+    clearAllPositionDisplays();
+
     // Set default datetimes
     setDefaultDatetimes();
 
     // Setup config toggles
-    ['standard', 'volume-weighted', 'directional'].forEach(mode => {
+    ['calculus-maker', 'fair-value-mm', 'simple-hedger', 'volume-weighted', 'directional'].forEach(mode => {
         const toggleBtn = document.getElementById(`toggle-${mode}`);
         const configContent = document.getElementById(`config-${mode}`);
 
@@ -58,9 +121,18 @@ function init() {
     });
 
     // Setup action buttons
-    setupModeButtons('standard');
+    setupModeButtons('calculus-maker');
+    setupModeButtons('fair-value-mm');
+    setupModeButtons('simple-hedger');
     setupModeButtons('volume-weighted');
     setupModeButtons('directional');
+
+    // Setup bias toggle to update triangle in header
+    document.querySelectorAll('input[name="directional_bias"]').forEach(radio => {
+        radio.addEventListener('change', (e) => {
+            updateBiasTriangle(e.target.value);
+        });
+    });
 
     // Connect WebSocket
     connectWebSocket();
@@ -79,7 +151,7 @@ function setDefaultDatetimes() {
     const startStr = formatDatetimeLocal(start);
     const endStr = formatDatetimeLocal(end);
 
-    ['standard', 'volume-weighted', 'directional'].forEach(mode => {
+    ['calculus-maker', 'fair-value-mm', 'simple-hedger', 'volume-weighted', 'directional'].forEach(mode => {
         const startEl = document.getElementById(`${mode}-start`);
         const endEl = document.getElementById(`${mode}-end`);
         if (startEl) startEl.value = startStr;
@@ -159,14 +231,26 @@ function updateWsStatus(connected) {
 }
 
 function routeMessage(data) {
+    // DEBUG: Write to visible debug element
+    const debugEl = document.getElementById('debug-ws');
+    if (debugEl) {
+        const now = new Date().toLocaleTimeString();
+        const pos = data.position || {};
+        debugEl.innerHTML = `[${now}] type=${data.type} strategy=${data.strategy || 'N/A'} up=${pos.up_qty || 0} down=${pos.down_qty || 0}`;
+    }
+
     if (data.type === 'status') {
         // Status update for all modes
-        if (data.standard) updateModeStatus('standard', data.standard);
+        if (data.calculus_maker) updateModeStatus('calculus-maker', data.calculus_maker);
+        if (data.fair_value_mm) updateModeStatus('fair-value-mm', data.fair_value_mm);
+        if (data.simple_hedger) updateModeStatus('simple-hedger', data.simple_hedger);
         if (data.volume_weighted) updateModeStatus('volume-weighted', data.volume_weighted);
         if (data.directional) updateModeStatus('directional', data.directional);
     } else if (data.type === 'trading_update') {
         // Route trading update to specific mode's card
-        const strategy = data.strategy || 'standard';
+        // Convert underscore to hyphen for frontend mode names (volume_weighted -> volume-weighted)
+        const strategy = (data.strategy || 'calculus-maker').replace('_', '-');
+        console.log('[WS] Routing trading_update to:', strategy, 'Position:', data.position);
         updateLiveData(strategy, data);
     }
 }
@@ -176,7 +260,9 @@ async function fetchStatus() {
         const res = await fetch('/api/status');
         const data = await res.json();
 
-        if (data.standard) updateModeStatus('standard', data.standard);
+        if (data.calculus_maker) updateModeStatus('calculus-maker', data.calculus_maker);
+        if (data.fair_value_mm) updateModeStatus('fair-value-mm', data.fair_value_mm);
+        if (data.simple_hedger) updateModeStatus('simple-hedger', data.simple_hedger);
         if (data.volume_weighted) updateModeStatus('volume-weighted', data.volume_weighted);
         if (data.directional) updateModeStatus('directional', data.directional);
     } catch (error) {
@@ -202,7 +288,9 @@ function updateModeStatus(modeName, status) {
         statusType = isPaper ? 'paper' : 'live';
         statusText = isPaper ? 'Paper' : 'LIVE';
 
-        if (status.waiting_until) {
+        if (status.stopping) {
+            statusText = 'Stopping...';
+        } else if (status.waiting_until) {
             statusText += ' (Waiting)';
         } else if (status.trading_started) {
             statusText += ' Trading';
@@ -255,28 +343,45 @@ function formatConfigTooltip(modeName, status) {
     const lines = [];
     const config = status.config || {};
 
-    // Add end time at top if available
-    if (status.end_datetime) {
-        const endDt = new Date(status.end_datetime);
+    // Add scheduled start time if waiting
+    if (status.waiting_until) {
+        const startDt = new Date(status.waiting_until);
+        lines.push(`Starts: ${startDt.toLocaleTimeString()}`);
+    }
+
+    // Add end time at top if available (check status first, then config)
+    const endTime = status.end_datetime || (status.config && status.config.end_datetime);
+    if (endTime) {
+        const endDt = new Date(endTime);
         lines.push(`Ends: ${endDt.toLocaleTimeString()}`);
+    }
+
+    if (status.waiting_until || endTime) {
         lines.push('---');
     }
 
-    if (modeName === 'standard') {
-        lines.push(`Trade Size: ${config.accum_trade_size || '--'}`);
-        lines.push(`Target: ${config.accum_target_shares || '--'}`);
-        lines.push(`Max Imbal: ${config.accum_max_imbalance || '--'}`);
-        lines.push(`Cost Target: ${config.accum_pair_cost_target || '--'}`);
-        lines.push(`Cost Limit: ${config.accum_pair_cost_limit || '--'}`);
+    if (modeName === 'calculus-maker') {
+        lines.push(`Max Shares: ${config.max_shares || '--'}`);
+        lines.push(`Min Shares: ${config.min_shares || '--'}`);
+        lines.push(`m_min: ${config.m_min || '--'}`);
+        lines.push(`m_max: ${config.m_max || '--'}`);
+        lines.push(`Lambda: ${config.lambda_decay || '--'}`);
+        lines.push(`Max Pair: ${config.max_pair_cost || '--'}`);
+    } else if (modeName === 'simple-hedger') {
+        lines.push(`Size: ${config.size || '--'}`);
+        lines.push(`Target: $${config.target_pair_cost || '--'}`);
+        lines.push(`Emergency: $${config.emergency_pair_cost || '--'}`);
+        lines.push(`Flip: +$${config.flip_threshold || '--'}`);
+        lines.push(`Wait: ${config.wait_seconds || '--'}s`);
     } else if (modeName === 'volume-weighted') {
         lines.push(`Target: ${config.accum_target_shares || '--'}`);
         lines.push(`Imbal %: ${config.vw_imbalance_pct || '--'}`);
     } else if (modeName === 'directional') {
         lines.push(`Bias: ${config.dir_initial_bias || '--'}`);
-        lines.push(`Trade Size: ${config.accum_trade_size || '--'}`);
+        lines.push(`Target: ${config.dir_target_shares || '--'}`);
+        lines.push(`Max Pos: ${config.max_position_pct ? (config.max_position_pct * 100).toFixed(0) + '%' : '--'}`);
         lines.push(`Sigma: ${config.dir_sigma_threshold || '--'}`);
         lines.push(`Max Flips: ${config.dir_max_flips || '--'}`);
-        lines.push(`Flip CD: ${config.dir_flip_cooldown || '--'}s`);
     }
 
     lines.push(`Balance: $${config.starting_balance || '--'}`);
@@ -345,6 +450,12 @@ function updateLiveData(modeName, data) {
     setElementText(`${modeName}-up-cost`, upCost > 0 ? `$${upCost.toFixed(2)}` : '--');
     setElementText(`${modeName}-down-cost`, downCost > 0 ? `$${downCost.toFixed(2)}` : '--');
 
+    // Current market prices (UP/DOWN mid-prices)
+    const upPrice = pos.up_current || 0;
+    const downPrice = pos.down_current || 0;
+    setElementText(`${modeName}-up-price`, upPrice > 0 ? `UP $${upPrice.toFixed(3)}` : 'UP $--');
+    setElementText(`${modeName}-down-price`, downPrice > 0 ? `DOWN $${downPrice.toFixed(3)}` : 'DOWN $--');
+
     // Metrics
     const metrics = data.metrics || {};
     setElementText(`${modeName}-pairs`, metrics.pairs || '--');
@@ -379,14 +490,23 @@ function updateLiveData(modeName, data) {
         }
     }
 
-    // Directional-specific: bias
+    // Session P&L (realized from resolved markets)
+    const realizedEl = document.getElementById(`${modeName}-realized-pnl`);
+    if (realizedEl) {
+        const realizedPnl = metrics.realized_pnl || 0;
+        const sign = realizedPnl >= 0 ? '+' : '';
+        realizedEl.textContent = `${sign}$${realizedPnl.toFixed(2)}`;
+        realizedEl.classList.remove('profit', 'loss');
+        realizedEl.classList.add(realizedPnl >= 0 ? 'profit' : 'loss');
+    }
+
+    // Directional-specific: bias triangle and flips
     if (modeName === 'directional' && data.directional_status) {
-        const biasEl = document.getElementById('directional-bias');
+        const triangleEl = document.getElementById('directional-triangle');
         const flipsEl = document.getElementById('directional-flips');
-        if (biasEl) {
+        if (triangleEl) {
             const bias = data.directional_status.bias || 'BULLISH';
-            biasEl.textContent = bias;
-            biasEl.className = `bias-value ${bias.toLowerCase()}`;
+            updateBiasTriangle(bias);
         }
         if (flipsEl) {
             flipsEl.textContent = `(${data.directional_status.flip_count || 0} flips)`;
@@ -398,6 +518,16 @@ function updateLiveData(modeName, data) {
 function setElementText(id, value) {
     const el = document.getElementById(id);
     if (el) el.textContent = value;
+}
+
+// Update bias triangle (bullish = green up arrow, bearish = red down arrow)
+function updateBiasTriangle(bias) {
+    const triangleEl = document.getElementById('directional-triangle');
+    if (!triangleEl) return;
+
+    const isBullish = bias.toUpperCase() === 'BULLISH';
+    triangleEl.innerHTML = isBullish ? '&#9650;' : '&#9660;';  // ▲ or ▼
+    triangleEl.className = `bias-triangle ${isBullish ? 'bullish' : 'bearish'}`;
 }
 
 function updateTimeDisplay(modeName) {
@@ -455,21 +585,19 @@ function stopCountdown(modeName) {
 // CONFIG COLLECTION
 // ============================================
 
-function getStandardConfig() {
+function getSimpleHedgerConfig() {
     return {
-        mode: document.querySelector('input[name="standard_mode"]:checked').value,
-        accum_mode: 'standard',
+        mode: document.querySelector('input[name="simple_hedger_mode"]:checked').value,
         market: 'btc-15m',
-        start_datetime: document.getElementById('standard-start').value,
-        end_datetime: document.getElementById('standard-end').value,
-        starting_balance: parseFloat(document.getElementById('standard-balance-input').value),
-        accum_trade_size: parseInt(document.getElementById('standard-trade-size').value),
-        accum_target_shares: parseInt(document.getElementById('standard-target').value),
-        accum_max_imbalance: parseInt(document.getElementById('standard-max-imbalance').value),
-        accum_pair_cost_target: parseFloat(document.getElementById('standard-cost-target').value),
-        accum_pair_cost_limit: parseFloat(document.getElementById('standard-cost-limit').value),
-        max_share_price: 0.95,
-        accum_buy_both_sides: true
+        start_datetime: document.getElementById('simple-hedger-start').value,
+        end_datetime: document.getElementById('simple-hedger-end').value,
+        starting_balance: parseFloat(document.getElementById('simple-hedger-balance-input').value),
+        size: parseInt(document.getElementById('simple-hedger-size').value),
+        target_pair_cost: parseFloat(document.getElementById('simple-hedger-target-pair').value),
+        emergency_pair_cost: parseFloat(document.getElementById('simple-hedger-emergency-pair').value),
+        flip_threshold: parseFloat(document.getElementById('simple-hedger-flip-threshold').value),
+        wait_seconds: parseFloat(document.getElementById('simple-hedger-wait').value),
+        order_timeout: parseFloat(document.getElementById('simple-hedger-timeout').value)
     };
 }
 
@@ -482,9 +610,18 @@ function getVolumeWeightedConfig() {
         end_datetime: document.getElementById('volume-weighted-end').value,
         starting_balance: parseFloat(document.getElementById('volume-weighted-balance-input').value),
         accum_target_shares: parseInt(document.getElementById('volume-weighted-target').value),
+        // VW-specific parameters
         vw_imbalance_pct: parseFloat(document.getElementById('volume-weighted-imbalance').value),
-        max_share_price: 0.95,
-        accum_buy_both_sides: true
+        vw_cheap_threshold: parseFloat(document.getElementById('volume-weighted-cheap').value),
+        vw_hedge_trigger_pct: parseFloat(document.getElementById('volume-weighted-hedge-trigger').value),
+        vw_max_hedge_price: parseFloat(document.getElementById('volume-weighted-max-hedge').value),
+        // Pair cost parameters
+        accum_pair_cost_target: parseFloat(document.getElementById('volume-weighted-pair-target').value),
+        accum_pair_cost_limit: parseFloat(document.getElementById('volume-weighted-pair-limit').value),
+        // Fixed parameters
+        max_share_price: 0.98,
+        accum_buy_both_sides: true,
+        accum_max_imbalance_pct: 0.15  // 15% (gabagool-style)
     };
 }
 
@@ -496,12 +633,55 @@ function getDirectionalConfig() {
         end_datetime: document.getElementById('directional-end').value,
         starting_balance: parseFloat(document.getElementById('directional-balance-input').value),
         trade_size: parseInt(document.getElementById('directional-trade-size').value),
+        target_shares: parseInt(document.getElementById('directional-target').value),
+        max_position_pct: parseFloat(document.getElementById('directional-max-pos-pct').value) / 100,
         initial_bias: document.querySelector('input[name="directional_bias"]:checked').value,
         flip_cooldown_seconds: parseFloat(document.getElementById('directional-flip-cd').value),
         sigma_threshold: parseFloat(document.getElementById('directional-sigma').value),
         max_flips: parseInt(document.getElementById('directional-max-flips').value),
         dip_threshold_pct: parseFloat(document.getElementById('directional-dip').value),
         max_share_price: 0.95
+    };
+}
+
+function getCalculusMakerConfig() {
+    return {
+        mode: document.querySelector('input[name="calculus_maker_mode"]:checked').value,
+        market: 'btc-15m',
+        start_datetime: document.getElementById('calculus-maker-start').value,
+        end_datetime: document.getElementById('calculus-maker-end').value,
+        starting_balance: parseFloat(document.getElementById('calculus-maker-balance-input').value),
+        // Calculus MAKER specific parameters
+        max_shares: parseInt(document.getElementById('calculus-maker-target').value),
+        min_shares: parseInt(document.getElementById('calculus-maker-min-shares').value),
+        m_min: parseFloat(document.getElementById('calculus-maker-m-min').value),
+        m_max: parseFloat(document.getElementById('calculus-maker-m-max').value),
+        lambda_decay: parseFloat(document.getElementById('calculus-maker-lambda').value),
+        max_pair_cost: parseFloat(document.getElementById('calculus-maker-max-pair').value),
+        max_imbalance_pct: parseFloat(document.getElementById('calculus-maker-imbalance').value),
+        max_share_price: 0.98,
+        max_daily_loss: parseFloat(document.getElementById('calculus-maker-max-loss').value) || 0
+    };
+}
+
+function getFairValueMMConfig() {
+    return {
+        mode: document.querySelector('input[name="fair_value_mm_mode"]:checked').value,
+        market: 'btc-15m',
+        start_datetime: document.getElementById('fair-value-mm-start').value,
+        end_datetime: document.getElementById('fair-value-mm-end').value,
+        starting_balance: parseFloat(document.getElementById('fair-value-mm-balance-input').value),
+        // Fair Value MM specific parameters
+        max_shares: parseInt(document.getElementById('fair-value-mm-target').value),
+        min_shares: 5,
+        fv_edge: parseFloat(document.getElementById('fair-value-mm-edge').value),
+        fv_sensitivity_early: parseFloat(document.getElementById('fair-value-mm-sens-early').value),
+        fv_sensitivity_late: parseFloat(document.getElementById('fair-value-mm-sens-late').value),
+        fv_reprice_threshold: parseFloat(document.getElementById('fair-value-mm-reprice').value),
+        max_pair_cost: parseFloat(document.getElementById('fair-value-mm-max-pair').value),
+        max_imbalance_pct: 0.20,
+        max_share_price: 0.98,
+        max_daily_loss: parseFloat(document.getElementById('fair-value-mm-max-loss').value) || 0
     };
 }
 
@@ -516,9 +696,15 @@ async function handleStart(modeName) {
     let config;
     let endpoint;
 
-    if (modeName === 'standard') {
-        config = getStandardConfig();
-        endpoint = '/api/start/accumulation';
+    if (modeName === 'calculus-maker') {
+        config = getCalculusMakerConfig();
+        endpoint = '/api/start/calculus_maker';
+    } else if (modeName === 'fair-value-mm') {
+        config = getFairValueMMConfig();
+        endpoint = '/api/start/fair_value_mm';
+    } else if (modeName === 'simple-hedger') {
+        config = getSimpleHedgerConfig();
+        endpoint = '/api/start/simple_hedger';
     } else if (modeName === 'volume-weighted') {
         config = getVolumeWeightedConfig();
         endpoint = '/api/start/accumulation';
@@ -582,7 +768,11 @@ async function handleStop(modeName) {
         stopBtn.textContent = 'STOPPING...';
 
         // Map mode name to strategy for API (must match backend strategy keys)
-        const strategy = modeName === 'volume-weighted' ? 'volume_weighted' : modeName;
+        let strategy = modeName;
+        if (modeName === 'volume-weighted') strategy = 'volume_weighted';
+        else if (modeName === 'calculus-maker') strategy = 'calculus_maker';
+        else if (modeName === 'fair-value-mm') strategy = 'fair_value_mm';
+        else if (modeName === 'simple-hedger') strategy = 'simple_hedger';
         await fetch(`/api/stop/${strategy}`, { method: 'POST' });
     } catch (error) {
         showError(modeName, 'Failed to stop: ' + error.message);
@@ -609,7 +799,11 @@ async function handleNuke(modeName) {
         nukeBtn.textContent = 'NUKING...';
 
         // Map mode name to strategy for API (must match backend strategy keys)
-        const strategy = modeName === 'volume-weighted' ? 'volume_weighted' : modeName;
+        let strategy = modeName;
+        if (modeName === 'volume-weighted') strategy = 'volume_weighted';
+        else if (modeName === 'calculus-maker') strategy = 'calculus_maker';
+        else if (modeName === 'fair-value-mm') strategy = 'fair_value_mm';
+        else if (modeName === 'simple-hedger') strategy = 'simple_hedger';
         const res = await fetch(`/api/emergency-stop/${strategy}`, { method: 'POST' });
         const data = await res.json();
 
