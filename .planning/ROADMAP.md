@@ -9,8 +9,9 @@ Build an automated market-making bot for Polymarket BTC 15-minute Up/Down market
 - [x] **Phase 1: Foundation** - Environment, API credentials, network failover, Discord setup
 - [x] **Phase 2: Market Intelligence** - Data fetching, orderbook parsing, market rotation
 - [x] **Phase 3: Trading Core** - Order execution, position tracking, balance management, WebSockets
-- [ ] **Phase 4: Dry Run** - Paper trading simulation, strategy validation
+- [x] **Phase 4: Dry Run** - Paper trading simulation, strategy validation
 - [ ] **Phase 5: Live Trading** - Real execution, risk management, auto-claim, monitoring
+- [ ] **Phase 6: Utilities** - Polywalltrack wallet analyzer, analysis tools
 
 ## Phase Details
 
@@ -53,8 +54,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 04-01: Simulation engine (mock fills, realistic conditions, queue position uncertainty)
-- [ ] 04-02: Strategy validation (run 3+ market cycles, verify profitability, test edge cases)
+- [x] 04-01: Simulation engine (mock fills, realistic conditions, queue position uncertainty)
+- [x] 04-02: Strategy validation (run 3+ market cycles, verify profitability, test edge cases)
 
 ### Phase 5: Live Trading
 **Goal**: Production-ready bot with real money execution, auto-claim, and comprehensive monitoring
@@ -68,6 +69,14 @@ Plans:
 - [ ] 05-04: Terminal dashboard + performance metrics (real-time display, ROI tracking, win rate)
 - [ ] 05-05: Auto-claim winnings (check resolution every 5 mins, claim winning positions to USDC)
 
+### Phase 6: Utilities
+**Goal**: Analysis and debugging tools for wallet tracking and trade investigation
+**Depends on**: Phase 2 (uses market data APIs)
+**Plans**: 1 plan
+
+Plans:
+- [x] 06-01: Polywalltrack - Multi-market wallet analyzer (CLI tool, quantitative report)
+
 ## Progress
 
 | Phase | Plans Complete | Status | Completed |
@@ -75,10 +84,11 @@ Plans:
 | 1. Foundation | 4/4 | Complete | Dec 18, 2025 |
 | 2. Market Intelligence | 3/3 | Complete | Dec 19, 2025 |
 | 3. Trading Core | 5/5 | Complete | Dec 19, 2025 |
-| 4. Dry Run | 0/2 | Not started | - |
+| 4. Dry Run | 2/2 | Complete | Dec 19, 2025 |
 | 5. Live Trading | 0/5 | Not started | - |
+| 6. Utilities | 1/1 | Complete | Dec 22, 2025 |
 
-**Total: 19 plans across 5 phases (12 complete)**
+**Total: 20 plans across 6 phases (15 complete)**
 
 ## v1.1 (Future)
 - Multi-market concurrent trading

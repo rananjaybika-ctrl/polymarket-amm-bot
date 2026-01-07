@@ -163,9 +163,19 @@ class PairTradeEntry:
         return min(self.up_size, self.down_size)
 
     @property
+    def up_cost(self) -> float:
+        """Cost of Up position (up_price * up_size)."""
+        return self.up_price * self.up_size
+
+    @property
+    def down_cost(self) -> float:
+        """Cost of Down position (down_price * down_size)."""
+        return self.down_price * self.down_size
+
+    @property
     def total_cost(self) -> float:
         """Total cost of pair trade."""
-        return (self.up_price * self.up_size) + (self.down_price * self.down_size)
+        return self.up_cost + self.down_cost
 
     @property
     def profit_per_pair(self) -> float:
@@ -191,9 +201,11 @@ class PairTradeEntry:
             "market_question": self.market_question,
             "up_price": self.up_price,
             "up_size": self.up_size,
+            "up_cost": self.up_cost,
             "up_order_id": self.up_order_id,
             "down_price": self.down_price,
             "down_size": self.down_size,
+            "down_cost": self.down_cost,
             "down_order_id": self.down_order_id,
             "pair_cost": self.pair_cost,
             "pair_count": self.pair_count,
@@ -211,8 +223,10 @@ class PairTradeEntry:
             self.market_slug,
             f"{self.up_price:.4f}",
             f"{self.up_size:.4f}",
+            f"{self.up_cost:.4f}",
             f"{self.down_price:.4f}",
             f"{self.down_size:.4f}",
+            f"{self.down_cost:.4f}",
             f"{self.pair_cost:.4f}",
             f"{self.pair_count:.4f}",
             f"{self.total_cost:.4f}",
@@ -230,8 +244,10 @@ class PairTradeEntry:
             "market",
             "up_price",
             "up_size",
+            "up_cost",
             "down_price",
             "down_size",
+            "down_cost",
             "pair_cost",
             "pair_count",
             "total_cost",

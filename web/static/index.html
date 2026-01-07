@@ -23,22 +23,26 @@
 
         <!-- Mode Cards Container -->
         <div class="cards-container">
-            <!-- ========== STANDARD MODE CARD ========== -->
-            <div class="mode-card" id="card-standard">
+            <!-- ========== CALCULUS MAKER MODE CARD ========== -->
+            <div class="mode-card" id="card-calculus-maker">
                 <div class="card-header">
-                    <h2>STANDARD</h2>
-                    <div class="status-badge stopped" id="badge-standard">
+                    <h2>CALCULUS MAKER</h2>
+                    <div class="status-badge stopped" id="badge-calculus-maker">
                         <span class="status-dot"></span>
                         <span class="status-text">Stopped</span>
                     </div>
                 </div>
 
                 <!-- Live Data Section -->
-                <div class="card-live-data" id="live-standard">
+                <div class="card-live-data" id="live-calculus-maker">
                     <div class="market-row">
                         <span class="market-label">Market:</span>
-                        <span class="market-value" id="standard-market">--</span>
-                        <span class="time-remaining" id="standard-time">--:--</span>
+                        <span class="market-value" id="calculus-maker-market">--</span>
+                        <span class="time-remaining" id="calculus-maker-time">--:--</span>
+                    </div>
+                    <div class="market-prices-row">
+                        <span class="price up" id="calculus-maker-up-price">UP $--</span>
+                        <span class="price down" id="calculus-maker-down-price">DOWN $--</span>
                     </div>
                     <table class="position-table">
                         <thead>
@@ -52,52 +56,56 @@
                         <tbody>
                             <tr class="up-row">
                                 <td class="side-label">up</td>
-                                <td class="avg-price up" id="standard-up-avg">--</td>
-                                <td class="qty up" id="standard-up-qty">--</td>
-                                <td class="cost" id="standard-up-cost">--</td>
+                                <td class="avg-price up" id="calculus-maker-up-avg">--</td>
+                                <td class="qty up" id="calculus-maker-up-qty">--</td>
+                                <td class="cost" id="calculus-maker-up-cost">--</td>
                             </tr>
                             <tr class="down-row">
                                 <td class="side-label">down</td>
-                                <td class="avg-price down" id="standard-down-avg">--</td>
-                                <td class="qty down" id="standard-down-qty">--</td>
-                                <td class="cost" id="standard-down-cost">--</td>
+                                <td class="avg-price down" id="calculus-maker-down-avg">--</td>
+                                <td class="qty down" id="calculus-maker-down-qty">--</td>
+                                <td class="cost" id="calculus-maker-down-cost">--</td>
                             </tr>
                         </tbody>
                     </table>
                     <div class="metrics-row">
                         <div class="metric pairs">
-                            <span class="value" id="standard-pairs">--</span>
-                            <span class="label">@ <span id="standard-avg-pair-cost">--</span></span>
+                            <span class="value" id="calculus-maker-pairs">--</span>
+                            <span class="label">@ <span id="calculus-maker-avg-pair-cost">--</span></span>
                         </div>
                         <div class="metric">
                             <span class="label">Locked PNL</span>
-                            <span class="value pnl" id="standard-locked-pnl">--</span>
+                            <span class="value pnl" id="calculus-maker-locked-pnl">--</span>
                         </div>
                         <div class="metric">
                             <span class="label">Range PNL</span>
-                            <span class="value pnl" id="standard-pnl-range">--</span>
+                            <span class="value pnl" id="calculus-maker-pnl-range">--</span>
                         </div>
                         <div class="metric">
                             <span class="label">Balance</span>
-                            <span class="value" id="standard-balance">--</span>
+                            <span class="value" id="calculus-maker-balance">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Session P&L</span>
+                            <span class="value pnl" id="calculus-maker-realized-pnl">--</span>
                         </div>
                     </div>
                 </div>
 
                 <!-- Collapsible Config -->
                 <div class="card-config">
-                    <button type="button" class="config-toggle expanded" id="toggle-standard">
+                    <button type="button" class="config-toggle expanded" id="toggle-calculus-maker">
                         <span class="toggle-icon">&#9660;</span> Config
                     </button>
-                    <div class="config-content expanded" id="config-standard">
+                    <div class="config-content expanded" id="config-calculus-maker">
                         <div class="config-row">
                             <div class="toggle-group mode-toggle">
                                 <label class="toggle-option">
-                                    <input type="radio" name="standard_mode" value="paper" checked>
+                                    <input type="radio" name="calculus_maker_mode" value="paper" checked>
                                     <span>Paper</span>
                                 </label>
                                 <label class="toggle-option live-option">
-                                    <input type="radio" name="standard_mode" value="live">
+                                    <input type="radio" name="calculus_maker_mode" value="live">
                                     <span>LIVE</span>
                                 </label>
                             </div>
@@ -105,35 +113,47 @@
                         <div class="config-grid">
                             <div class="config-field">
                                 <label>Start</label>
-                                <input type="datetime-local" id="standard-start" required>
+                                <input type="datetime-local" id="calculus-maker-start" required>
                             </div>
                             <div class="config-field">
                                 <label>End</label>
-                                <input type="datetime-local" id="standard-end" required>
+                                <input type="datetime-local" id="calculus-maker-end" required>
                             </div>
                             <div class="config-field">
                                 <label>Balance</label>
-                                <input type="number" id="standard-balance-input" value="100" min="1">
+                                <input type="number" id="calculus-maker-balance-input" value="170" min="1">
                             </div>
                             <div class="config-field">
-                                <label>Trade Size</label>
-                                <input type="number" id="standard-trade-size" value="2" min="1">
+                                <label>Target Shares</label>
+                                <input type="number" id="calculus-maker-target" value="15" min="5" step="5" title="Target shares per side (multiples of 5)">
                             </div>
                             <div class="config-field">
-                                <label>Target</label>
-                                <input type="number" id="standard-target" value="15" min="1">
+                                <label>Min Shares</label>
+                                <input type="number" id="calculus-maker-min-shares" value="5" min="5" step="5" title="Minimum order size (Polymarket min = 5)">
                             </div>
                             <div class="config-field">
-                                <label>Max Imbal</label>
-                                <input type="number" id="standard-max-imbalance" value="5" min="1">
+                                <label>m_min</label>
+                                <input type="number" id="calculus-maker-m-min" value="0.005" step="0.001" min="0" max="0.1" title="Late market threshold (accept 0.5% edge)">
                             </div>
                             <div class="config-field">
-                                <label>Cost Target</label>
-                                <input type="number" id="standard-cost-target" value="0.995" step="0.001">
+                                <label>m_max</label>
+                                <input type="number" id="calculus-maker-m-max" value="0.025" step="0.005" min="0" max="0.2" title="Early market threshold (require 2.5% edge)">
                             </div>
                             <div class="config-field">
-                                <label>Cost Limit</label>
-                                <input type="number" id="standard-cost-limit" value="1.02" step="0.001">
+                                <label>Lambda</label>
+                                <input type="number" id="calculus-maker-lambda" value="0.004" step="0.001" min="0.001" max="0.05" title="Decay constant for mispricing threshold">
+                            </div>
+                            <div class="config-field">
+                                <label>Max Pair $</label>
+                                <input type="number" id="calculus-maker-max-pair" value="0.98" step="0.005" title="Maximum pair cost to accept">
+                            </div>
+                            <div class="config-field">
+                                <label>Imbal %</label>
+                                <input type="number" id="calculus-maker-imbalance" value="0.20" step="0.05" title="Max imbalance as % of position">
+                            </div>
+                            <div class="config-field">
+                                <label>Max Loss $</label>
+                                <input type="number" id="calculus-maker-max-loss" value="7" step="1" min="0" title="Stop trading if daily loss exceeds this amount (0 = disabled)">
                             </div>
                         </div>
                     </div>
@@ -141,11 +161,289 @@
 
                 <!-- Action Buttons -->
                 <div class="card-actions">
-                    <button class="btn btn-start" id="btn-start-standard">START</button>
-                    <button class="btn btn-stop" id="btn-stop-standard" disabled>STOP</button>
-                    <button class="btn btn-nuke" id="btn-nuke-standard" disabled>NUKE</button>
+                    <button class="btn btn-start" id="btn-start-calculus-maker">START</button>
+                    <button class="btn btn-stop" id="btn-stop-calculus-maker" disabled>STOP</button>
+                    <button class="btn btn-nuke" id="btn-nuke-calculus-maker" disabled>NUKE</button>
                 </div>
-                <div id="error-standard" class="card-error hidden"></div>
+                <div id="error-calculus-maker" class="card-error hidden"></div>
+            </div>
+
+            <!-- ========== FAIR VALUE MM MODE CARD ========== -->
+            <div class="mode-card" id="card-fair-value-mm">
+                <div class="card-header">
+                    <h2>FAIR VALUE MM</h2>
+                    <div class="status-badge stopped" id="badge-fair-value-mm">
+                        <span class="status-dot"></span>
+                        <span class="status-text">Stopped</span>
+                    </div>
+                </div>
+
+                <!-- Live Data Section -->
+                <div class="card-live-data" id="live-fair-value-mm">
+                    <div class="market-row">
+                        <span class="market-label">Market:</span>
+                        <span class="market-value" id="fair-value-mm-market">--</span>
+                        <span class="time-remaining" id="fair-value-mm-time">--:--</span>
+                    </div>
+                    <div class="market-prices-row">
+                        <span class="price up" id="fair-value-mm-up-price">UP $--</span>
+                        <span class="price down" id="fair-value-mm-down-price">DOWN $--</span>
+                    </div>
+                    <table class="position-table">
+                        <thead>
+                            <tr>
+                                <th></th>
+                                <th>avg price</th>
+                                <th>qty</th>
+                                <th>cost</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="up-row">
+                                <td class="side-label">up</td>
+                                <td class="avg-price up" id="fair-value-mm-up-avg">--</td>
+                                <td class="qty up" id="fair-value-mm-up-qty">--</td>
+                                <td class="cost" id="fair-value-mm-up-cost">--</td>
+                            </tr>
+                            <tr class="down-row">
+                                <td class="side-label">down</td>
+                                <td class="avg-price down" id="fair-value-mm-down-avg">--</td>
+                                <td class="qty down" id="fair-value-mm-down-qty">--</td>
+                                <td class="cost" id="fair-value-mm-down-cost">--</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div class="metrics-row">
+                        <div class="metric pairs">
+                            <span class="value" id="fair-value-mm-pairs">--</span>
+                            <span class="label">@ <span id="fair-value-mm-avg-pair-cost">--</span></span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Locked PNL</span>
+                            <span class="value pnl" id="fair-value-mm-locked-pnl">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Range PNL</span>
+                            <span class="value pnl" id="fair-value-mm-pnl-range">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Balance</span>
+                            <span class="value" id="fair-value-mm-balance">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Session P&L</span>
+                            <span class="value pnl" id="fair-value-mm-realized-pnl">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Collapsible Config -->
+                <div class="card-config">
+                    <button type="button" class="config-toggle expanded" id="toggle-fair-value-mm">
+                        <span class="toggle-icon">&#9660;</span> Config
+                    </button>
+                    <div class="config-content expanded" id="config-fair-value-mm">
+                        <div class="config-row">
+                            <div class="toggle-group mode-toggle">
+                                <label class="toggle-option">
+                                    <input type="radio" name="fair_value_mm_mode" value="paper" checked>
+                                    <span>Paper</span>
+                                </label>
+                                <label class="toggle-option live-option">
+                                    <input type="radio" name="fair_value_mm_mode" value="live">
+                                    <span>LIVE</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="config-grid">
+                            <div class="config-field">
+                                <label>Start</label>
+                                <input type="datetime-local" id="fair-value-mm-start" required>
+                            </div>
+                            <div class="config-field">
+                                <label>End</label>
+                                <input type="datetime-local" id="fair-value-mm-end" required>
+                            </div>
+                            <div class="config-field">
+                                <label>Balance</label>
+                                <input type="number" id="fair-value-mm-balance-input" value="170" min="1">
+                            </div>
+                            <div class="config-field">
+                                <label>Target Shares</label>
+                                <input type="number" id="fair-value-mm-target" value="15" min="5" step="5" title="Target shares per side (multiples of 5)">
+                            </div>
+                            <div class="config-field">
+                                <label>Edge $</label>
+                                <input type="number" id="fair-value-mm-edge" value="0.02" step="0.01" min="0.01" max="0.10" title="Edge below fair value (e.g., 0.02 = 2 cents)">
+                            </div>
+                            <div class="config-field">
+                                <label>Sens Early</label>
+                                <input type="number" id="fair-value-mm-sens-early" value="0.10" step="0.05" min="0.05" max="0.50" title="Price sensitivity at market open (10%)">
+                            </div>
+                            <div class="config-field">
+                                <label>Sens Late</label>
+                                <input type="number" id="fair-value-mm-sens-late" value="0.50" step="0.05" min="0.20" max="1.00" title="Price sensitivity near resolution (50%)">
+                            </div>
+                            <div class="config-field">
+                                <label>Reprice Thresh</label>
+                                <input type="number" id="fair-value-mm-reprice" value="0.03" step="0.01" min="0.01" max="0.10" title="Reprice if fair value changes more than this (3 cents)">
+                            </div>
+                            <div class="config-field">
+                                <label>Max Pair $</label>
+                                <input type="number" id="fair-value-mm-max-pair" value="0.98" step="0.005" title="Maximum pair cost to accept">
+                            </div>
+                            <div class="config-field">
+                                <label>Max Loss $</label>
+                                <input type="number" id="fair-value-mm-max-loss" value="7" step="1" min="0" title="Stop trading if daily loss exceeds this amount (0 = disabled)">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="card-actions">
+                    <button class="btn btn-start" id="btn-start-fair-value-mm">START</button>
+                    <button class="btn btn-stop" id="btn-stop-fair-value-mm" disabled>STOP</button>
+                    <button class="btn btn-nuke" id="btn-nuke-fair-value-mm" disabled>NUKE</button>
+                </div>
+                <div id="error-fair-value-mm" class="card-error hidden"></div>
+            </div>
+
+            <!-- ========== SIMPLE HEDGER MODE CARD ========== -->
+            <div class="mode-card" id="card-simple-hedger">
+                <div class="card-header">
+                    <h2>SIMPLE HEDGER</h2>
+                    <div class="status-badge stopped" id="badge-simple-hedger">
+                        <span class="status-dot"></span>
+                        <span class="status-text">Stopped</span>
+                    </div>
+                </div>
+
+                <!-- Live Data Section -->
+                <div class="card-live-data" id="live-simple-hedger">
+                    <div class="market-row">
+                        <span class="market-label">Market:</span>
+                        <span class="market-value" id="simple-hedger-market">--</span>
+                        <span class="time-remaining" id="simple-hedger-time">--:--</span>
+                    </div>
+                    <div class="market-prices-row">
+                        <span class="price up" id="simple-hedger-up-price">UP $--</span>
+                        <span class="price down" id="simple-hedger-down-price">DOWN $--</span>
+                    </div>
+                    <table class="position-table">
+                        <thead>
+                            <tr>
+                                <th></th>
+                                <th>avg price</th>
+                                <th>qty</th>
+                                <th>cost</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="up-row">
+                                <td class="side-label">up</td>
+                                <td class="avg-price up" id="simple-hedger-up-avg">--</td>
+                                <td class="qty up" id="simple-hedger-up-qty">--</td>
+                                <td class="cost" id="simple-hedger-up-cost">--</td>
+                            </tr>
+                            <tr class="down-row">
+                                <td class="side-label">down</td>
+                                <td class="avg-price down" id="simple-hedger-down-avg">--</td>
+                                <td class="qty down" id="simple-hedger-down-qty">--</td>
+                                <td class="cost" id="simple-hedger-down-cost">--</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div class="metrics-row">
+                        <div class="metric pairs">
+                            <span class="value" id="simple-hedger-pairs">--</span>
+                            <span class="label">@ <span id="simple-hedger-avg-pair-cost">--</span></span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Locked PNL</span>
+                            <span class="value pnl" id="simple-hedger-locked-pnl">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Range PNL</span>
+                            <span class="value pnl" id="simple-hedger-pnl-range">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Balance</span>
+                            <span class="value" id="simple-hedger-balance">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Session P&L</span>
+                            <span class="value pnl" id="simple-hedger-realized-pnl">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Collapsible Config -->
+                <div class="card-config">
+                    <button type="button" class="config-toggle expanded" id="toggle-simple-hedger">
+                        <span class="toggle-icon">&#9660;</span> Config
+                    </button>
+                    <div class="config-content expanded" id="config-simple-hedger">
+                        <div class="config-row">
+                            <div class="toggle-group mode-toggle">
+                                <label class="toggle-option">
+                                    <input type="radio" name="simple_hedger_mode" value="paper" checked>
+                                    <span>Paper</span>
+                                </label>
+                                <label class="toggle-option live-option">
+                                    <input type="radio" name="simple_hedger_mode" value="live">
+                                    <span>LIVE</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="config-grid">
+                            <div class="config-field">
+                                <label>Start</label>
+                                <input type="datetime-local" id="simple-hedger-start" required>
+                            </div>
+                            <div class="config-field">
+                                <label>End</label>
+                                <input type="datetime-local" id="simple-hedger-end" required>
+                            </div>
+                            <div class="config-field">
+                                <label>Balance</label>
+                                <input type="number" id="simple-hedger-balance-input" value="200" min="1">
+                            </div>
+                            <div class="config-field">
+                                <label>Size</label>
+                                <input type="number" id="simple-hedger-size" value="10" min="5" step="5" title="Shares per trade (10 recommended)">
+                            </div>
+                            <div class="config-field">
+                                <label>Target Pair $</label>
+                                <input type="number" id="simple-hedger-target-pair" value="0.97" step="0.01" title="Target pair cost for normal hedge">
+                            </div>
+                            <div class="config-field">
+                                <label>Emergency $</label>
+                                <input type="number" id="simple-hedger-emergency-pair" value="0.98" step="0.01" title="Target pair cost after flip">
+                            </div>
+                            <div class="config-field">
+                                <label>Flip +$</label>
+                                <input type="number" id="simple-hedger-flip-threshold" value="0.20" step="0.05" title="Price move that triggers flip">
+                            </div>
+                            <div class="config-field">
+                                <label>Wait (s)</label>
+                                <input type="number" id="simple-hedger-wait" value="3" step="1" min="1" title="Seconds to wait before first trade">
+                            </div>
+                            <div class="config-field">
+                                <label>Timeout (s)</label>
+                                <input type="number" id="simple-hedger-timeout" value="30" step="5" min="5" title="Order timeout before retry">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="card-actions">
+                    <button class="btn btn-start" id="btn-start-simple-hedger">START</button>
+                    <button class="btn btn-stop" id="btn-stop-simple-hedger" disabled>STOP</button>
+                    <button class="btn btn-nuke" id="btn-nuke-simple-hedger" disabled>NUKE</button>
+                </div>
+                <div id="error-simple-hedger" class="card-error hidden"></div>
             </div>
 
             <!-- ========== VOLUME WEIGHTED MODE CARD ========== -->
@@ -164,6 +462,10 @@
                         <span class="market-label">Market:</span>
                         <span class="market-value" id="volume-weighted-market">--</span>
                         <span class="time-remaining" id="volume-weighted-time">--:--</span>
+                    </div>
+                    <div class="market-prices-row">
+                        <span class="price up" id="volume-weighted-up-price">UP $--</span>
+                        <span class="price down" id="volume-weighted-down-price">DOWN $--</span>
                     </div>
                     <table class="position-table">
                         <thead>
@@ -206,6 +508,10 @@
                             <span class="label">Balance</span>
                             <span class="value" id="volume-weighted-balance">--</span>
                         </div>
+                        <div class="metric">
+                            <span class="label">Session P&L</span>
+                            <span class="value pnl" id="volume-weighted-realized-pnl">--</span>
+                        </div>
                     </div>
                 </div>
 
@@ -238,15 +544,35 @@
                             </div>
                             <div class="config-field">
                                 <label>Balance</label>
-                                <input type="number" id="volume-weighted-balance-input" value="100" min="1">
+                                <input type="number" id="volume-weighted-balance-input" value="500" min="1">
                             </div>
                             <div class="config-field">
                                 <label>Target</label>
-                                <input type="number" id="volume-weighted-target" value="15" min="1">
+                                <input type="number" id="volume-weighted-target" value="60" min="1">
                             </div>
                             <div class="config-field">
                                 <label>Imbal %</label>
-                                <input type="number" id="volume-weighted-imbalance" value="0.40" step="0.01">
+                                <input type="number" id="volume-weighted-imbalance" value="0.20" step="0.01" title="Max imbalance as % of position">
+                            </div>
+                            <div class="config-field">
+                                <label>Cheap $</label>
+                                <input type="number" id="volume-weighted-cheap" value="0.45" step="0.01" title="Load up aggressively below this price">
+                            </div>
+                            <div class="config-field">
+                                <label>Hedge %</label>
+                                <input type="number" id="volume-weighted-hedge-trigger" value="0.15" step="0.01" title="Start hedging when imbalance > this">
+                            </div>
+                            <div class="config-field">
+                                <label>Max Hedge $</label>
+                                <input type="number" id="volume-weighted-max-hedge" value="0.85" step="0.01" title="Never pay more than this for hedge">
+                            </div>
+                            <div class="config-field">
+                                <label>Pair Target</label>
+                                <input type="number" id="volume-weighted-pair-target" value="0.98" step="0.01" title="Target pair cost">
+                            </div>
+                            <div class="config-field">
+                                <label>Pair Limit</label>
+                                <input type="number" id="volume-weighted-pair-limit" value="1.05" step="0.01" title="Max pair cost for rebalancing">
                             </div>
                         </div>
                     </div>
@@ -264,7 +590,7 @@
             <!-- ========== DIRECTIONAL MODE CARD ========== -->
             <div class="mode-card" id="card-directional">
                 <div class="card-header">
-                    <h2>DIRECTIONAL</h2>
+                    <h2>DIRECTIONAL <span class="bias-triangle bullish" id="directional-triangle">&#9650;</span></h2>
                     <div class="status-badge stopped" id="badge-directional">
                         <span class="status-dot"></span>
                         <span class="status-text">Stopped</span>
@@ -277,11 +603,11 @@
                         <span class="market-label">Market:</span>
                         <span class="market-value" id="directional-market">--</span>
                         <span class="time-remaining" id="directional-time">--:--</span>
-                    </div>
-                    <div class="bias-indicator">
-                        <span class="bias-label">Bias:</span>
-                        <span class="bias-value bullish" id="directional-bias">BULLISH</span>
                         <span class="flip-count" id="directional-flips">(0 flips)</span>
+                    </div>
+                    <div class="market-prices-row">
+                        <span class="price up" id="directional-up-price">UP $--</span>
+                        <span class="price down" id="directional-down-price">DOWN $--</span>
                     </div>
                     <table class="position-table">
                         <thead>
@@ -323,6 +649,10 @@
                         <div class="metric">
                             <span class="label">Balance</span>
                             <span class="value" id="directional-balance">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Session P&L</span>
+                            <span class="value pnl" id="directional-realized-pnl">--</span>
                         </div>
                     </div>
                 </div>
@@ -375,6 +705,14 @@
                                 <input type="number" id="directional-trade-size" value="5" min="1">
                             </div>
                             <div class="config-field">
+                                <label>Target Shares</label>
+                                <input type="number" id="directional-target" value="15" min="1">
+                            </div>
+                            <div class="config-field">
+                                <label>Max Pos %</label>
+                                <input type="number" id="directional-max-pos-pct" value="15" min="1" max="100">
+                            </div>
+                            <div class="config-field">
                                 <label>Flip CD (s)</label>
                                 <input type="number" id="directional-flip-cd" value="180" min="0">
                             </div>
@@ -402,6 +740,12 @@
                 </div>
                 <div id="error-directional" class="card-error hidden"></div>
             </div>
+
+        </div>
+
+        <!-- Debug Output -->
+        <div id="debug-ws" style="background:#1a1a2e;color:#888;padding:8px;font-family:monospace;font-size:11px;max-height:60px;overflow:auto;margin-top:15px;border:1px solid #333;">
+            [DEBUG] Waiting for WebSocket messages...
         </div>
 
         <!-- Footer -->

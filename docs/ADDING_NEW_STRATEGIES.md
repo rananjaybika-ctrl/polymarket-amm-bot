@@ -14,7 +14,14 @@ class YourStrategyBot:
         initial_balance: float = 100.0,
         session_start_utc: Optional[datetime] = None,  # REQUIRED for market filtering
         session_end_utc: Optional[datetime] = None,    # REQUIRED for market filtering
+        web_callback: Optional[callable] = None,       # REQUIRED for frontend updates
     ):
+        self._web_callback = web_callback
+        # Track prices for web UI
+        self._last_up_price: float = 0.0
+        self._last_down_price: float = 0.0
+        self._trade_count: int = 0
+        self._total_pairs: int = 0
         ...
 
     @property
@@ -45,6 +52,27 @@ class YourStrategyBot:
     async def cleanup(self):
         """Cleanup resources."""
         ...
+
+    def _build_web_state(self) -> dict:
+        """Build trading state as JSON for web UI."""
+        # See SimpleHedgerBot for example implementation
+        return {
+            "type": "trading_update",
+            "strategy": "your_strategy_name",
+            "market_slug": market.slug if market else "No market",
+            "time_remaining": "5:30",
+            "position": {...},
+            "metrics": {...},
+        }
+
+    def _send_web_update(self) -> None:
+        """Send trading state to web UI if callback is set."""
+        if self._web_callback:
+            try:
+                state = self._build_web_state()
+                self._web_callback(state)
+            except Exception as e:
+                logger.warning(f"Failed to send web update: {e}")
 ```
 
 ## Critical: MarketRotator Configuration
@@ -95,15 +123,19 @@ async def run_your_strategy_bot(config: YourBotConfig, strategy: StrategyState):
     start_dt_utc = normalize_datetime_to_utc(config.start_datetime)
     end_dt_utc = normalize_datetime_to_utc(config.end_datetime)
 
-    # 2. MUST pass session times to bot constructor
+    # 2. Create web callback for frontend updates
+    web_callback = create_web_callback_for_strategy("your_strategy_name")
+
+    # 3. MUST pass session times AND web_callback to bot constructor
     bot = YourStrategyBot(
         live_mode=(config.mode == "live"),
         initial_balance=config.starting_balance,
-        session_start_utc=start_dt_utc,    # REQUIRED
-        session_end_utc=end_dt_utc,        # REQUIRED
+        session_start_utc=start_dt_utc,    # REQUIRED for market filtering
+        session_end_utc=end_dt_utc,        # REQUIRED for market filtering
+        web_callback=web_callback,          # REQUIRED for frontend updates
     )
 
-    # 3. Initialize and run
+    # 4. Initialize and run
     await bot.initialize()
     await bot.run(duration_minutes=duration_minutes)
 ```
@@ -190,3 +222,78 @@ while running:
 8. `market.time_remaining_seconds` -> `market.time_remaining()`
 9. `SimulationConfig(initial_balance=x)` -> `PaperTradingEngine(initial_balance=x)`
 10. Server: pass `session_start_utc`, `session_end_utc` to bot
+11. Added `web_callback` parameter for frontend updates
+12. Added `_build_web_state()` method to build trading state JSON
+13. Added `_send_web_update()` method to broadcast to frontend
+14. Call `_send_web_update()` in strategy loop after getting prices
+15. Server: create and pass `web_callback=create_web_callback_for_strategy("simple_hedger")`
+
+## Fixes Applied for Fair Value MM (2026-01-06)
+
+### Python Fixes
+1. Add `Tuple` to typing imports in run_paper_bot.py: `from typing import ..., Tuple`
+2. Add Telegram mode handler for new strategy in `initialize()`:
+   ```python
+   elif self.accum_mode == "fair_value_mm":
+       mode_label = "Fair Value MM"
+       self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
+       # ... set others to _noop
+   ```
+3. Add mode to `accum_mode` validation list if applicable
+4. Add mode to CalculusMakerStrategy initialization condition:
+   ```python
+   if self.accum_mode in ("calculus_maker", "fair_value_mm"):
+       self._calculus_strategy = CalculusMakerStrategy(...)
+   ```
+
+### Server Fixes (web/server.py)
+1. Add `YourStrategyBotConfig(BaseModel)` class with all config fields
+2. Add `"your_strategy": StrategyState("your_strategy")` to `strategies` dict
+3. Add strategy to `get_status()` response and `running` check
+4. Add `@app.post("/api/start/your_strategy")` endpoint
+5. Add `run_your_strategy_bot()` async function
+
+### Frontend Fixes (web/static/index.html)
+1. Add full card HTML with:
+   - Card container: `<div class="mode-card" id="card-your-strategy">`
+   - Status badge: `id="badge-your-strategy"`
+   - Live data section with position table
+   - Config toggle and form fields
+   - Action buttons: START, STOP, NUKE
+
+### Frontend Fixes (web/static/app.js)
+1. Add to `modes` object:
+   ```javascript
+   'your-strategy': {
+       status: 'stopped',
+       running: false,
+       config: {},
+       liveData: {},
+       timeRemaining: 0,
+       countdownInterval: null
+   },
+   ```
+2. Add to `clearAllPositionDisplays()` array
+3. Add to config toggles forEach array
+4. Add `setupModeButtons('your-strategy')`
+5. Add to `setDefaultDatetimes()` forEach array
+6. Add `getYourStrategyConfig()` function
+7. Update `handleStart()` with new mode case:
+   ```javascript
+   } else if (modeName === 'your-strategy') {
+       config = getYourStrategyConfig();
+       endpoint = '/api/start/your_strategy';
+   }
+   ```
+8. Update `handleStop()` strategy mapping:
+   ```javascript
+   else if (modeName === 'your-strategy') strategy = 'your_strategy';
+   ```
+9. Update `handleNuke()` strategy mapping (same as handleStop)
+10. Update `routeMessage()` to include new strategy status
+11. Update `fetchStatus()` to include new strategy status
+
+### Naming Convention
+- Frontend uses **hyphens**: `fair-value-mm`, `your-strategy`
+- Backend uses **underscores**: `fair_value_mm`, `your_strategy`
+- Convert in JS: `modeName.replace('-', '_')` or explicit mapping

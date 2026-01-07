@@ -66,11 +66,16 @@ class Config:
         # === WALLET TYPE ===
         # "eoa" = standard MetaMask/hardware wallet (default)
         # "magic" = email login (Magic wallet) - requires FUNDER_ADDRESS
+        # "gnosis_safe" = Gnosis Safe wallet - for Builder Relayer (gasless redemptions)
         self.wallet_type: str = os.getenv("WALLET_TYPE", "eoa").lower()
 
         # For Magic wallets: your actual Polymarket account address
         # Find this on Polymarket.com after logging in (top right corner)
         self.funder_address: str = os.getenv("FUNDER_ADDRESS", "")
+
+        # For Gnosis Safe wallets: your deployed Safe address
+        # Get this from relay_client.get_expected_safe() or your deployed Safe
+        self.safe_address: str = os.getenv("SAFE_ADDRESS", "")
 
         # === TRADING PARAMETERS ===
         # Capital limits (in USD)
@@ -131,7 +136,25 @@ class Config:
         # How often to check if primary network is available (seconds)
         self.network_poll_interval: int = int(os.getenv("NETWORK_POLL_INTERVAL", "15"))
 
-        # === DISCORD CONFIGURATION ===
+        # === TELEGRAM CONFIGURATION ===
+        # Bot token from @BotFather
+        self.telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        # Chat ID (get from /getUpdates after messaging your bot)
+        self.telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
+
+        # === BUILDER RELAYER (for gasless redemptions) ===
+        # Get these from: https://polymarket.com/settings?tab=builder
+        self.builder_api_key: str = os.getenv("BUILDER_API_KEY", "")
+        self.builder_secret: str = os.getenv("BUILDER_SECRET", "")
+        self.builder_passphrase: str = os.getenv("BUILDER_PASSPHRASE", "")
+
+        # === AUTO-REDEMPTION SETTINGS ===
+        # Automatically redeem winning positions in the background
+        self.auto_redeem_enabled: bool = os.getenv("AUTO_REDEEM_ENABLED", "true").lower() == "true"
+        # How often to check for redeemable positions (minutes)
+        self.auto_redeem_interval_minutes: float = float(os.getenv("AUTO_REDEEM_INTERVAL_MINUTES", "5.0"))
+
+        # === DISCORD CONFIGURATION (deprecated - use Telegram) ===
         # Webhook URLs for different notification channels
         self.discord_webhook_pnl: str = os.getenv("DISCORD_WEBHOOK_PNL", "")
         self.discord_webhook_losses: str = os.getenv("DISCORD_WEBHOOK_LOSSES", "")
@@ -195,9 +218,10 @@ class Config:
                 )
 
         # Validate wallet type
-        if self.wallet_type not in ("eoa", "magic"):
+        if self.wallet_type not in ("eoa", "magic", "gnosis_safe"):
             raise ConfigError(
-                "WALLET_TYPE must be 'eoa' (MetaMask) or 'magic' (email login)"
+                "WALLET_TYPE must be 'eoa' (MetaMask), 'magic' (email login), "
+                "or 'gnosis_safe' (Safe wallet for Builder Relayer)"
             )
 
         if self.wallet_type == "magic" and not self.funder_address:
@@ -205,6 +229,16 @@ class Config:
                 "FUNDER_ADDRESS is required for Magic wallets. "
                 "This is your Polymarket account address (shown on polymarket.com)"
             )
+
+        if self.wallet_type == "gnosis_safe":
+            if not self.safe_address:
+                raise ConfigError(
+                    "SAFE_ADDRESS is required for Gnosis Safe wallets. "
+                    "Get this from relay_client.get_expected_safe() or your deployed Safe."
+                )
+            # For Safe wallets, funder_address should be the Safe address
+            if not self.funder_address:
+                self.funder_address = self.safe_address
 
         # Validate risk parameters
         if not 0 < self.max_imbalance <= 1:

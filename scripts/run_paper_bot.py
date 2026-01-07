@@ -23,9 +23,10 @@ import logging
 import math
 import signal
 import sys
+import time
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Deque, Callable, Dict, Any
+from typing import Optional, List, Deque, Callable, Dict, Any, Tuple
 from collections import deque
 import random as random_module
 from zoneinfo import ZoneInfo  # Python 3.9+ for timezone handling
@@ -61,7 +62,18 @@ from src.services.directional_strategy import (
     DirectionalPhase,
     TradeDecision,
 )
+from src.strategies.calculus_maker import (
+    CalculusMakerStrategy,
+    OneBuyStrategy,
+    check_prospective_pair_cost,
+    check_prospective_pair_cost_with_market,
+    get_dynamic_target_shares,
+    calculate_fair_value,
+)
+from src.services.trend_detector import TrendDetector, TrendState, TrendDirection
+from src.utils.market_detector import MarketTypeDetector
 from src.services.health_monitor import get_health_monitor, HealthMonitor
+from src.services.auto_redeemer import AutoRedeemer
 
 
 # Configure logging
@@ -200,17 +212,15 @@ def get_patient_price(
     is_emergency: bool = False
 ) -> float:
     """
-    Calculate patient bid price based on time window (Gabagool-style).
+    Calculate patient bid price based on time window.
 
-    For Standard and VW modes (spread-focused strategies), we want to:
-    - Post limit orders BELOW best ask (maker behavior)
-    - Progressively get more aggressive as time runs out
-    - Only take liquidity at ask in emergency situations
+    Graduated pricing relative to best_bid - gets more aggressive as time runs out.
 
     Time windows:
-    - Early (10-15 min): best_bid - 0.02 (very patient)
-    - Mid (5-10 min): best_bid - 0.01 (moderate)
-    - Late (0-5 min): mid_price (split the spread)
+    - Early (10-15 min): best_bid - 0.03 (very patient)
+    - Mid (5-10 min): best_bid - 0.02 (patient)
+    - Late (2-5 min): best_bid - 0.01 (moderate)
+    - Final (0-2 min): best_bid (competitive)
     - Emergency: best_ask (taker, immediate fill)
 
     Args:
@@ -225,14 +235,181 @@ def get_patient_price(
     if is_emergency:
         return best_ask
 
-    if time_remaining_secs >= 600:  # 10+ min remaining (early window)
+    if time_remaining_secs >= 600:  # 10-15 min (early)
+        price = best_bid - 0.03
+    elif time_remaining_secs >= 300:  # 5-10 min (mid)
         price = best_bid - 0.02
-    elif time_remaining_secs >= 300:  # 5-10 min remaining (mid window)
+    elif time_remaining_secs >= 120:  # 2-5 min (late)
         price = best_bid - 0.01
-    else:  # 0-5 min remaining (late window)
-        price = (best_bid + best_ask) / 2
+    else:  # 0-2 min (final)
+        price = best_bid
 
     return max(0.01, price)
+
+
+def get_emergency_threshold(time_remaining_secs: float) -> int:
+    """
+    Get time-based emergency imbalance threshold.
+
+    Early in market: Higher threshold (10) - let patient orders work
+    Late in market:  Lower threshold (5)  - must hedge before resolution
+
+    Args:
+        time_remaining_secs: Seconds until market resolution
+
+    Returns:
+        Minimum imbalance (in shares) before emergency triggers
+    """
+    if time_remaining_secs > 420:  # > 7 minutes
+        return 10  # Patient - let chased orders fill
+    else:
+        return 5   # Urgent - must hedge before resolution
+
+
+def calculate_gradual_chase_price(
+    original_price: float,
+    current_bid: float,
+    current_ask: float,
+    time_remaining_secs: float,
+    order_age_secs: float,
+    max_chase_per_step: float = None,
+    chase_count: int = 0,
+    is_hedge_side: bool = False,
+) -> tuple[float, bool, bool]:
+    """
+    Calculate gradual chase price for unfilled orders.
+
+    V2: Improved with shorter waits, smaller steps, and chase exhaustion.
+
+    Instead of jumping directly to market price, moves in controlled steps
+    based on time remaining. After MAX_CHASE_ITERATIONS, stops chasing and
+    leaves order at final price (emergency hedge handles severe imbalance).
+
+    Chase Strategy by Time Remaining (V3 - patient, consistent):
+    ┌─────────────────┬────────────────┬─────────────┬──────────────────┐
+    │ Time Remaining  │ Wait Before    │ Step Size   │ Price Ceiling    │
+    │                 │ First Chase    │ Per Step    │ (normal/hedge)   │
+    ├─────────────────┼────────────────┼─────────────┼──────────────────┤
+    │ >10 min         │ 60s            │ $0.02       │ $0.50 / $0.65    │
+    │ 5-10 min        │ 30s            │ $0.02       │ $0.55 / $0.70    │
+    │ 2-5 min         │ 15s            │ $0.02       │ $0.60 / $0.75    │
+    │ <2 min          │ 10s            │ $0.03       │ $0.65 / $0.75    │
+    └─────────────────┴────────────────┴─────────────┴──────────────────┘
+
+    Args:
+        original_price: The price of the pending order
+        current_bid: Current best bid price
+        current_ask: Current best ask price
+        time_remaining_secs: Seconds until market resolution
+        order_age_secs: How long the order has been pending
+        max_chase_per_step: Override max step size (optional)
+        chase_count: Number of chase iterations already performed
+        is_hedge_side: True if this is the deficit side needing hedge (allows higher ceiling)
+
+    Returns:
+        Tuple of (new_price, should_chase, chase_exhausted):
+        - new_price: The price to use (may equal original if no chase yet)
+        - should_chase: True if price changed, False if staying put
+        - chase_exhausted: True if max iterations reached, order should stay at final price
+    """
+    # Maximum chase iterations before we stop (leave order at final price)
+    MAX_CHASE_ITERATIONS = 5
+
+    # Check if chase exhausted first
+    if chase_count >= MAX_CHASE_ITERATIONS:
+        return original_price, False, True  # Stop chasing, leave order
+
+    # Determine chase parameters based on time remaining (V3 - patient, consistent steps)
+    if time_remaining_secs >= 600:  # >10 min: very patient
+        wait_before_chase = 60.0    # Wait 60s before first chase
+        step_size = 0.02            # $0.02 per chase
+        max_chase_price = 0.50      # Price ceiling
+    elif time_remaining_secs >= 300:  # 5-10 min
+        wait_before_chase = 30.0    # Wait 30s before first chase
+        step_size = 0.02            # $0.02 per chase
+        max_chase_price = 0.55
+    elif time_remaining_secs >= 120:  # 2-5 min
+        wait_before_chase = 15.0    # Wait 15s before first chase
+        step_size = 0.02            # $0.02 per chase
+        max_chase_price = 0.60
+    else:  # <2 min: more urgent
+        wait_before_chase = 10.0    # Wait 10s before first chase
+        step_size = 0.03            # $0.03 per chase (slightly faster)
+        max_chase_price = 0.65
+
+    # Hedge side gets higher ceiling (+$0.15, max $0.75)
+    if is_hedge_side:
+        max_chase_price = min(max_chase_price + 0.15, 0.75)
+
+    # Override step size if provided
+    if max_chase_per_step is not None:
+        step_size = max_chase_per_step
+
+    # Check if we should chase yet (order must be old enough)
+    if order_age_secs < wait_before_chase:
+        return original_price, False, False
+
+    # Calculate new price based on chase count (incremental)
+    # Each chase adds one step_size to original price
+    new_price = original_price + (chase_count + 1) * step_size
+
+    # Apply ceilings
+    new_price = min(new_price, max_chase_price)      # Price ceiling
+    new_price = min(new_price, current_ask - 0.01)   # Stay below ask
+    new_price = min(new_price, 0.98)                 # Hard cap
+
+    # Only chase if the new price is actually higher
+    if new_price <= original_price:
+        return original_price, False, False
+
+    return round(new_price, 4), True, False
+
+
+def should_enter_at_open(
+    up_price: float,
+    down_price: float,
+    time_elapsed: float,
+    balance_min: float = 0.35,
+    balance_max: float = 0.65,
+    gate_duration: float = 60.0,
+) -> Tuple[bool, str]:
+    """
+    Market Open Gate: Wait for balanced prices before first entry.
+
+    Based on Gabagool/Baguette research (Jan 6, 2026):
+    - They enter EARLY (15-113s) when prices are BALANCED (~50/50)
+    - They WAIT (223-889s) when prices are TRENDING (lopsided)
+
+    This gate only applies for the first 60s before TrendDetector has
+    enough Binance price history to calculate meaningful z-scores.
+
+    Args:
+        up_price: Current UP share price
+        down_price: Current DOWN share price
+        time_elapsed: Seconds since market opened
+        balance_min: Minimum price for "balanced" (default 0.35)
+        balance_max: Maximum price for "balanced" (default 0.65)
+        gate_duration: How long gate is active (default 60s)
+
+    Returns:
+        (can_enter, reason): Whether to enter and explanation
+    """
+    # After gate_duration, TrendDetector has data - skip this gate
+    if time_elapsed >= gate_duration:
+        return True, "TrendDetector active (60s+ elapsed)"
+
+    # First 60s: require balanced prices (like Gabagool)
+    up_balanced = balance_min <= up_price <= balance_max
+    down_balanced = balance_min <= down_price <= balance_max
+
+    if up_balanced and down_balanced:
+        return True, f"BALANCED (UP=${up_price:.2f}, DOWN=${down_price:.2f}) - enter now"
+
+    # Prices are lopsided - wait
+    return False, (
+        f"TRENDING at open (UP=${up_price:.2f}, DOWN=${down_price:.2f}) - "
+        f"wait for balanced prices or TrendDetector ({gate_duration - time_elapsed:.0f}s remaining)"
+    )
 
 
 class PaperTradingBot:
@@ -254,10 +431,10 @@ class PaperTradingBot:
         accum_trade_size: int = 1,  # Shares per trade (small, frequent)
         accum_pair_cost_target: float = 0.995,  # Target pair cost for normal trading
         accum_pair_cost_limit: float = 1.02,  # Max pair cost for rebalancing
-        accum_max_imbalance_pct: float = 0.15,  # Max imbalance as % of target (15% = gabagool-style)
+        accum_max_imbalance_pct: float = 0.20,  # Max imbalance as % of target (20% = 6 shares)
         accum_target_shares: int = 50,  # Target shares per side per market (capped by max_position_pct)
         accum_buy_both_sides: bool = True,  # Try to buy both sides each cycle
-        max_position_pct: float = 0.15,  # Max shares per side as % of balance (15% of $100 = 15 shares)
+        max_position_pct: float = 0.17,  # Max shares per side as % of balance (17% of $100 = 17 shares)
         accum_max_share_price: float = 0.98,  # Never buy shares above this price (Gabagool buys up to $0.98)
         # VOLUME WEIGHTED MODE - Gabagool-style accumulation
         accum_mode: str = "standard",  # "standard" or "volume_weighted"
@@ -267,6 +444,37 @@ class PaperTradingBot:
         vw_hedge_trigger_pct: float = 0.15,  # Start hedging at 15% imbalance (gabagool: ~15-20%)
         vw_max_hedge_price: float = 0.85,  # Max hedge price $0.85 (gabagool: up to $0.87)
         vw_bootstrap_pct: float = 0.33,  # Bootstrap phase: buy both sides until 33% of target (gabagool: ~1.5% but we need more for smaller positions)
+        # CALCULUS MAKER MODE - Exponential decay pricing with quadratic size ramp
+        calc_m_min: float = 0.005,  # Late threshold: need 0.5% edge (pair_cost < $0.995)
+        calc_m_max: float = 0.025,  # Early threshold: need 2.5% edge (pair_cost < $0.975)
+        calc_lambda: float = 0.004,  # Decay constant (higher = faster decay to m_min)
+        calc_max_shares: int = 50,  # Max order size
+        calc_min_shares: int = 5,  # Min order size (Polymarket min)
+        calc_max_pair_cost: float = 0.995,  # Max pair cost to accept
+        # ENHANCED ONE BUY MODE - Single order per side, no chasing, no emergency mode
+        one_buy_threshold: float = 0.47,  # Buy when price <= this (default $0.47)
+        one_buy_size: int = 15,  # Target size per side (default 15 shares)
+        one_buy_dynamic_threshold: bool = False,  # Use time-based threshold like calculus
+        one_buy_max_pair_cost: float = 0.98,  # Max pair cost for hedging (skip if too expensive)
+        # FAIR VALUE MM MODE - Price based on Binance signal, like real MMs
+        fv_edge: float = 0.02,  # Edge below fair value (2 cents)
+        fv_sensitivity_early: float = 0.10,  # Price sensitivity at market open
+        fv_sensitivity_late: float = 0.50,  # Price sensitivity near resolution
+        fv_reprice_threshold: float = 0.03,  # Reprice if fair value changes 3c
+        # GRADUAL CHASE - Time-aware price chasing for unfilled orders
+        # Set to False to revert to instant chase (jump to ask immediately)
+        # When True: chases in small steps based on time remaining
+        # See calculate_gradual_chase_price() for step sizes and wait times
+        gradual_chase_enabled: bool = True,  # FEATURE FLAG: Set False to disable
+        # SEQUENTIAL ORDERING - Place expensive side first, wait for fill before placing cheap side
+        # Set to False to revert to parallel ordering (place both sides simultaneously)
+        # When True: prevents asymmetric fills but may reduce total volume
+        # Risk: expensive side may stall, blocking all accumulation
+        sequential_ordering_enabled: bool = False,  # DISABLED - parallel mode is safer
+        # MAX DAILY LOSS - Stop trading if cumulative loss exceeds this amount
+        # Set to 0 to disable the limit
+        # When limit is hit, bot stops placing new orders but keeps existing positions
+        max_daily_loss: float = 10.0,  # Stop trading if cumulative loss exceeds $10
         # DIRECTIONAL MODE - Bias-based trading with Binance price feed
         directional_mode: bool = False,
         initial_bias: Optional[str] = None,  # "BULLISH" or "BEARISH"
@@ -329,6 +537,54 @@ class PaperTradingBot:
         self.vw_max_hedge_price = vw_max_hedge_price
         self.vw_bootstrap_pct = vw_bootstrap_pct
 
+        # Calculus MAKER mode parameters
+        self.calc_m_min = calc_m_min
+        self.calc_m_max = calc_m_max
+        self.calc_lambda = calc_lambda
+        self.calc_max_shares = calc_max_shares
+        self.calc_min_shares = calc_min_shares
+        self.calc_max_pair_cost = calc_max_pair_cost
+        self.gradual_chase_enabled = gradual_chase_enabled
+        self.sequential_ordering_enabled = sequential_ordering_enabled
+
+        # ONE BUY mode parameters
+        self.one_buy_threshold = one_buy_threshold
+        self.one_buy_size = one_buy_size
+        self.one_buy_dynamic_threshold = one_buy_dynamic_threshold
+        self.one_buy_max_pair_cost = one_buy_max_pair_cost
+
+        # FAIR VALUE MM mode parameters
+        self.fv_edge = fv_edge
+        self.fv_sensitivity_early = fv_sensitivity_early
+        self.fv_sensitivity_late = fv_sensitivity_late
+        self.fv_reprice_threshold = fv_reprice_threshold
+        # Track fair value when order was placed for repricing
+        self._order_fair_value: dict[str, tuple[float, float]] = {}  # "market_slug_SIDE" -> (fair_up, fair_down)
+
+        # Track order replacements per side for chase count
+        self._replacement_count: dict[str, int] = {}  # "market_slug_SIDE" -> count
+        self._chase_exhausted_logged: set[str] = set()  # Track which keys already logged
+
+        # Emergency cooldown tracking (30s between emergency orders per market)
+        self._last_emergency_time: dict[str, float] = {}  # "market_slug" -> timestamp
+
+        # Emergency ceiling tracking - reprice when ceiling changes (e.g., $0.75 → $0.88)
+        self._emergency_ceiling_used: dict[str, float] = {}  # "market_slug_SIDE" -> ceiling when placed
+
+        # Post-pull stabilization: track sides that were pulled, wait for z < 1.0 before re-entering
+        self._pull_cooldown: dict[str, float] = {}  # "market_slug_SIDE" -> time when pulled
+
+        # Market type detection for adaptive parameters
+        self._market_detector: Optional[MarketTypeDetector] = None
+        self._detected_market_type: str = "UNKNOWN"
+
+        # MAX DAILY LOSS PROTECTION
+        self.max_daily_loss = max_daily_loss
+        self.cumulative_pnl = 0.0  # Track cumulative P&L across sessions
+        self.loss_limit_reached = False  # Flag to stop trading when limit hit
+        if self.max_daily_loss > 0:
+            logger.info(f"Max daily loss protection enabled: ${self.max_daily_loss:.2f}")
+
         # Directional mode parameters
         self.directional_mode = directional_mode
         self.initial_bias = Bias[initial_bias] if initial_bias else None
@@ -350,12 +606,46 @@ class PaperTradingBot:
         self._directional_strategy: Optional[DirectionalTradingStrategy] = None
         self._is_new_market: bool = True
 
+        # Trend detection for quote pulling and direction-aware trading
+        self._trend_detector: Optional[TrendDetector] = None
+
+        # Calculus MAKER strategy instance (also used by fair_value_mm mode)
+        self._calculus_strategy: Optional[CalculusMakerStrategy] = None
+        if self.accum_mode in ("calculus_maker", "fair_value_mm"):
+            self._calculus_strategy = CalculusMakerStrategy(
+                max_shares=self.calc_max_shares,
+                min_shares=self.calc_min_shares,
+                max_pair_cost=self.calc_max_pair_cost,
+                m_min=self.calc_m_min,
+                m_max=self.calc_m_max,
+                lambda_decay=self.calc_lambda,
+            )
+            logger.info(f"[CALCULUS] Sizing mode: NORMAL (5 early → 15 late)")
+
+        # ONE BUY strategy instance (Enhanced: no chasing, no emergency mode)
+        self._one_buy_strategy: Optional[OneBuyStrategy] = None
+        if self.accum_mode == "one_buy":
+            self._one_buy_strategy = OneBuyStrategy(
+                threshold=self.one_buy_threshold,
+                size=self.one_buy_size,
+                dynamic_threshold=self.one_buy_dynamic_threshold,
+                max_pair_cost=self.one_buy_max_pair_cost,
+            )
+            threshold_mode = "dynamic" if self.one_buy_dynamic_threshold else f"fixed@${self.one_buy_threshold}"
+            logger.info(f"[ONE_BUY] Enhanced strategy: {threshold_mode}, size={self.one_buy_size}, max_pair=${self.one_buy_max_pair_cost}")
+
         # Telegram notifications and remote control
         self._telegram: Optional[TelegramNotifier] = None
 
         # State persistence for crash recovery
         self._state_persistence: Optional[StatePersistence] = None
         self._persisted_state: Optional[PersistedState] = None
+
+        # Auto-redemption for winning positions (Gnosis Safe only)
+        self._auto_redeemer: Optional[AutoRedeemer] = None
+
+        # Auto-merge state (merge pairs near market end)
+        self._merged_this_market: bool = False  # Prevent multiple merges per market
 
         # State
         self._running = False
@@ -380,46 +670,6 @@ class PaperTradingBot:
         # Web UI callback
         self._web_callback = web_callback
 
-    async def _schedule_claim_scans(
-        self,
-        market_slug: str,
-        condition_id: str,
-        amounts: List[float],
-        winner: str,
-        winning_shares: float,
-    ) -> None:
-        """Schedule 2 claim scans: at 5 min and 10 min after market end.
-
-        This is a simple approach - try twice, then move on.
-        """
-        for delay_minutes in [5, 10]:
-            await asyncio.sleep(delay_minutes * 60)
-            if not self._running:
-                logger.info(f"[CLAIM] Bot stopped, skipping remaining scans for {market_slug}")
-                break
-            try:
-                receipt = await self._client.redeem_positions(
-                    condition_id=condition_id,
-                    amounts=amounts,
-                    neg_risk=False,
-                )
-                tx_hash = receipt.get("transaction_hash", "")[:16] if receipt else ""
-                logger.info(f"✅ [CLAIM] {winning_shares:.2f} {winner} from {market_slug} (scan at {delay_minutes}min) tx: {tx_hash}...")
-                if self._telegram:
-                    try:
-                        await self._telegram.send_info(
-                            f"✅ Claimed {winning_shares:.2f} {winner} → ${winning_shares:.2f}"
-                        )
-                    except Exception:
-                        pass
-                return  # Success, no need for second scan
-            except Exception as e:
-                err_msg = str(e)[:80]
-                if delay_minutes == 10:
-                    logger.warning(f"[CLAIM] Failed after both scans for {market_slug}: {err_msg}")
-                else:
-                    logger.info(f"[CLAIM] Scan at {delay_minutes}min failed, will retry at 10min: {err_msg}")
-
     async def _interruptible_sleep(self, total_seconds: float, check_interval: float = 5.0) -> bool:
         """Sleep that can be interrupted by stop signal.
 
@@ -436,6 +686,220 @@ class PaperTradingBot:
             await asyncio.sleep(sleep_time)
             elapsed += sleep_time
         return self._running
+
+    async def _maybe_auto_merge(self, market, time_remaining_secs: float) -> None:
+        """
+        Auto-merge pairs near market end to lock in $1.00/pair.
+
+        Triggers:
+        - 10 seconds before market end
+        - 20 seconds after market end (before rotation)
+
+        Only runs in live mode and only once per market.
+        """
+        # Only in live mode
+        if self.trading_mode != "live":
+            return
+
+        # Only merge once per market
+        if self._merged_this_market:
+            return
+
+        # Check if we're in the merge window: -20s to +10s around market end
+        if not (-20 <= time_remaining_secs <= 10):
+            return
+
+        # Get position
+        position = self._engine.get_position(market) if self._engine else None
+        if not position:
+            return
+
+        # Calculate mergeable pairs
+        pairs_to_merge = int(min(position.up_size, position.down_size))
+        if pairs_to_merge < 5:  # Minimum 5 pairs to bother
+            return
+
+        logger.info(
+            f"[AUTO-MERGE] Triggering merge: {pairs_to_merge} pairs @ "
+            f"time_remaining={time_remaining_secs:.0f}s"
+        )
+
+        try:
+            tx_hash = await self._execute_merge(market.condition_id, pairs_to_merge)
+            self._merged_this_market = True
+
+            if tx_hash:
+                logger.info(f"[AUTO-MERGE] SUCCESS! TX: {tx_hash}")
+                logger.info(f"[AUTO-MERGE] Received: ${pairs_to_merge:.2f} USDC")
+
+                # Send Telegram notification
+                if self._telegram:
+                    await self._telegram.send_message(
+                        f"Auto-Merged {pairs_to_merge} pairs\n"
+                        f"Received: ${pairs_to_merge:.2f} USDC\n"
+                        f"TX: {tx_hash[:20]}..."
+                    )
+        except Exception as e:
+            logger.error(f"[AUTO-MERGE] Failed: {e}")
+
+    async def _execute_merge(self, condition_id: str, amount: int) -> Optional[str]:
+        """Execute merge based on wallet type."""
+        if not self._config:
+            raise ValueError("Config not initialized")
+
+        if self._config.wallet_type == "gnosis_safe":
+            return await self._merge_via_builder_relayer(condition_id, amount)
+        else:
+            return await self._merge_via_web3(condition_id, amount)
+
+    async def _merge_via_builder_relayer(self, condition_id: str, amount: int) -> str:
+        """Execute merge via Builder Relayer (gasless, Safe wallet only)."""
+        from py_builder_signing_sdk.config import BuilderConfig
+        from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
+        from py_builder_relayer_client.client import RelayClient
+        from py_builder_relayer_client.models import SafeTransaction, OperationType
+        from web3 import Web3
+        import os
+
+        CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+        USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+
+        api_key = os.getenv("BUILDER_API_KEY")
+        secret = os.getenv("BUILDER_SECRET")
+        passphrase = os.getenv("BUILDER_PASSPHRASE")
+
+        if not all([api_key, secret, passphrase]):
+            raise ValueError("Missing Builder credentials")
+
+        # Create RelayClient
+        builder_creds = BuilderApiKeyCreds(key=api_key, secret=secret, passphrase=passphrase)
+        builder_config = BuilderConfig(local_builder_creds=builder_creds)
+
+        client = RelayClient(
+            relayer_url="https://relayer-v2.polymarket.com",
+            chain_id=137,
+            private_key=self._config.wallet_private_key,
+            builder_config=builder_config
+        )
+
+        # Build merge transaction
+        calldata = self._encode_merge_calldata(condition_id, amount, CTF_ADDRESS, USDC_ADDRESS)
+
+        tx = SafeTransaction(
+            to=Web3.to_checksum_address(CTF_ADDRESS),
+            operation=OperationType.Call,
+            data=calldata,
+            value="0"
+        )
+
+        # Execute
+        response = client.execute([tx], f"Auto-Merge {amount} pairs")
+
+        # Extract tx hash
+        if isinstance(response, dict):
+            return response.get('txHash') or response.get('transaction_hash') or response.get('tx_hash')
+        return getattr(response, 'transaction_hash', None) or getattr(response, 'tx_hash', None)
+
+    async def _merge_via_web3(self, condition_id: str, amount: int) -> str:
+        """Execute merge via direct web3 call (pays gas, Magic/EOA wallet)."""
+        from web3 import Web3
+        from web3.middleware import ExtraDataToPOAMiddleware
+        import os
+
+        CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+        USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+
+        CTF_MERGE_ABI = [{
+            "name": "mergePositions",
+            "type": "function",
+            "inputs": [
+                {"name": "collateralToken", "type": "address"},
+                {"name": "parentCollectionId", "type": "bytes32"},
+                {"name": "conditionId", "type": "bytes32"},
+                {"name": "partition", "type": "uint256[]"},
+                {"name": "amount", "type": "uint256"}
+            ]
+        }]
+
+        w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
+        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+
+        account = w3.eth.account.from_key(self._config.wallet_private_key)
+        signer_address = account.address
+
+        # Build contract
+        contract = w3.eth.contract(
+            address=Web3.to_checksum_address(CTF_ADDRESS),
+            abi=CTF_MERGE_ABI
+        )
+
+        # Convert condition_id to bytes32
+        cond_bytes = bytes.fromhex(condition_id[2:] if condition_id.startswith("0x") else condition_id)
+
+        # Build transaction
+        tx = contract.functions.mergePositions(
+            Web3.to_checksum_address(USDC_ADDRESS),
+            bytes(32),  # parentCollectionId = 0
+            cond_bytes,
+            [1, 2],  # partition
+            amount * 1_000_000  # Convert to base units
+        ).build_transaction({
+            'from': signer_address,
+            'gas': 200000,
+            'gasPrice': w3.eth.gas_price,
+            'nonce': w3.eth.get_transaction_count(signer_address),
+            'chainId': 137
+        })
+
+        # Sign and send
+        signed = w3.eth.account.sign_transaction(tx, self._config.wallet_private_key)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+
+        # Wait for confirmation
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+        if receipt['status'] != 1:
+            raise Exception(f"Transaction failed: {tx_hash.hex()}")
+
+        return tx_hash.hex()
+
+    def _encode_merge_calldata(self, condition_id: str, amount: int, ctf_address: str, usdc_address: str) -> str:
+        """Encode mergePositions calldata."""
+        from web3 import Web3
+
+        CTF_MERGE_ABI = [{
+            "name": "mergePositions",
+            "type": "function",
+            "inputs": [
+                {"name": "collateralToken", "type": "address"},
+                {"name": "parentCollectionId", "type": "bytes32"},
+                {"name": "conditionId", "type": "bytes32"},
+                {"name": "partition", "type": "uint256[]"},
+                {"name": "amount", "type": "uint256"}
+            ]
+        }]
+
+        w3 = Web3()
+        contract = w3.eth.contract(
+            address=Web3.to_checksum_address(ctf_address),
+            abi=CTF_MERGE_ABI
+        )
+
+        # Convert condition_id to bytes32
+        cond_bytes = bytes.fromhex(condition_id[2:] if condition_id.startswith("0x") else condition_id)
+
+        calldata = contract.encode_abi(
+            "mergePositions",
+            [
+                Web3.to_checksum_address(usdc_address),
+                bytes(32),  # parentCollectionId = 0
+                cond_bytes,
+                [1, 2],  # partition: YES + NO
+                amount * 1_000_000  # Convert to base units
+            ]
+        )
+
+        return calldata if isinstance(calldata, str) else "0x" + calldata.hex()
 
     @classmethod
     def from_web_config(
@@ -463,11 +927,12 @@ class PaperTradingBot:
         if strategy_name in ["standard", "volume_weighted"]:
             accum_mode = strategy_name
 
-        # Use mode-specific CSV file names
-        csv_path = f"paper_trades_{accum_mode}.csv"
-
         # Get trading mode (paper or live)
         trading_mode = config.get("mode", "paper")
+
+        # Use mode-specific CSV file names with trading_mode prefix
+        csv_prefix = "live_trades" if trading_mode == "live" else "paper_trades"
+        csv_path = f"{csv_prefix}_{accum_mode}.csv"
 
         return cls(
             initial_balance=config.get("starting_balance", 100.0),
@@ -508,6 +973,7 @@ class PaperTradingBot:
         web_callback: Optional[Callable[[dict], None]] = None,
         session_start_utc: Optional[datetime] = None,
         session_end_utc: Optional[datetime] = None,
+        trading_mode: str = "paper",
     ) -> "PaperTradingBot":
         """Create bot instance from Directional web UI configuration.
 
@@ -516,6 +982,7 @@ class PaperTradingBot:
             web_callback: Optional callback for web UI updates
             session_start_utc: UTC start time - only trade markets ending AFTER this
             session_end_utc: UTC end time - only trade markets ending BEFORE this
+            trading_mode: "paper" or "live" - determines CSV file prefix
 
         Returns:
             PaperTradingBot instance configured for directional mode
@@ -546,13 +1013,192 @@ class PaperTradingBot:
             directional_mode=True,
             initial_bias=config.get("initial_bias", "BULLISH"),
             directional_config=directional_config,
-            # Output
-            csv_path="paper_trades_directional.csv",
+            # Output - use trading_mode to determine CSV prefix
+            csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_directional.csv",
             live_display=True,
             # Web callback
             web_callback=web_callback,
             # Strategy name
             strategy_name="directional",
+            # CRITICAL: Session time window for market selection enforcement
+            session_start_utc=session_start_utc,
+            session_end_utc=session_end_utc,
+        )
+
+    @classmethod
+    def from_calculus_config(
+        cls,
+        config: dict,
+        web_callback: Optional[Callable[[dict], None]] = None,
+        session_start_utc: Optional[datetime] = None,
+        session_end_utc: Optional[datetime] = None,
+        trading_mode: str = "paper",
+    ) -> "PaperTradingBot":
+        """Create bot instance from Calculus MAKER web UI configuration.
+
+        Uses exponential decay mispricing threshold and quadratic size ramp.
+
+        Args:
+            config: Dictionary with calculus maker configuration values
+            web_callback: Optional callback for web UI updates
+            session_start_utc: UTC start time - only trade markets ending AFTER this
+            session_end_utc: UTC end time - only trade markets ending BEFORE this
+
+        Returns:
+            PaperTradingBot instance configured for calculus maker mode
+        """
+        # Get trading mode (paper or live)
+        trading_mode = config.get("mode", "paper")
+
+        return cls(
+            initial_balance=config.get("starting_balance", 500.0),
+            # Set accum_mode to calculus_maker
+            accum_mode="calculus_maker",
+            # Calculus MAKER specific parameters
+            calc_m_min=config.get("m_min", 0.005),  # 0.5% edge late
+            calc_m_max=config.get("m_max", 0.025),  # 2.5% edge early
+            calc_lambda=config.get("lambda_decay", 0.004),
+            calc_max_shares=config.get("max_shares", 50),
+            calc_min_shares=config.get("min_shares", 5),
+            calc_max_pair_cost=config.get("max_pair_cost", 0.995),
+            # Gradual chase: disabled by default to prevent stranded positions
+            # When OFF: jumps to ask immediately, fills both sides or neither
+            gradual_chase_enabled=config.get("gradual_chase_enabled", False),
+            # Sequential ordering: place expensive side first, wait for fill before cheap side
+            # When OFF (default): place both sides simultaneously - simpler and safer
+            # When ON: prevents asymmetric fills but can get stuck
+            sequential_ordering_enabled=config.get("sequential_ordering_enabled", False),
+            # Max daily loss: stop trading if cumulative loss exceeds this amount
+            # Stops placing new orders but keeps existing positions
+            max_daily_loss=config.get("max_daily_loss", 10.0),
+            # General parameters
+            accum_max_share_price=config.get("max_share_price", 0.98),
+            accum_max_imbalance_pct=config.get("max_imbalance_pct", 0.20),
+            accum_target_shares=config.get("max_shares", 50),
+            # Output - use trading_mode to determine CSV prefix
+            csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_calculus_maker.csv",
+            live_display=True,
+            # Web callback
+            web_callback=web_callback,
+            # Strategy name
+            strategy_name="calculus_maker",
+            # Trading mode
+            trading_mode=trading_mode,
+            # CRITICAL: Session time window for market selection enforcement
+            session_start_utc=session_start_utc,
+            session_end_utc=session_end_utc,
+        )
+
+    @classmethod
+    def from_fair_value_mm_config(
+        cls,
+        config: dict,
+        web_callback: Optional[Callable[[dict], None]] = None,
+        session_start_utc: Optional[datetime] = None,
+        session_end_utc: Optional[datetime] = None,
+        trading_mode: str = "paper",
+    ) -> "PaperTradingBot":
+        """Create bot instance from Fair Value MM web UI configuration.
+
+        Uses Binance price feed to calculate fair value for UP/DOWN shares.
+        Posts at fair_value - edge (like real market makers).
+
+        Args:
+            config: Dictionary with fair value MM configuration values
+            web_callback: Optional callback for web UI updates
+            session_start_utc: UTC start time - only trade markets ending AFTER this
+            session_end_utc: UTC end time - only trade markets ending BEFORE this
+
+        Returns:
+            PaperTradingBot instance configured for fair value MM mode
+        """
+        # Get trading mode (paper or live)
+        trading_mode = config.get("mode", "paper")
+
+        return cls(
+            initial_balance=config.get("starting_balance", 500.0),
+            # Set accum_mode to fair_value_mm
+            accum_mode="fair_value_mm",
+            # Fair Value MM specific parameters
+            fv_edge=config.get("fv_edge", 0.02),  # 2 cent edge
+            fv_sensitivity_early=config.get("fv_sensitivity_early", 0.10),
+            fv_sensitivity_late=config.get("fv_sensitivity_late", 0.50),
+            fv_reprice_threshold=config.get("fv_reprice_threshold", 0.03),
+            # Reuse calculus maker parameters for should_buy() and get_size()
+            calc_m_min=config.get("m_min", 0.005),
+            calc_m_max=config.get("m_max", 0.025),
+            calc_lambda=config.get("lambda_decay", 0.004),
+            calc_max_shares=config.get("max_shares", 50),
+            calc_min_shares=config.get("min_shares", 5),
+            calc_max_pair_cost=config.get("max_pair_cost", 0.995),
+            # Max daily loss protection
+            max_daily_loss=config.get("max_daily_loss", 10.0),
+            # General parameters
+            accum_max_share_price=config.get("max_share_price", 0.98),
+            accum_max_imbalance_pct=config.get("max_imbalance_pct", 0.20),
+            accum_target_shares=config.get("max_shares", 50),
+            # Output
+            csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_fair_value_mm.csv",
+            live_display=True,
+            # Web callback
+            web_callback=web_callback,
+            # Strategy name
+            strategy_name="fair_value_mm",
+            # Trading mode
+            trading_mode=trading_mode,
+            # CRITICAL: Session time window for market selection enforcement
+            session_start_utc=session_start_utc,
+            session_end_utc=session_end_utc,
+        )
+
+    @classmethod
+    def from_one_buy_config(
+        cls,
+        config: dict,
+        web_callback: Optional[Callable[[dict], None]] = None,
+        session_start_utc: Optional[datetime] = None,
+        session_end_utc: Optional[datetime] = None,
+        trading_mode: str = "paper",
+    ) -> "PaperTradingBot":
+        """Create bot instance from ONE BUY web UI configuration.
+
+        Simple fixed threshold strategy with max 1 buy per side per market.
+        No emergency mode, no size ramping, no complexity.
+
+        Args:
+            config: Dictionary with one_buy configuration values
+            web_callback: Optional callback for web UI updates
+            session_start_utc: UTC start time - only trade markets ending AFTER this
+            session_end_utc: UTC end time - only trade markets ending BEFORE this
+
+        Returns:
+            PaperTradingBot instance configured for one_buy mode
+        """
+        # Get trading mode (paper or live)
+        trading_mode = config.get("mode", "paper")
+
+        return cls(
+            initial_balance=config.get("starting_balance", 500.0),
+            # Set accum_mode to one_buy
+            accum_mode="one_buy",
+            # ENHANCED ONE BUY parameters
+            one_buy_threshold=config.get("threshold", 0.47),
+            one_buy_size=config.get("size", 15),  # Default 15 shares
+            one_buy_dynamic_threshold=config.get("dynamic_threshold", False),
+            one_buy_max_pair_cost=config.get("max_pair_cost", 0.98),
+            # Max daily loss: stop trading if cumulative loss exceeds this amount
+            max_daily_loss=config.get("max_daily_loss", 0.0),
+            # General parameters - use defaults
+            accum_max_share_price=0.98,
+            # Output - use trading_mode to determine CSV prefix
+            csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_one_buy.csv",
+            live_display=True,
+            # Web callback
+            web_callback=web_callback,
+            # Strategy name
+            strategy_name="one_buy",
+            # Trading mode
+            trading_mode=trading_mode,
             # CRITICAL: Session time window for market selection enforcement
             session_start_utc=session_start_utc,
             session_end_utc=session_end_utc,
@@ -584,16 +1230,38 @@ class PaperTradingBot:
             if self.directional_mode:
                 mode_label = "Directional"
                 self._telegram.on_graceful_stop_directional(self._handle_telegram_graceful_stop)
-                self._telegram.on_graceful_stop_standard(_noop)
+                self._telegram.on_graceful_stop_calculus_maker(_noop)
+                self._telegram.on_graceful_stop_simple_hedger(_noop)
                 self._telegram.on_graceful_stop_volume_weighted(_noop)
             elif self.accum_mode == "volume_weighted":
                 mode_label = "Volume Weighted (Gabagool-style)"
                 self._telegram.on_graceful_stop_volume_weighted(self._handle_telegram_graceful_stop)
-                self._telegram.on_graceful_stop_standard(_noop)
+                self._telegram.on_graceful_stop_calculus_maker(_noop)
+                self._telegram.on_graceful_stop_simple_hedger(_noop)
+                self._telegram.on_graceful_stop_directional(_noop)
+            elif self.accum_mode == "calculus_maker":
+                mode_label = "Calculus MAKER"
+                self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
+                self._telegram.on_graceful_stop_simple_hedger(_noop)
+                self._telegram.on_graceful_stop_volume_weighted(_noop)
+                self._telegram.on_graceful_stop_directional(_noop)
+            elif self.accum_mode == "fair_value_mm":
+                mode_label = "Fair Value MM"
+                # Fair Value MM uses calculus_maker button since they're similar
+                self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
+                self._telegram.on_graceful_stop_simple_hedger(_noop)
+                self._telegram.on_graceful_stop_volume_weighted(_noop)
+                self._telegram.on_graceful_stop_directional(_noop)
+            elif self.accum_mode == "simple_hedger":
+                mode_label = "Simple Hedger"
+                self._telegram.on_graceful_stop_simple_hedger(self._handle_telegram_graceful_stop)
+                self._telegram.on_graceful_stop_calculus_maker(_noop)
+                self._telegram.on_graceful_stop_volume_weighted(_noop)
                 self._telegram.on_graceful_stop_directional(_noop)
             else:
-                mode_label = "Standard"
-                self._telegram.on_graceful_stop_standard(self._handle_telegram_graceful_stop)
+                mode_label = "Unknown Mode"
+                self._telegram.on_graceful_stop_calculus_maker(_noop)
+                self._telegram.on_graceful_stop_simple_hedger(_noop)
                 self._telegram.on_graceful_stop_volume_weighted(_noop)
                 self._telegram.on_graceful_stop_directional(_noop)
 
@@ -648,22 +1316,11 @@ class PaperTradingBot:
             self._engine = LiveTradingEngine(
                 client=self._client,
                 starting_balance=self.initial_balance,
+                on_fill_callback=self._web_callback,
             )
             # Sync balance from chain
             await self._engine.sync_balance()
             logger.info(f"Live balance: ${self._engine.balance:.2f}")
-
-            # AUTO-CLAIM: Disabled at startup for faster init - claims happen at resolution
-            # To re-enable: uncomment below
-            # logger.info("[AUTO-CLAIM] Scanning for unclaimed positions (last 30 min)...")
-            # try:
-            #     claimed = await self._client.scan_and_claim_recent_markets(hours_back=1)
-            #     if claimed:
-            #         logger.info(f"[AUTO-CLAIM] ✅ Claimed {len(claimed)} positions!")
-            #         await self._engine.sync_balance()
-            #         logger.info(f"[AUTO-CLAIM] New balance: ${self._engine.balance:.2f}")
-            # except Exception as e:
-            #     logger.warning(f"[AUTO-CLAIM] Scan failed (non-critical): {e}")
 
             # Check for existing positions from previous sessions
             existing = await self._check_existing_positions()
@@ -744,6 +1401,18 @@ class PaperTradingBot:
             logger.warning("Could not get initial Binance price, continuing anyway")
         else:
             logger.info(f"Binance connected: BTC=${self._binance_client.current_price:,.2f}")
+
+        # Initialize TrendDetector for quote pulling and direction-aware trading
+        # Based on Telegram alpha: MMs monitor Binance to react BEFORE Polymarket updates
+        if self._binance_client.is_connected:
+            self._trend_detector = TrendDetector(
+                binance_client=self._binance_client,
+                z_score_mild=1.0,
+                z_score_strong=2.0,
+                z_score_extreme=3.0,
+                velocity_window_secs=10,
+            )
+            logger.info("[TREND] TrendDetector initialized - quote pulling and trend-aware trading enabled")
 
         # Initialize directional mode components if enabled
         if self.directional_mode:
@@ -1280,13 +1949,17 @@ class PaperTradingBot:
             total_pairs = sum(p.pair_count for p in self._engine.positions)
 
             status_emoji = "+" if total_locked >= 0 else ""
-            # Determine mode label
-            if self.directional_mode:
-                mode = "Directional"
-            elif self.accum_mode == "volume_weighted":
-                mode = "Volume Weighted"
-            else:
-                mode = "Standard"
+            # Determine mode label from strategy_name
+            mode_labels = {
+                "one_buy": "ONE BUY",
+                "calculus_maker": "Calculus Maker",
+                "fair_value_mm": "Fair Value MM",
+                "simple_hedger": "Simple Hedger",
+                "directional": "Directional",
+                "volume_weighted": "Volume Weighted",
+                "standard": "Standard",
+            }
+            mode = mode_labels.get(self.strategy_name, self.strategy_name.replace("_", " ").title())
             title = f"Final Report - {mode}" if is_final else f"Update - {mode}"
 
             await self._telegram.send_pnl(
@@ -1460,6 +2133,12 @@ class PaperTradingBot:
                     mode = "Directional"
                 elif self.accum_mode == "volume_weighted":
                     mode = "Volume Weighted"
+                elif self.accum_mode == "calculus_maker":
+                    mode = "Calculus Maker"
+                elif self.accum_mode == "fair_value_mm":
+                    mode = "Fair Value MM"
+                elif self.accum_mode == "simple_hedger":
+                    mode = "Simple Hedger"
                 else:
                     mode = "Standard"
                 hedged_pairs = int(min(up_qty, down_qty))
@@ -1584,6 +2263,12 @@ class PaperTradingBot:
                     mode = "Directional"
                 elif self.accum_mode == "volume_weighted":
                     mode = "Volume Weighted"
+                elif self.accum_mode == "calculus_maker":
+                    mode = "Calculus Maker"
+                elif self.accum_mode == "fair_value_mm":
+                    mode = "Fair Value MM"
+                elif self.accum_mode == "simple_hedger":
+                    mode = "Simple Hedger"
                 else:
                     mode = "Standard"
                 hedged_pairs = int(min(up_qty, down_qty))
@@ -1715,7 +2400,14 @@ class PaperTradingBot:
             logger.info(f"  - Emergency hedge: <{self.directional_config.emergency_threshold_secs}s remaining")
             logger.info(f"  - BTC price: ${self._binance_client.current_price:,.2f}")
         else:
-            mode_label = "VOLUME WEIGHTED (Gabagool-style)" if self.accum_mode == "volume_weighted" else "STANDARD"
+            if self.accum_mode == "volume_weighted":
+                mode_label = "VOLUME WEIGHTED (Gabagool-style)"
+            elif self.accum_mode == "calculus_maker":
+                mode_label = "CALCULUS MAKER"
+            elif self.accum_mode == "fair_value_mm":
+                mode_label = "FAIR VALUE MM (Binance-priced)"
+            else:
+                mode_label = "STANDARD"
             logger.info(f"ACCUMULATION MODE [{mode_label}] - High Frequency Trading")
             logger.info("=" * 50)
             logger.info(f"  - Trade size: {self.accum_trade_size} shares per trade")
@@ -1739,6 +2431,23 @@ class PaperTradingBot:
 
         # Send initial Discord message
         await self._send_discord_update()
+
+        # Start auto-redemption if enabled and in live trading mode with Gnosis Safe
+        if (
+            self.trading_mode == "live"
+            and self._config.wallet_type == "gnosis_safe"
+            and self._config.auto_redeem_enabled
+        ):
+            self._auto_redeemer = AutoRedeemer(
+                config=self._config,
+                notifier=self._telegram,
+                interval_minutes=self._config.auto_redeem_interval_minutes,
+            )
+            await self._auto_redeemer.start()
+            logger.info(
+                f"Auto-redemption enabled: checking every "
+                f"{self._config.auto_redeem_interval_minutes:.0f} minutes"
+            )
 
         # Start rotator session
         if not await self._rotator.start_session():
@@ -1924,8 +2633,8 @@ class PaperTradingBot:
         - At 100 shares: max imbalance = 40 shares
         """
         max_position = max(current_up, current_down, 1)
-        # Minimum of 10 for bootstrap phase (allows $1 min orders at any price)
-        return max(10, int(max_position * self.vw_imbalance_pct))
+        # Minimum of 5 (one order) - tighter control to prevent large directional exposure
+        return max(5, int(max_position * self.vw_imbalance_pct))
 
     async def _accumulation_trading_cycle(self) -> None:
         """
@@ -2020,6 +2729,23 @@ class PaperTradingBot:
         raw_up_bid = opportunity.up_bid or (raw_up_ask * 0.98 if raw_up_ask else 0.48)
         raw_down_bid = opportunity.down_bid or (raw_down_ask * 0.98 if raw_down_ask else 0.48)
 
+        # MARKET TYPE DETECTION: Feed prices and detect after ~2 min of data
+        if self._market_detector is None:
+            self._market_detector = MarketTypeDetector()
+        self._market_detector.add_price("UP", raw_up_ask)
+        self._market_detector.add_price("DOWN", raw_down_ask)
+
+        # Detect market type once we have enough data (only detect once)
+        if not self._market_detector.detected and self._market_detector.has_enough_data():
+            self._detected_market_type = self._market_detector.detect()
+            params = self._market_detector.get_recommended_params()
+            logger.info(
+                f"[MARKET_DETECTOR] Detected: {self._detected_market_type} | "
+                f"Recommended: chase<=${params['max_chase_price']:.2f}, "
+                f"emergency>{params['emergency_threshold']}, "
+                f"max_buys={params['max_buys_per_side']}"
+            )
+
         # Calculate current average pair cost
         current_avg_pair_cost = 0.0
         if position and position.pair_count > 0:
@@ -2041,78 +2767,541 @@ class PaperTradingBot:
             max_imbalance_check = max(int(self.accum_max_imbalance_pct * self.accum_target_shares), 2)
 
         # Determine if this is an emergency hedge situation
-        # Emergency = severely imbalanced (>1.5x max allowed) and need to hedge immediately
-        is_emergency_up = share_imbalance > max_imbalance_check * 1.5 and deficit_side == "UP"
-        is_emergency_down = share_imbalance > max_imbalance_check * 1.5 and deficit_side == "DOWN"
+        # Emergency triggers:
+        # 1. Imbalance exceeds time-based threshold (10 early, 5 late)
+        # 2. Emergency cooldown has passed (30s between emergency orders)
+        #
+        # NOTE: Chase exhaustion is handled in calculate_gradual_chase_price()
+        # which leaves order at final price. Emergency only triggers for severe imbalance.
+        #
+        # IMPORTANT: ONE_BUY mode NEVER uses emergency mode
+        # - Single order at threshold, no chasing, accept outcome
+        if self.accum_mode == "one_buy":
+            is_emergency_up = False
+            is_emergency_down = False
+        else:
+            # Get time-based emergency threshold (10 early, 5 late)
+            emergency_threshold = get_emergency_threshold(time_remaining_secs)
 
-        # PATIENT PRICING (Gabagool-style)
-        # For Standard and VW modes: bid below ask based on time window
-        # Early (10-15min): bid - 0.02, Mid (5-10min): bid - 0.01, Late (0-5min): mid-price
+            # Check imbalance against time-based threshold
+            is_emergency_up = share_imbalance > emergency_threshold and deficit_side == "UP"
+            is_emergency_down = share_imbalance > emergency_threshold and deficit_side == "DOWN"
+
+            # Apply emergency cooldown (30s between emergency orders per market)
+            EMERGENCY_COOLDOWN_SECS = 30.0
+            current_time = time.time()
+
+            if is_emergency_up or is_emergency_down:
+                last_emergency = self._last_emergency_time.get(market.slug, 0)
+                if current_time - last_emergency < EMERGENCY_COOLDOWN_SECS:
+                    # Cooldown not passed - skip emergency
+                    logger.debug(
+                        f"[EMERGENCY_COOLDOWN] Skipping emergency, "
+                        f"{EMERGENCY_COOLDOWN_SECS - (current_time - last_emergency):.0f}s remaining"
+                    )
+                    is_emergency_up = False
+                    is_emergency_down = False
+                else:
+                    # Log emergency trigger
+                    emergency_side = "UP" if is_emergency_up else "DOWN"
+                    logger.info(
+                        f"[EMERGENCY] {emergency_side}: imbalance={share_imbalance} > threshold={emergency_threshold} "
+                        f"(time_left={time_remaining_secs:.0f}s)"
+                    )
+                    self._last_emergency_time[market.slug] = current_time
+
+                    # Cancel any pending chased order for the emergency side (prevent double fill)
+                    if hasattr(self._engine, 'cancel_pending_order'):
+                        pending_key = f"{market.slug}_{emergency_side}"
+                        try:
+                            cancelled = await self._engine.cancel_pending_order(pending_key)
+                            if cancelled:
+                                logger.info(f"[EMERGENCY] Cancelled chased order for {emergency_side} before emergency fill")
+                                # Reset replacement count since we're starting fresh
+                                self._replacement_count.pop(pending_key, None)
+                                self._chase_exhausted_logged.discard(pending_key)
+                        except Exception as e:
+                            logger.warning(f"[EMERGENCY] Failed to cancel pending order: {e}")
+
+        # Initialize fair values (used by FV_MM mode for buy decisions)
+        fair_up = 0.50
+        fair_down = 0.50
+
+        # PATIENT PRICING - Graduated pricing relative to best_bid
+        # Early: bid-0.03, Mid: bid-0.02, Late: bid-0.01, Final: bid, Emergency: ask
         up_price = get_patient_price(raw_up_bid, raw_up_ask, time_remaining_secs, is_emergency_up)
         down_price = get_patient_price(raw_down_bid, raw_down_ask, time_remaining_secs, is_emergency_down)
+
+        # ONE BUY MODE: Use threshold price as limit order (not patient pricing)
+        # This places orders at exactly the threshold - fills at ask or better
+        # Supports fixed OR dynamic threshold (time-based)
+        if self.accum_mode == "one_buy" and self._one_buy_strategy:
+            threshold = self._one_buy_strategy.get_threshold(time_remaining_secs)
+            up_price = threshold
+            down_price = threshold
+            price_mode = "1BUY_DYN" if self._one_buy_strategy.dynamic_threshold else "1BUY_FIX"
+        # FAIR VALUE MM MODE: Price based on Binance signal, like real MMs
+        # Posts at fair_value - edge, not blind bid-X
+        elif self.accum_mode == "fair_value_mm" and self._binance_client:
+            # Get price vs strike from Binance
+            price_vs_strike = self._binance_client.price_vs_strike_pct
+
+            # Calculate fair values with time-decaying sensitivity
+            fair_up, fair_down = calculate_fair_value(
+                price_vs_strike_pct=price_vs_strike,
+                time_remaining_secs=time_remaining_secs,
+                sensitivity_early=self.fv_sensitivity_early,
+                sensitivity_late=self.fv_sensitivity_late,
+            )
+
+            # Post at fair value - edge (e.g., 55c - 2c = 53c)
+            up_price = max(0.01, fair_up - self.fv_edge)
+            down_price = max(0.01, fair_down - self.fv_edge)
+
+            # CRITICAL: Cap at ask price - never post ABOVE the ask
+            # If fair value > ask, that's a great deal - buy at ask!
+            # This happens when market is mispriced in our favor.
+            if up_price > raw_up_ask:
+                up_price = raw_up_ask
+            if down_price > raw_down_ask:
+                down_price = raw_down_ask
+
+            # Emergency: use ask for immediate fill (override fair value)
+            if is_emergency_up:
+                up_price = raw_up_ask
+            if is_emergency_down:
+                down_price = raw_down_ask
+
+            # Track fair value for repricing (cancel if fair value changes significantly)
+            current_fair = (fair_up, fair_down)
+
+            # Log fair value pricing
+            price_mode = "FV_MM"
+            if self._opportunities_checked % 10 == 0 and not self.quiet_mode:
+                logger.info(
+                    f"[FV_MM] BTC vs strike: {price_vs_strike:+.4f}% | "
+                    f"Fair: UP=${fair_up:.3f} DOWN=${fair_down:.3f} | "
+                    f"Post: UP=${up_price:.3f} DOWN=${down_price:.3f} (edge=${self.fv_edge:.2f})"
+                )
+        else:
+            # Determine price mode for logging (non-one_buy modes)
+            if is_emergency_up or is_emergency_down:
+                price_mode = "EMERGENCY"
+            elif time_remaining_secs >= 600:
+                price_mode = "EARLY"
+            elif time_remaining_secs >= 300:
+                price_mode = "MID"
+            elif time_remaining_secs >= 120:
+                price_mode = "LATE"
+            else:
+                price_mode = "FINAL"
+
         pair_cost = up_price + down_price
 
-        # Determine price mode for logging
-        if is_emergency_up or is_emergency_down:
-            price_mode = "EMERGENCY"
-        elif time_remaining_secs >= 600:
-            price_mode = "EARLY"
-        elif time_remaining_secs >= 300:
-            price_mode = "MID"
-        else:
-            price_mode = "LATE"
-
-        # Log pair cost status with price mode (suppressed in quiet mode)
+        # Log pair cost status with price mode
+        # Show spread info: how far our price is from best_ask
+        up_spread = raw_up_ask - up_price
+        down_spread = raw_down_ask - down_price
         if self._opportunities_checked % 10 == 0 and not self.quiet_mode:
-            logger.info(f"[ACCUM] [{price_mode}] UP=${up_price:.3f} (ask=${raw_up_ask:.3f}) DOWN=${down_price:.3f} (ask=${raw_down_ask:.3f}) PairCost=${pair_cost:.4f}")
+            logger.info(
+                f"[ACCUM] [{price_mode}] UP=${up_price:.3f} (ask=${raw_up_ask:.3f}, spread=${up_spread:.3f}) "
+                f"DOWN=${down_price:.3f} (ask=${raw_down_ask:.3f}, spread=${down_spread:.3f}) PairCost=${pair_cost:.4f}"
+            )
+
+        # Check if loss limit has been reached - stop trading new orders
+        if self.loss_limit_reached:
+            if self._opportunities_checked % 30 == 0:  # Log every 30 checks
+                logger.warning(f"[LOSS LIMIT] Trading stopped. Cumulative P&L: ${self.cumulative_pnl:.2f}")
+            # Still check for rotation so existing positions can resolve
+            if self._rotator and self._rotator.should_rotate():
+                await self._handle_market_rotation(market)
+            return
+
+        # =================================================================
+        # MARKET OPEN GATE (first 60s) - APPLIES TO ALL STRATEGIES
+        # =================================================================
+        # Wait for balanced prices before first entry (Gabagool/Baguette behavior)
+        # This check runs BEFORE mode-specific should_buy() checks
+        if current_up == 0 and current_down == 0:
+            time_elapsed_secs = 900 - time_remaining_secs
+            can_enter, gate_reason = should_enter_at_open(
+                up_price=raw_up_ask,
+                down_price=raw_down_ask,
+                time_elapsed=time_elapsed_secs,
+                balance_min=0.35,
+                balance_max=0.65,
+                gate_duration=60.0,
+            )
+            if not can_enter:
+                if self._opportunities_checked % 10 == 0:
+                    logger.info(f"[OPEN_GATE] {gate_reason}")
+                return
 
         # Determine what to buy this cycle
         buy_up = False
         buy_down = False
-        # Dynamic sizing: 20% at 15min → 10% at 5min → 2% at 0min
-        buy_size = calculate_dynamic_trade_size(
-            time_remaining_secs=time_remaining_secs,
-            max_target_shares=self.accum_target_shares,
-            min_size=1
-        )
+
+        # ENHANCED ONE BUY MODE: Single order per side, no chasing, pair cost gating
+        if self.accum_mode == "one_buy" and self._one_buy_strategy:
+            threshold = self._one_buy_strategy.get_threshold(time_remaining_secs)
+            status = self._one_buy_strategy.get_status()
+
+            # Check if both sides filled (hedged) or both attempted
+            if status["fully_hedged"]:
+                if self._opportunities_checked % 30 == 0:
+                    pair_cost = status.get("pair_cost", 0)
+                    logger.info(f"[1BUY] HEDGED: pair_cost=${pair_cost:.2f} - waiting for resolution")
+                if self._rotator.should_rotate():
+                    await self._handle_market_rotation(market)
+                return
+
+            # Use should_buy() which checks: not filled, price <= threshold, pair cost OK
+            buy_up = self._one_buy_strategy.should_buy("UP", up_ask, time_remaining_secs)
+            buy_down = self._one_buy_strategy.should_buy("DOWN", down_ask, time_remaining_secs)
+
+            # Log status
+            if buy_up:
+                logger.info(f"[1BUY] BUY UP: ${up_ask:.2f} <= ${threshold:.2f}")
+            if buy_down:
+                logger.info(f"[1BUY] BUY DOWN: ${down_ask:.2f} <= ${threshold:.2f}")
+
+            # If neither side buyable, explain why
+            if not buy_up and not buy_down:
+                reasons = []
+                if status["up_filled"]:
+                    reasons.append(f"UP filled@${status['up_fill_price']:.2f}")
+                elif up_ask > threshold:
+                    reasons.append(f"UP ${up_ask:.2f}>${threshold:.2f}")
+                if status["down_filled"]:
+                    reasons.append(f"DOWN filled@${status['down_fill_price']:.2f}")
+                elif down_ask > threshold:
+                    reasons.append(f"DOWN ${down_ask:.2f}>${threshold:.2f}")
+
+                # Check pair cost rejection
+                if status["up_filled"] and not status["down_filled"] and down_ask <= threshold:
+                    proj_pair = status["up_fill_price"] + down_ask
+                    if proj_pair > self._one_buy_strategy.max_pair_cost:
+                        reasons.append(f"pair ${proj_pair:.2f}>${self._one_buy_strategy.max_pair_cost}")
+                if status["down_filled"] and not status["up_filled"] and up_ask <= threshold:
+                    proj_pair = status["down_fill_price"] + up_ask
+                    if proj_pair > self._one_buy_strategy.max_pair_cost:
+                        reasons.append(f"pair ${proj_pair:.2f}>${self._one_buy_strategy.max_pair_cost}")
+
+                if self._opportunities_checked % 10 == 0:
+                    logger.info(f"[1BUY] Skip: {', '.join(reasons)}")
+                if self._rotator.should_rotate():
+                    await self._handle_market_rotation(market)
+                return
+
+            # Fixed size for the order
+            buy_size = self._one_buy_strategy.get_size()
+
+        # CALCULUS MAKER MODE: Use strategy's should_buy() and get_size()
+        elif self.accum_mode == "calculus_maker" and self._calculus_strategy:
+            threshold = self._calculus_strategy.get_threshold(time_remaining_secs)
+            mispricing = 1.0 - pair_cost
+            max_pair_cost = 1.0 - threshold
+
+            # Check if pair cost meets mispricing threshold for current time
+            # BUT: Skip this check in EMERGENCY - must hedge at all costs
+            is_emergency = is_emergency_up or is_emergency_down
+            if not is_emergency and not self._calculus_strategy.should_buy(pair_cost, time_remaining_secs):
+                # Log every 10 checks at INFO so user sees why no trades
+                if self._opportunities_checked % 10 == 0:
+                    logger.info(
+                        f"[CALC] Waiting: pair_cost=${pair_cost:.3f} > max=${max_pair_cost:.3f} "
+                        f"(need {threshold:.1%} edge, have {mispricing:.1%}) time={time_remaining_secs:.0f}s"
+                    )
+                # Check for rotation even when not trading
+                if self._rotator.should_rotate():
+                    await self._handle_market_rotation(market)
+                return
+
+            if is_emergency:
+                logger.info(f"[CALC] 🚨 EMERGENCY HEDGE: imbalance={share_imbalance}, forcing trade at pair cost ${pair_cost:.3f}")
+
+            # Use calculus strategy's size (quadratic ramp: 5 early → 50 late)
+            buy_size = self._calculus_strategy.get_size(time_remaining_secs)
+            logger.info(f"[CALC] ✅ TRADING: mispricing {mispricing:.1%} >= threshold {threshold:.1%}, size={buy_size}")
+        # FAIR VALUE MM MODE: Reuses calculus strategy's should_buy() and get_size()
+        # Pricing differs (fair value instead of patient bid), but threshold/sizing reused
+        elif self.accum_mode == "fair_value_mm" and self._calculus_strategy:
+            threshold = self._calculus_strategy.get_threshold(time_remaining_secs)
+            mispricing = 1.0 - pair_cost
+            max_pair_cost = 1.0 - threshold
+
+            # Check if pair cost meets mispricing threshold for current time
+            is_emergency = is_emergency_up or is_emergency_down
+            if not is_emergency and not self._calculus_strategy.should_buy(pair_cost, time_remaining_secs):
+                if self._opportunities_checked % 10 == 0:
+                    logger.info(
+                        f"[FV_MM] Waiting: pair_cost=${pair_cost:.3f} > max=${max_pair_cost:.3f} "
+                        f"(need {threshold:.1%} edge, have {mispricing:.1%}) time={time_remaining_secs:.0f}s"
+                    )
+                if self._rotator.should_rotate():
+                    await self._handle_market_rotation(market)
+                return
+
+            if is_emergency:
+                logger.info(f"[FV_MM] 🚨 EMERGENCY HEDGE: imbalance={share_imbalance}, forcing trade at pair cost ${pair_cost:.3f}")
+
+            # REPRICING: Check if fair value changed significantly since order was placed
+            # Cancel pending orders if fair value moved more than fv_reprice_threshold
+            for side in ["UP", "DOWN"]:
+                order_key = f"{market.slug}_{side}"
+                if order_key in self._order_fair_value:
+                    old_fair_up, old_fair_down = self._order_fair_value[order_key]
+                    # Get current fair value (already calculated in pricing section)
+                    new_fair_up, new_fair_down = current_fair if 'current_fair' in dir() else (0.5, 0.5)
+                    fair_change = abs(new_fair_up - old_fair_up)
+                    if fair_change > self.fv_reprice_threshold:
+                        logger.info(
+                            f"[FV_MM] REPRICING {side}: fair value changed ${fair_change:.3f} > ${self.fv_reprice_threshold:.3f} "
+                            f"(old=${old_fair_up:.3f}, new=${new_fair_up:.3f})"
+                        )
+                        # Cancel the pending order for repricing
+                        if hasattr(self._engine, 'cancel_pending_order'):
+                            try:
+                                cancelled = await self._engine.cancel_pending_order(order_key)
+                                if cancelled:
+                                    logger.info(f"[FV_MM] Cancelled {side} order for repricing")
+                                    self._replacement_count.pop(order_key, None)
+                            except Exception as e:
+                                logger.warning(f"[FV_MM] Failed to cancel for repricing: {e}")
+                        # Remove from tracking
+                        self._order_fair_value.pop(order_key, None)
+
+            # Use calculus strategy's size (quadratic ramp: 5 early → 50 late)
+            buy_size = self._calculus_strategy.get_size(time_remaining_secs)
+            logger.info(f"[FV_MM] ✅ TRADING: mispricing {mispricing:.1%} >= threshold {threshold:.1%}, size={buy_size}")
+        else:
+            # Dynamic sizing: 20% at 15min → 10% at 5min → 2% at 0min
+            # Minimum 5 shares per Polymarket requirement
+            buy_size = calculate_dynamic_trade_size(
+                time_remaining_secs=time_remaining_secs,
+                max_target_shares=self.accum_target_shares,
+                min_size=5  # Polymarket minimum order size
+            )
+
+        # NEAR-TARGET CHECK: If one side reached target, be careful about final orders
+        max_side = max(current_up, current_down)
+        near_target = max_side >= self.accum_target_shares
+
+        if near_target:
+            # One side is at target - check if perfectly balanced or need more
+            if share_imbalance == 0:
+                # PERFECTLY BALANCED - STOP
+                logger.info(
+                    f"✓ PERFECTLY BALANCED: {current_up:.0f} UP / {current_down:.0f} DOWN. DONE."
+                )
+                self._send_web_update()
+                return  # Don't place any more orders
+
+            # Need to balance - send ONE order at a time (5 shares min)
+            # This prevents overshooting by sending multiple orders
+            if current_up > current_down:
+                # Need more DOWN to balance - cap at target
+                room_to_target = max(0, self.accum_target_shares - current_down)
+                if room_to_target == 0:
+                    # DOWN already at target, can't buy more - STOP
+                    logger.info(
+                        f"✓ BOTH AT TARGET: {current_up:.0f} UP / {current_down:.0f} DOWN. DONE."
+                    )
+                    self._send_web_update()
+                    return
+                shares_needed = min(5, int(share_imbalance), room_to_target)
+                shares_needed = max(5, shares_needed)  # Polymarket min
+                logger.info(
+                    f"⚠️ BALANCING: {current_up:.0f} UP / {current_down:.0f} DOWN, "
+                    f"buying {shares_needed} DOWN (capped at target {self.accum_target_shares})"
+                )
+                buy_up = False
+                buy_down = True
+                buy_size = shares_needed
+            else:
+                # Need more UP to balance - cap at target
+                room_to_target = max(0, self.accum_target_shares - current_up)
+                if room_to_target == 0:
+                    # UP already at target, can't buy more - STOP
+                    logger.info(
+                        f"✓ BOTH AT TARGET: {current_up:.0f} UP / {current_down:.0f} DOWN. DONE."
+                    )
+                    self._send_web_update()
+                    return
+                shares_needed = min(5, int(share_imbalance), room_to_target)
+                shares_needed = max(5, shares_needed)  # Polymarket min
+                logger.info(
+                    f"⚠️ BALANCING: {current_up:.0f} UP / {current_down:.0f} DOWN, "
+                    f"buying {shares_needed} UP (capped at target {self.accum_target_shares})"
+                )
+                buy_up = True
+                buy_down = False
+                buy_size = shares_needed
+
+            # Skip the normal rebalance logic below - we've handled it
+            force_rebalance = True
+            # Jump to order execution (skip the else block below)
 
         # BALANCE-FIRST LOGIC: If imbalanced beyond threshold, prioritize deficit side
-        force_rebalance = False
+        if not near_target:
+            force_rebalance = False
         # max_imbalance_check already calculated above for patient pricing
         max_imbalance = max_imbalance_check
-        if share_imbalance > max_imbalance:
+        if not near_target and share_imbalance > max_imbalance:
             force_rebalance = True
             # Force rebalance - only buy deficit side
+            #
+            # FIX: Buy EXACTLY the imbalance amount to reach balance (not more!)
+            # Old logic tried to buy 2x dynamic size which could flip imbalance
+            # and then get blocked by the imbalance enforcement check.
+            #
+            # Example: 10 UP / 5 DOWN (imbalance=5)
+            #   Old: buy 10 DOWN → 10/15 → imbalance=5 (flipped!) → BLOCKED
+            #   New: buy 5 DOWN  → 10/10 → imbalance=0 ✓
+            #
+            rebalance_size = int(share_imbalance)  # Exact amount to balance
+            rebalance_size = max(5, rebalance_size)  # Polymarket min is 5 shares
+
             if deficit_side == "UP" and current_up < self.accum_target_shares:
                 buy_up = True
                 buy_down = False
-                # Buy more to catch up (up to 2x dynamic size)
-                base_size = buy_size  # Already calculated dynamically above
-                buy_size = min(base_size * 2, max(base_size, int(share_imbalance / 2)))
-                logger.info(f"REBALANCE: Buying {buy_size} UP to reduce imbalance ({share_imbalance:.0f} shares)")
+                buy_size = min(rebalance_size, self.accum_target_shares - current_up)
+                logger.info(f"REBALANCE: Buying {buy_size} UP to fix imbalance ({share_imbalance:.0f} → ~0)")
             elif deficit_side == "DOWN" and current_down < self.accum_target_shares:
                 buy_up = False
                 buy_down = True
-                # Buy more to catch up (up to 2x dynamic size)
-                base_size = buy_size  # Already calculated dynamically above
-                buy_size = min(base_size * 2, max(base_size, int(share_imbalance / 2)))
-                logger.info(f"REBALANCE: Buying {buy_size} DOWN to reduce imbalance ({share_imbalance:.0f} shares)")
-        else:
-            # Normal accumulation - buy both sides if possible
-            if self.accum_buy_both_sides:
-                buy_up = current_up < self.accum_target_shares
-                buy_down = current_down < self.accum_target_shares
+                buy_size = min(rebalance_size, self.accum_target_shares - current_down)
+                logger.info(f"REBALANCE: Buying {buy_size} DOWN to fix imbalance ({share_imbalance:.0f} → ~0)")
+        elif not near_target:
+            # =================================================================
+            # TRENDING MARKET IMPROVEMENTS (from Telegram alpha)
+            # =================================================================
+            # NOTE: Market Open Gate check moved earlier (before mode-specific checks)
+            # 1. Get trend signal from Binance
+            # 2. Reduce target in strong trends (15→10)
+            # 3. Buy expensive side FIRST in trends (prevents leg loss)
+            # 4. Check prospective pair cost with MARKET prices
+            trend_signal = None
+            dynamic_target = self.accum_target_shares
+
+            if self._trend_detector:
+                trend_signal = self._trend_detector.get_trend_signal()
+
+                # Dynamic target reduction: 15→10 in strong trends
+                if trend_signal.state in (TrendState.STRONG, TrendState.EXTREME):
+                    dynamic_target = self._trend_detector.get_dynamic_target(
+                        self.accum_target_shares, time_remaining_secs
+                    )
+                    if dynamic_target < self.accum_target_shares:
+                        logger.info(
+                            f"[TREND] Reducing target: {self.accum_target_shares} → {dynamic_target} "
+                            f"(state={trend_signal.state.value}, z={trend_signal.z_score:.2f})"
+                        )
+
+            # Check if already at dynamic target (early stop in trends)
+            if current_up >= dynamic_target and current_down >= dynamic_target:
+                logger.info(f"[TREND] At dynamic target {dynamic_target}/{dynamic_target}, stopping accumulation")
+                buy_up = False
+                buy_down = False
+            elif self.accum_mode == "fair_value_mm":
+                # FAIR VALUE MM: Only buy UNDERVALUED sides (fair_value > market_price)
+                # This is fundamentally different from calculus_maker which buys both sides
+                # We skip TREND_GATE since we're being selective based on fair value
+                buy_up = current_up < dynamic_target and fair_up > raw_up_ask
+                buy_down = current_down < dynamic_target and fair_down > raw_down_ask
+
+                if buy_up or buy_down:
+                    logger.info(
+                        f"[FV_MM] Undervalued: "
+                        f"{'UP ' if buy_up else ''}(fair={fair_up:.2f} > ask={raw_up_ask:.2f}) "
+                        f"{'DOWN ' if buy_down else ''}(fair={fair_down:.2f} > ask={raw_down_ask:.2f})"
+                    )
+                else:
+                    # Both sides overvalued - don't buy anything
+                    if self._opportunities_checked % 20 == 0:
+                        logger.info(
+                            f"[FV_MM] No undervalued sides: "
+                            f"UP (fair={fair_up:.2f} <= ask={raw_up_ask:.2f}), "
+                            f"DOWN (fair={fair_down:.2f} <= ask={raw_down_ask:.2f})"
+                        )
+            elif self.accum_buy_both_sides:
+                # Normal accumulation - buy both sides if possible
+                buy_up = current_up < dynamic_target
+                buy_down = current_down < dynamic_target
+
+                # DIRECTION-AWARE SIDE PRIORITY (Telegram alpha)
+                # In strong trends, buy the WINNING side first (it's getting expensive)
+                if trend_signal and trend_signal.state in (TrendState.STRONG, TrendState.EXTREME):
+                    priority_side = self._trend_detector.get_priority_side()
+                    if priority_side:
+                        if priority_side == "UP" and buy_up and buy_down:
+                            # Prioritize UP - buy it first, then DOWN
+                            logger.debug(f"[TREND_PRIORITY] UP first (trending UP, z={trend_signal.z_score:.2f})")
+                        elif priority_side == "DOWN" and buy_up and buy_down:
+                            # Prioritize DOWN - buy it first, then UP
+                            logger.debug(f"[TREND_PRIORITY] DOWN first (trending DOWN, z={trend_signal.z_score:.2f})")
+
+                # PROSPECTIVE PAIR COST WITH MARKET CHECK (trending market protection)
+                # Block buys if hedge at current market would be unprofitable
+                # Use same threshold as main pair cost limit for consistency
+                trend_gate_threshold = self.calc_max_pair_cost  # Default 0.995
+                if buy_up and self._trend_detector and trend_signal:
+                    if trend_signal.state in (TrendState.STRONG, TrendState.EXTREME):
+                        can_buy, proj_cost, reason = check_prospective_pair_cost_with_market(
+                            side="UP",
+                            buy_price=up_price,
+                            other_side_best_ask=raw_down_ask,  # What DOWN hedge would cost NOW
+                            max_pair_cost=trend_gate_threshold
+                        )
+                        if not can_buy:
+                            buy_up = False
+                            logger.info(f"[TREND_GATE] BLOCKING UP: {reason}")
+
+                if buy_down and self._trend_detector and trend_signal:
+                    if trend_signal.state in (TrendState.STRONG, TrendState.EXTREME):
+                        can_buy, proj_cost, reason = check_prospective_pair_cost_with_market(
+                            side="DOWN",
+                            buy_price=down_price,
+                            other_side_best_ask=raw_up_ask,  # What UP hedge would cost NOW
+                            max_pair_cost=trend_gate_threshold
+                        )
+                        if not can_buy:
+                            buy_down = False
+                            logger.info(f"[TREND_GATE] BLOCKING DOWN: {reason}")
             else:
-                # Alternate sides or buy cheaper side
-                if current_up <= current_down and current_up < self.accum_target_shares:
+                # Single side mode: Use direction-aware priority
+                priority_side = None
+                if trend_signal and trend_signal.state in (TrendState.STRONG, TrendState.EXTREME):
+                    priority_side = self._trend_detector.get_priority_side()
+
+                if priority_side == "UP" and current_up < dynamic_target:
                     buy_up = True
-                elif current_down < self.accum_target_shares:
+                    buy_down = False
+                    logger.debug(f"[TREND_PRIORITY] Buying UP first (trending UP)")
+                elif priority_side == "DOWN" and current_down < dynamic_target:
+                    buy_up = False
                     buy_down = True
+                    logger.debug(f"[TREND_PRIORITY] Buying DOWN first (trending DOWN)")
+                else:
+                    # Neutral: Standard alternating/cheaper-side logic
+                    if current_up <= current_down and current_up < dynamic_target:
+                        buy_up = True
+                    elif current_down < dynamic_target:
+                        buy_down = True
 
         # Check pair cost TARGET before buying (normal trading - buy cheap)
         # Use TARGET for normal trading, LIMIT only for rebalancing
         if not force_rebalance:
-            if self.accum_mode == "volume_weighted":
+            if self.accum_mode in ("calculus_maker", "fair_value_mm"):
+                # CALCULUS MAKER / FAIR VALUE MM MODE: Already checked via should_buy() above
+                # Just log what we're doing
+                threshold = self._calculus_strategy.get_threshold(time_remaining_secs) if self._calculus_strategy else 0
+                mode_tag = "FV_MM" if self.accum_mode == "fair_value_mm" else "CALC"
+                logger.debug(
+                    f"[{mode_tag}] Trading: threshold={threshold:.1%}, pair_cost=${pair_cost:.4f}, "
+                    f"buy_up={buy_up}, buy_down={buy_down}"
+                )
+            elif self.accum_mode == "volume_weighted":
                 # TRUE GABAGOOL MODE: Continuous accumulation on BOTH sides
                 # Analysis of gabagool22 (Dec 2024) revealed:
                 # - NO selective buying - they buy at ALL prices ($0.02 to $0.98)
@@ -2153,7 +3342,9 @@ class PaperTradingBot:
                         buy_down = False
                         logger.debug(f"Skip: current pair cost ${pair_cost:.4f} too high")
 
-        # SAFETY CAP for rebalancing: Even during rebalance, never exceed hard limit
+        # FIX #4: ALLOW REBALANCING REGARDLESS OF PAIR COST
+        # When imbalanced, reducing directional exposure is more important than pair cost
+        # We log a warning but DO NOT block the rebalance
         if force_rebalance and position and position.pair_count > 0:
             if buy_up:
                 new_up_cost = current_up_cost + (buy_size * up_price)
@@ -2161,24 +3352,46 @@ class PaperTradingBot:
                 new_up_avg = new_up_cost / new_up_size if new_up_size > 0 else up_price
                 prospective_pair_cost = new_up_avg + position.down_avg_price
                 if prospective_pair_cost > self.accum_pair_cost_limit:
-                    buy_up = False
-                    logger.info(f"REBALANCE BLOCKED: pair cost ${prospective_pair_cost:.4f} > limit ${self.accum_pair_cost_limit}")
+                    # WARN but DO NOT block - rebalancing is critical
+                    logger.warning(f"⚠️ REBALANCE PROCEEDING despite pair cost ${prospective_pair_cost:.4f} > limit ${self.accum_pair_cost_limit}")
             if buy_down:
                 new_down_cost = current_down_cost + (buy_size * down_price)
                 new_down_size = current_down + buy_size
                 new_down_avg = new_down_cost / new_down_size if new_down_size > 0 else down_price
                 prospective_pair_cost = position.up_avg_price + new_down_avg
                 if prospective_pair_cost > self.accum_pair_cost_limit:
-                    buy_down = False
-                    logger.info(f"REBALANCE BLOCKED: pair cost ${prospective_pair_cost:.4f} > limit ${self.accum_pair_cost_limit}")
+                    # WARN but DO NOT block - rebalancing is critical
+                    logger.warning(f"⚠️ REBALANCE PROCEEDING despite pair cost ${prospective_pair_cost:.4f} > limit ${self.accum_pair_cost_limit}")
 
         # PRICE CEILING: Never buy shares above max price (prevents guaranteed losses)
+        # EMERGENCY has higher ceiling ONLY in final minutes:
+        #   - > 7 min: No emergency ceiling benefit (use normal ceiling)
+        #   - ≤ 7 min: $0.75
+        #   - ≤ 5 min: $0.88
+        def get_emergency_price_ceiling(time_remaining: float) -> float:
+            if time_remaining <= 300:  # Last 5 mins - more urgent
+                return 0.88
+            elif time_remaining <= 420:  # Last 7 mins
+                return 0.75
+            else:
+                return None  # No emergency benefit when > 7 min
+
         if buy_up and up_price > self.accum_max_share_price:
-            buy_up = False
-            logger.info(f"⛔ SKIP UP: price ${up_price:.3f} > ceiling ${self.accum_max_share_price}")
+            emergency_ceiling = get_emergency_price_ceiling(time_remaining_secs) if is_emergency_up else None
+            if emergency_ceiling and up_price <= emergency_ceiling:
+                logger.warning(f"⚠️ EMERGENCY HEDGE: UP ${up_price:.3f} (ceiling ${emergency_ceiling}, {time_remaining_secs:.0f}s left)")
+            else:
+                buy_up = False
+                ceiling_used = emergency_ceiling if emergency_ceiling else self.accum_max_share_price
+                logger.info(f"⛔ SKIP UP: price ${up_price:.3f} > ceiling ${ceiling_used}")
         if buy_down and down_price > self.accum_max_share_price:
-            buy_down = False
-            logger.info(f"⛔ SKIP DOWN: price ${down_price:.3f} > ceiling ${self.accum_max_share_price}")
+            emergency_ceiling = get_emergency_price_ceiling(time_remaining_secs) if is_emergency_down else None
+            if emergency_ceiling and down_price <= emergency_ceiling:
+                logger.warning(f"⚠️ EMERGENCY HEDGE: DOWN ${down_price:.3f} (ceiling ${emergency_ceiling}, {time_remaining_secs:.0f}s left)")
+            else:
+                buy_down = False
+                ceiling_used = emergency_ceiling if emergency_ceiling else self.accum_max_share_price
+                logger.info(f"⛔ SKIP DOWN: price ${down_price:.3f} > ceiling ${ceiling_used}")
 
         # GABAGOOL-STYLE VOLUME WEIGHTING: Percentage of remaining capacity, weighted by price
         # Only applies in volume_weighted mode
@@ -2189,6 +3402,11 @@ class PaperTradingBot:
             down_buy_size = self.get_vw_trade_size(down_price, down_remaining)
             logger.debug(f"[VW] UP: {up_remaining} remaining → buy {up_buy_size} @ ${up_price:.3f} ({int(up_buy_size/max(1,up_remaining)*100) if up_remaining > 0 else 0}%)")
             logger.debug(f"[VW] DOWN: {down_remaining} remaining → buy {down_buy_size} @ ${down_price:.3f} ({int(down_buy_size/max(1,down_remaining)*100) if down_remaining > 0 else 0}%)")
+        elif self.accum_mode == "one_buy" and self._one_buy_strategy:
+            # ONE BUY: Use remaining quantity for each side (handles partial fills)
+            up_buy_size = self._one_buy_strategy.get_remaining("UP")
+            down_buy_size = self._one_buy_strategy.get_remaining("DOWN")
+            logger.debug(f"[1BUY] UP: need {up_buy_size}, DOWN: need {down_buy_size}")
         else:
             up_buy_size = buy_size
             down_buy_size = buy_size
@@ -2253,83 +3471,404 @@ class PaperTradingBot:
         # IMBALANCE ENFORCEMENT: Applies to ALL modes to prevent one-sided exposure
         # VW mode uses more permissive limit via get_vw_max_imbalance (min 10, or 20% of position)
         # Standard mode uses accum_max_imbalance_pct (default 15%)
-        if buy_up:
-            new_up = current_up + up_buy_size
-            new_imbalance = abs(new_up - current_down)
-            if new_imbalance > max_imbalance:
-                buy_up = False
-                mode_label = "[VW]" if self.accum_mode == "volume_weighted" else ""
-                logger.info(f"⛔ {mode_label} BLOCKED UP: would create imbalance {new_imbalance:.0f} > limit {max_imbalance}")
-        if buy_down:
-            new_down = current_down + down_buy_size
-            new_imbalance = abs(current_up - new_down)
-            if new_imbalance > max_imbalance:
-                buy_down = False
-                mode_label = "[VW]" if self.accum_mode == "volume_weighted" else ""
-                logger.info(f"⛔ {mode_label} BLOCKED DOWN: would create imbalance {new_imbalance:.0f} > limit {max_imbalance}")
+        #
+        # KEY FIX: When buying BOTH sides, check NET imbalance after both trades
+        # This allows balanced pair buying even when each side individually exceeds limit
+        mode_label = "[VW]" if self.accum_mode == "volume_weighted" else ""
 
-        # Execute trades
+        if self.accum_mode == "fair_value_mm":
+            # FAIR VALUE MM: Skip ALL imbalance checks - this strategy is DESIGNED to be directional
+            # It only buys undervalued sides, so imbalance is expected and intentional
+            logger.debug(f"[FV_MM] Skipping imbalance check - directional strategy")
+        elif buy_up and buy_down:
+            # Buying both sides - check NET imbalance after both trades
+            new_up = current_up + up_buy_size
+            new_down = current_down + down_buy_size
+            net_imbalance = abs(new_up - new_down)
+            if net_imbalance > max_imbalance:
+                # Block whichever side creates more imbalance
+                if new_up > new_down:
+                    buy_up = False
+                    logger.info(f"⛔ {mode_label} BLOCKED UP: net imbalance {net_imbalance:.0f} > limit {max_imbalance}")
+                else:
+                    buy_down = False
+                    logger.info(f"⛔ {mode_label} BLOCKED DOWN: net imbalance {net_imbalance:.0f} > limit {max_imbalance}")
+        else:
+            # Buying only one side - check individual imbalance
+            # IMPORTANT: Allow trades that REDUCE imbalance, even if result still > limit
+            current_imbalance = abs(current_up - current_down)
+            if buy_up:
+                new_up = current_up + up_buy_size
+                new_imbalance = abs(new_up - current_down)
+                # Only block if trade would INCREASE imbalance (or not improve it)
+                if new_imbalance > max_imbalance and new_imbalance >= current_imbalance:
+                    buy_up = False
+                    logger.info(f"⛔ {mode_label} BLOCKED UP: would create imbalance {new_imbalance:.0f} > limit {max_imbalance}")
+                elif new_imbalance > max_imbalance:
+                    logger.info(f"✅ {mode_label} ALLOWING UP: reduces imbalance {current_imbalance:.0f} → {new_imbalance:.0f}")
+            if buy_down:
+                new_down = current_down + down_buy_size
+                new_imbalance = abs(current_up - new_down)
+                # Only block if trade would INCREASE imbalance (or not improve it)
+                if new_imbalance > max_imbalance and new_imbalance >= current_imbalance:
+                    buy_down = False
+                    logger.info(f"⛔ {mode_label} BLOCKED DOWN: would create imbalance {new_imbalance:.0f} > limit {max_imbalance}")
+                elif new_imbalance > max_imbalance:
+                    logger.info(f"✅ {mode_label} ALLOWING DOWN: reduces imbalance {current_imbalance:.0f} → {new_imbalance:.0f}")
+
+        # Execute trades with DYNAMIC ORDERING
+        # Buy cheaper side first to minimize slippage risk
         trades_made = 0
 
         # Get health monitor for trade recording
         health_monitor = get_health_monitor()
 
-        if buy_up and self._engine.balance >= up_price * up_buy_size:
-            result = await self._engine.execute_single_side_trade(
-                market=market,
-                side="UP",
-                price=up_price,
-                size=up_buy_size,
-                best_ask=raw_up_ask,  # For patient order fill simulation
-            )
-            if result["success"]:
-                trades_made += 1
-                self._trade_count += 1
-                self._profitable_opportunities += 1
-                # Record trade in health monitor
-                health_monitor.record_trade(self.strategy_name, market.slug)
-                # Log to CSV
-                updated_position = self._engine.get_position(market)
-                self._log_event_csv(
-                    market_slug=market.slug,
-                    event_type="TRADE",
-                    trade_side="UP",
-                    trade_mode="ACCUM",
-                    size_requested=up_buy_size,
-                    size_filled=result["filled_size"],
-                    price=result["filled_price"],
-                    cost=result["cost"],
-                    position=updated_position,
-                    status="SUCCESS",
-                )
-                # Emit trade event for web UI trade log
-                self._send_trade_event("UP", result["filled_size"], result["filled_price"], "BUY")
-                # Update local state for DOWN trade
-                current_up += result["filled_size"]
-                current_up_cost += result["cost"]
+        # Build order objects
+        up_order = {
+            "side": "UP",
+            "price": up_price,
+            "size": up_buy_size,
+            "best_ask": raw_up_ask,
+            "best_bid": raw_up_bid,
+        } if buy_up else None
 
-        if buy_down and self._engine.balance >= down_price * down_buy_size:
-            result = await self._engine.execute_single_side_trade(
-                market=market,
-                side="DOWN",
-                price=down_price,
-                size=down_buy_size,
-                best_ask=raw_down_ask,  # For patient order fill simulation
-            )
+        down_order = {
+            "side": "DOWN",
+            "price": down_price,
+            "size": down_buy_size,
+            "best_ask": raw_down_ask,
+            "best_bid": raw_down_bid,
+        } if buy_down else None
+
+        pending_trades = []
+
+        if self.sequential_ordering_enabled:
+            # SEQUENTIAL ORDER EXECUTION (FEATURE FLAG: sequential_ordering_enabled=True)
+            # Place expensive side first, wait for fill before placing cheap side
+            # Prevents asymmetric fills but may reduce volume if expensive side stalls
+            # To disable: set sequential_ordering_enabled=False in config
+
+            up_is_expensive = raw_up_ask >= raw_down_ask
+            up_shares = current_up
+            down_shares = current_down
+
+            if up_is_expensive:
+                # UP is expensive - place UP first, DOWN only after UP is ahead
+                if up_shares <= down_shares and up_order:
+                    pending_trades.append(up_order)
+                    logger.debug(f"[SEQ_ORDER] UP is expensive (${raw_up_ask:.2f}), placing UP first (UP={up_shares}, DOWN={down_shares})")
+                elif up_shares > down_shares and down_order:
+                    pending_trades.append(down_order)
+                    logger.debug(f"[SEQ_ORDER] UP filled, now placing DOWN to catch up (UP={up_shares}, DOWN={down_shares})")
+            else:
+                # DOWN is expensive - place DOWN first, UP only after DOWN is ahead
+                if down_shares <= up_shares and down_order:
+                    pending_trades.append(down_order)
+                    logger.debug(f"[SEQ_ORDER] DOWN is expensive (${raw_down_ask:.2f}), placing DOWN first (UP={up_shares}, DOWN={down_shares})")
+                elif down_shares > up_shares and up_order:
+                    pending_trades.append(up_order)
+                    logger.debug(f"[SEQ_ORDER] DOWN filled, now placing UP to catch up (UP={up_shares}, DOWN={down_shares})")
+        else:
+            # PARALLEL ORDER EXECUTION (DEFAULT - sequential_ordering_enabled=False)
+            # Place both sides simultaneously, sorted by price (expensive first)
+            # Faster accumulation but may result in asymmetric fills
+            if up_order:
+                pending_trades.append(up_order)
+            if down_order:
+                pending_trades.append(down_order)
+            # Sort expensive first to prioritize harder-to-fill side
+            pending_trades.sort(key=lambda t: t["price"], reverse=True)
+
+        # QUOTE PULLING: Cancel stale quotes when Binance moves against them
+        # This is the key latency advantage from Telegram alpha:
+        # "You get rolled over if you're not quick enough to pull quotes when Binance moves"
+        # Now works for BOTH live and paper modes (paper simulates the protective benefit)
+        if (
+            self._trend_detector and
+            hasattr(self._engine, 'check_and_pull_stale_quotes')
+        ):
+            try:
+                # Paper mode gets longer timeout to allow tick-based fills to complete
+                stale_timeout = 20.0 if self.trading_mode == "paper" else 10.0
+                pulled = await self._engine.check_and_pull_stale_quotes(
+                    market=market,
+                    trend_detector=self._trend_detector,
+                    max_age_secs=stale_timeout,  # MM standard: 5-20 seconds
+                    velocity_threshold_bps=15.0,  # Pull if price moving >15 bps/sec
+                )
+                if any(pulled.values()):
+                    logger.info(f"[QUOTE_PULL] Pulled stale quotes: UP={pulled['UP']}, DOWN={pulled['DOWN']}")
+                    # Mark pulled sides for stabilization - wait for z < 1.0 before re-entering
+                    for side, was_pulled in pulled.items():
+                        if was_pulled:
+                            self._pull_cooldown[f"{market.slug}_{side}"] = time.time()
+            except Exception as e:
+                logger.debug(f"[QUOTE_PULL] Error: {e}")
+
+        # PAPER MODE: Check pending orders for tick-based fills
+        # This simulates orders sitting in the orderbook and gradually filling
+        if self.trading_mode == "paper" and hasattr(self._engine, 'check_pending_fills'):
+            try:
+                # Get current prices for fill probability adjustment
+                current_prices = {"UP": up_ask, "DOWN": down_ask} if up_ask and down_ask else None
+                fills = await self._engine.check_pending_fills(current_prices=current_prices)
+                for fill in fills:
+                    logger.info(
+                        f"[PAPER_FILL] {fill['side']} filled: {fill['filled_size']} @ ${fill['filled_price']:.4f} "
+                        f"after {fill['order_age']:.1f}s"
+                    )
+            except Exception as e:
+                logger.debug(f"[PAPER_FILL] Error checking fills: {e}")
+
+        # Execute trades in order
+        # For calculus_maker/fair_value_mm LIVE: use cancel-and-replace for patient MAKER orders
+        # For paper mode: use instant fills (simpler, more reliable)
+        use_cancel_replace = (
+            self.trading_mode == "live" and
+            self.accum_mode in ("calculus_maker", "fair_value_mm") and
+            hasattr(self._engine, 'cancel_and_replace')
+        )
+
+        for trade in pending_trades:
+            side = trade["side"]
+            price = trade["price"]
+            size = trade["size"]
+            best_ask = trade["best_ask"]
+            best_bid = trade["best_bid"]
+
+            # POST-PULL STABILIZATION: Wait for z < 1.0 (NEUTRAL) before re-entering
+            cooldown_key = f"{market.slug}_{side}"
+            if cooldown_key in self._pull_cooldown:
+                # Check if z-score has returned to NEUTRAL
+                if trend_signal and trend_signal.state != TrendState.NEUTRAL:
+                    logger.debug(f"[STABILIZE] {side} waiting for NEUTRAL, z={trend_signal.z_score:.2f}")
+                    continue  # Skip this side until stabilized
+                else:
+                    # Stabilized - clear cooldown and proceed
+                    del self._pull_cooldown[cooldown_key]
+                    z_str = f"z={trend_signal.z_score:.2f}" if trend_signal else "no signal"
+                    logger.info(f"[STABILIZE] {side} stabilized ({z_str}), resuming orders")
+
+            if self._engine.balance < price * size:
+                logger.debug(f"Skip {side}: insufficient balance for ${price * size:.2f}")
+                continue
+
+            # PAIR COST GATING: Block trades that would push pair cost above max threshold
+            # Applies to both live and paper modes for realistic simulation
+            if not (is_emergency_up or is_emergency_down):
+                pos = self._engine.get_position(market)
+                if pos:
+                    should_buy, prospective_cost, reason = check_prospective_pair_cost(
+                        side=side,
+                        buy_price=price,
+                        buy_size=size,
+                        current_up_size=pos.up_shares,
+                        current_down_size=pos.down_shares,
+                        current_up_avg=pos.up_avg_price,
+                        current_down_avg=pos.down_avg_price,
+                        max_pair_cost=0.98  # Block if would exceed 98%
+                    )
+                    if not should_buy:
+                        logger.warning(f"[PAIR_COST_GATE] Blocking {side} @ ${price:.4f}: {reason}")
+                        continue
+
+            if use_cancel_replace:
+                # Calculus_maker: Use cancel-and-replace for dynamic repricing (live & paper)
+                #
+                # GRADUAL CHASE LOGIC (controlled by self.gradual_chase_enabled)
+                # Instead of jumping to current market price, we chase in small steps
+                # based on time remaining. This preserves fill guarantee while
+                # reducing the cost of chasing.
+                #
+                # To disable: set gradual_chase_enabled=False in bot config
+                #
+                chase_price = price  # Default to patient price
+                pending_key = f"{market.slug}_{side}"
+
+                # EMERGENCY CEILING CHANGE DETECTION
+                # If emergency ceiling increased (e.g., $0.75 → $0.88), cancel old order
+                # and reprice at current ask (up to new ceiling)
+                is_this_emergency = (side == "UP" and is_emergency_up) or (side == "DOWN" and is_emergency_down)
+                current_emergency_ceiling = get_emergency_price_ceiling(time_remaining_secs) if is_this_emergency else None
+                prev_ceiling = self._emergency_ceiling_used.get(pending_key)
+
+                if is_this_emergency and current_emergency_ceiling and prev_ceiling:
+                    if current_emergency_ceiling > prev_ceiling:
+                        # Ceiling increased! Cancel old order and reprice at ask
+                        logger.info(
+                            f"[EMERGENCY_CEILING_CHANGE] {side}: ceiling ${prev_ceiling:.2f} → ${current_emergency_ceiling:.2f}, "
+                            f"repricing at ask ${best_ask:.4f}"
+                        )
+                        # Cancel old order explicitly
+                        if hasattr(self._engine, 'cancel_pending_order'):
+                            await self._engine.cancel_pending_order(pending_key)
+                        # Reset chase state
+                        self._replacement_count.pop(pending_key, None)
+                        self._chase_exhausted_logged.discard(pending_key)
+                        self._emergency_ceiling_used.pop(pending_key, None)
+                        # Use current ask (capped at new ceiling)
+                        chase_price = min(best_ask, current_emergency_ceiling)
+                        # Skip gradual chase - go direct to order placement
+                        result = await self._engine.cancel_and_replace(
+                            market=market,
+                            side=side,
+                            new_price=chase_price,
+                            new_size=size,
+                            price_tolerance=0.0,  # Force replace
+                            stale_seconds=0.0,
+                        )
+                        # Track the new ceiling
+                        self._emergency_ceiling_used[pending_key] = current_emergency_ceiling
+                        if result["action"] in ["filled", "placed", "replaced"]:
+                            result["success"] = True
+                            result["filled_size"] = result.get("filled_size", size)
+                            result["filled_price"] = result.get("price", chase_price)
+                            result["cost"] = result.get("filled_size", size) * result.get("price", chase_price)
+                        else:
+                            result["success"] = False
+                            result["filled_size"] = 0
+                            result["filled_price"] = 0
+                            result["cost"] = 0
+                        # Jump to trade logging
+                        if result.get("success"):
+                            trades_made += 1
+                        continue  # Skip normal chase logic
+
+                # Track emergency ceiling for new emergency orders
+                if is_this_emergency and current_emergency_ceiling:
+                    if pending_key not in self._emergency_ceiling_used:
+                        self._emergency_ceiling_used[pending_key] = current_emergency_ceiling
+
+                if self.gradual_chase_enabled:
+                    # Check if there's a pending order for this side
+                    pending_orders = self._engine.get_pending_orders()
+                    pending = pending_orders.get(pending_key)
+
+                    if pending:
+                        # We have a pending order - calculate gradual chase price
+                        original_price = pending["price"]
+                        order_age = asyncio.get_event_loop().time() - pending["placed_at"]
+
+                        # Determine if this is the hedge side (deficit side needs hedge)
+                        is_hedge_side = (
+                            (side == "UP" and current_down > current_up) or
+                            (side == "DOWN" and current_up > current_down)
+                        )
+
+                        # Get current chase count for this side
+                        chase_count = self._replacement_count.get(pending_key, 0)
+
+                        chase_price, should_chase, chase_exhausted = calculate_gradual_chase_price(
+                            original_price=original_price,
+                            current_bid=best_bid,
+                            current_ask=best_ask,
+                            time_remaining_secs=time_remaining_secs,
+                            order_age_secs=order_age,
+                            chase_count=chase_count,
+                            is_hedge_side=is_hedge_side,
+                        )
+
+                        # Handle chase exhaustion - stop chasing, leave order at final price
+                        if chase_exhausted:
+                            if pending_key not in self._chase_exhausted_logged:
+                                logger.info(
+                                    f"[CHASE_EXHAUSTED] {side}: Stopped at ${original_price:.4f} after "
+                                    f"{chase_count} iterations, order remains live"
+                                )
+                                self._chase_exhausted_logged.add(pending_key)
+                            # Skip this side - don't try to replace, let order sit
+                            continue
+
+                        if should_chase:
+                            logger.info(
+                                f"[GRADUAL_CHASE] {side}: ${original_price:.4f} → ${chase_price:.4f} "
+                                f"(chase #{chase_count + 1}, age={order_age:.0f}s, time_left={time_remaining_secs:.0f}s)"
+                            )
+                        else:
+                            # Not ready to chase yet - keep original price
+                            chase_price = original_price
+
+                # CALC: depth-based timeout (5-30s), FV: fixed 10s
+                if self.accum_mode == "calculus_maker":
+                    from src.services.live_trading import calculate_price_depth_timeout
+                    stale_secs = calculate_price_depth_timeout(chase_price, best_bid)
+                else:
+                    stale_secs = 10.0  # FV: fixed 10s
+
+                result = await self._engine.cancel_and_replace(
+                    market=market,
+                    side=side,
+                    new_price=chase_price,
+                    new_size=size,
+                    price_tolerance=0.005,  # Replace if price moved > 0.5%
+                    stale_seconds=stale_secs,
+                )
+
+                # Track replacements for chase exhaustion detection
+                side_key = f"{market.slug}_{side}"
+                if result["action"] == "filled":
+                    # Order filled - reset counter and allow re-logging
+                    self._replacement_count.pop(side_key, None)
+                    self._chase_exhausted_logged.discard(side_key)
+                    self._emergency_ceiling_used.pop(side_key, None)  # Clear emergency ceiling tracking
+                    # Fill rate monitoring: record fill
+                    if hasattr(self._engine, 'record_order_filled'):
+                        self._engine.record_order_filled(
+                            market.slug, result.get("filled_size", size),
+                            result.get("price", chase_price)
+                        )
+                elif result["action"] == "replaced":
+                    # Order replaced but not filled - increment counter
+                    self._replacement_count[side_key] = self._replacement_count.get(side_key, 0) + 1
+                    logger.debug(f"[REPLACE_COUNT] {side}: {self._replacement_count[side_key]} replacements")
+                    # Fill rate monitoring: record chase order placed
+                    if hasattr(self._engine, 'record_order_placed'):
+                        self._engine.record_order_placed(market.slug, size, chase_price, is_chase=True)
+                elif result["action"] == "placed":
+                    # Fill rate monitoring: record new order placed
+                    if hasattr(self._engine, 'record_order_placed'):
+                        self._engine.record_order_placed(market.slug, size, chase_price)
+
+                # Convert cancel_and_replace result to execute_single_side_trade format
+                if result["action"] in ["filled", "placed", "replaced"]:
+                    result["success"] = True
+                    result["filled_size"] = result.get("filled_size", size)
+                    result["filled_price"] = result.get("price", chase_price)
+                    result["cost"] = result.get("filled_size", size) * result.get("price", chase_price)
+                elif result["action"] == "kept":
+                    # Order kept - not a new trade, skip logging
+                    logger.debug(f"[CALC] Order kept @ ${result.get('price', chase_price):.4f}")
+                    continue
+                else:
+                    result["success"] = False
+                    result["filled_size"] = 0
+                    result["filled_price"] = 0
+                    result["cost"] = 0
+            else:
+                # Paper mode or non-calculus: Use standard execution
+                result = await self._engine.execute_single_side_trade(
+                    market=market,
+                    side=side,
+                    price=price,
+                    size=size,
+                    best_ask=best_ask,
+                )
+
             if result["success"]:
                 trades_made += 1
                 self._trade_count += 1
                 self._profitable_opportunities += 1
                 # Record trade in health monitor
                 health_monitor.record_trade(self.strategy_name, market.slug)
+
                 # Log to CSV
                 updated_position = self._engine.get_position(market)
                 self._log_event_csv(
                     market_slug=market.slug,
                     event_type="TRADE",
-                    trade_side="DOWN",
+                    trade_side=side,
                     trade_mode="ACCUM",
-                    size_requested=down_buy_size,
+                    size_requested=size,
                     size_filled=result["filled_size"],
                     price=result["filled_price"],
                     cost=result["cost"],
@@ -2337,7 +3876,34 @@ class PaperTradingBot:
                     status="SUCCESS",
                 )
                 # Emit trade event for web UI trade log
-                self._send_trade_event("DOWN", result["filled_size"], result["filled_price"], "BUY")
+                self._send_trade_event(side, result["filled_size"], result["filled_price"], "BUY")
+                # Push real-time update to frontend immediately after trade
+                self._send_web_update()
+                # Update local state for next trade
+                if side == "UP":
+                    current_up += result["filled_size"]
+                    current_up_cost += result["cost"]
+                    # Track fill for one_buy mode (record price for pair cost calculation)
+                    if self._one_buy_strategy:
+                        fill_price = result["filled_price"]
+                        self._one_buy_strategy.mark_filled("UP", fill_price)
+                        status = self._one_buy_strategy.get_status()
+                        if status["fully_hedged"]:
+                            logger.info(f"[1BUY] ✅ UP FILLED at ${fill_price:.2f} → FULLY HEDGED pair_cost=${status['pair_cost']:.2f}")
+                        else:
+                            logger.info(f"[1BUY] ✅ UP FILLED at ${fill_price:.2f} → directional (waiting for DOWN)")
+                else:
+                    current_down += result["filled_size"]
+                    current_down_cost += result["cost"]
+                    # Track fill for one_buy mode (record price for pair cost calculation)
+                    if self._one_buy_strategy:
+                        fill_price = result["filled_price"]
+                        self._one_buy_strategy.mark_filled("DOWN", fill_price)
+                        status = self._one_buy_strategy.get_status()
+                        if status["fully_hedged"]:
+                            logger.info(f"[1BUY] ✅ DOWN FILLED at ${fill_price:.2f} → FULLY HEDGED pair_cost=${status['pair_cost']:.2f}")
+                        else:
+                            logger.info(f"[1BUY] ✅ DOWN FILLED at ${fill_price:.2f} → directional (waiting for UP)")
 
         # Log position status periodically
         if self._opportunities_checked % 10 == 0 or trades_made > 0:
@@ -2360,7 +3926,12 @@ class PaperTradingBot:
                     f"Imbal:{imbal:.0f} | Time:{time_remaining} Bal:${self._engine.balance:.2f}"
                 )
 
-        # Check for rotation (merge happens at market end, not during trading)
+        # Auto-merge near market end (live mode only)
+        if market.end_time:
+            secs_to_end = (market.end_time - datetime.now(timezone.utc)).total_seconds()
+            await self._maybe_auto_merge(market, secs_to_end)
+
+        # Check for rotation
         if self._rotator.should_rotate():
             await self._handle_market_rotation(market)
 
@@ -2529,10 +4100,14 @@ class PaperTradingBot:
 
             price_mode = "EMERGENCY" if is_emergency else (
                 "EARLY" if time_remaining_secs >= 600 else
-                "MID" if time_remaining_secs >= 300 else "LATE"
+                "MID" if time_remaining_secs >= 300 else
+                "LATE" if time_remaining_secs >= 120 else "FINAL"
             )
-            if decision.price != original_price:
-                logger.debug(f"[PATIENT-DIR] {price_mode} {decision.side}: ${original_price:.3f} → ${decision.price:.3f}")
+            spread_from_ask = raw_ask - decision.price
+            logger.info(
+                f"[PATIENT-DIR] {price_mode} {decision.side}: price=${decision.price:.3f} "
+                f"(ask=${raw_ask:.3f}, spread=${spread_from_ask:.3f})"
+            )
 
             # POLYMARKET $1 MINIMUM ORDER VALUE ENFORCEMENT
             min_size = max(1, math.ceil(1.00 / decision.price)) if decision.price > 0 else 1
@@ -2575,6 +4150,8 @@ class PaperTradingBot:
 
                     # Emit trade event for web UI trade log
                     self._send_trade_event(decision.side, result["filled_size"], result["filled_price"], "BUY")
+                    # Push real-time update to frontend immediately after trade
+                    self._send_web_update()
 
         # Log status periodically (suppressed in quiet mode)
         if self._opportunities_checked % 10 == 0 and not self.quiet_mode:
@@ -2590,7 +4167,10 @@ class PaperTradingBot:
                 f"Time:{time_remaining_secs}s"
             )
 
-        # Check for rotation (merge happens at market end, not during trading)
+        # Auto-merge near market end (live mode only)
+        await self._maybe_auto_merge(market, time_remaining_secs)
+
+        # Check for rotation
         if self._rotator.should_rotate():
             self._is_new_market = True
             await self._handle_market_rotation(market)
@@ -2646,63 +4226,19 @@ class PaperTradingBot:
                 status["z_score"],
             ])
 
-    async def _try_merge_pairs(self, market) -> Optional[Dict[str, Any]]:
-        """
-        Merge complete UP+DOWN pairs into $1 each.
-
-        Only runs in LIVE mode. Merges any complete pairs immediately
-        to lock in profit without waiting for resolution.
-
-        Returns:
-            Merge result dict or None if no merge needed/possible
-        """
-        # Only merge in live mode
-        if self.trading_mode != "live":
-            return None
-
-        if not self._client:
-            return None
-
-        # Get current position
-        pos = self._engine.get_position(market)
-        if not pos:
-            return None
-
-        # Calculate complete pairs
-        pairs = int(min(pos.up_size, pos.down_size))
-        if pairs < 1:
-            return None
-
-        try:
-            logger.info(f"[MERGE] Merging {pairs} pairs for {market.slug}...")
-            result = await self._client.merge_positions(
-                condition_id=market.condition_id,
-                amount=float(pairs),
-                neg_risk=True,
-            )
-
-            # Update local position tracking
-            pos.up_size -= pairs
-            pos.down_size -= pairs
-
-            # Track merged value
-            merge_value = pairs * 1.0  # $1 per pair
-            logger.info(f"✅ [MERGE] Merged {pairs} pairs → ${merge_value:.2f} USDC")
-
-            return {
-                "pairs_merged": pairs,
-                "value": merge_value,
-                "tx_hash": result.get("transaction_hash", ""),
-            }
-
-        except Exception as e:
-            logger.warning(f"[MERGE] Failed (will resolve at expiry): {e}")
-            return None
-
     async def _handle_market_rotation(self, market) -> None:
         """Handle market rotation and position resolution with resilience."""
         old_market_slug = market.slug
         logger.info(f"[{self.strategy_name}] Rotating from {market.slug}")
+
+        # Cancel any pending orders for this market before rotation
+        if self.trading_mode == "live" and hasattr(self._engine, 'cancel_all_pending'):
+            try:
+                cancelled = await self._engine.cancel_all_pending(market_slug=market.slug)
+                if cancelled > 0:
+                    logger.info(f"[ROTATION] Cancelled {cancelled} pending orders for {market.slug}")
+            except Exception as e:
+                logger.warning(f"[ROTATION] Failed to cancel pending orders: {e}")
 
         # Get health monitor for tracking
         health_monitor = get_health_monitor()
@@ -2748,13 +4284,11 @@ class PaperTradingBot:
                             f"strike ${strike_price:,.2f} → {winner} (shared={shared_strike is not None})"
                         )
                     else:
-                        import random
-                        winner = random.choice(["UP", "DOWN"])
+                        winner = random_module.choice(["UP", "DOWN"])
                         resolution_source = "RANDOM_NO_STRIKE"
                         logger.error(f"[RESOLUTION] No strike price! Using RANDOM: {winner}")
                 else:
-                    import random
-                    winner = random.choice(["UP", "DOWN"])
+                    winner = random_module.choice(["UP", "DOWN"])
                     resolution_source = "RANDOM_NO_BINANCE"
                     logger.error(f"[RESOLUTION] No Binance data! Using RANDOM: {winner}")
 
@@ -2774,58 +4308,24 @@ class PaperTradingBot:
                 "locked": locked,
             }
 
-            # LIVE MODE: Merge pairs immediately, then schedule redeem for imbalance
-            if self.trading_mode == "live" and self._client:
-                # Step 1: Merge all pairs immediately (no oracle needed)
-                pairs = int(min(pos.up_size, pos.down_size))
-                merge_failed = False
-                if pairs > 0:
-                    try:
-                        logger.info(f"[MERGE] Merging {pairs} pairs for {market.slug}...")
-                        result = await self._client.merge_positions(
-                            condition_id=market.condition_id,
-                            amount=float(pairs),
-                            neg_risk=True,
-                        )
-                        merge_value = pairs * 1.0
-                        tx_hash = result.get("transaction_hash", "")[:16] if result else ""
-                        logger.info(f"✅ [MERGE] {pairs} pairs → ${merge_value:.2f} USDC (tx: {tx_hash}...)")
-                    except Exception as e:
-                        logger.warning(f"[MERGE] Failed: {str(e)[:50]} - scheduling claim as fallback")
-                        merge_failed = True
-
-                # Step 2: Schedule redeem for winning tokens
-                # If merge succeeded: only redeem imbalance (unpaired tokens)
-                # If merge failed: redeem ALL winning tokens (pairs + imbalance)
-                imbalance = abs(pos.up_size - pos.down_size)
-                winning_shares = pos.up_size if winner == "UP" else pos.down_size
-
-                if merge_failed and pairs > 0:
-                    # Merge failed - claim all winning shares
-                    amounts = [winning_shares, 0] if winner == "UP" else [0, winning_shares]
-                    logger.info(f"[CLAIM] Scheduling scans at 5min and 10min for {winning_shares:.2f} {winner} (merge fallback)")
-                    asyncio.create_task(self._schedule_claim_scans(
-                        market_slug=market.slug,
-                        condition_id=market.condition_id,
-                        amounts=amounts,
-                        winner=winner,
-                        winning_shares=winning_shares,
-                    ))
-                elif imbalance > 0:
-                    # Merge succeeded (or no pairs) - only claim imbalance
-                    amounts = [imbalance, 0] if winner == "UP" else [0, imbalance]
-                    logger.info(f"[CLAIM] Scheduling scans at 5min and 10min for {imbalance:.2f} {winner} (imbalance)")
-                    asyncio.create_task(self._schedule_claim_scans(
-                        market_slug=market.slug,
-                        condition_id=market.condition_id,
-                        amounts=amounts,
-                        winner=winner,
-                        winning_shares=imbalance,
-                    ))
+            # Log fill rate stats before resolution (live mode only)
+            if hasattr(self._engine, 'log_fill_stats'):
+                self._engine.log_fill_stats(market.slug)
 
             # Resolve the market (paper P&L tracking)
             pnl = self._engine.resolve_market(market.slug, winner)
             logger.info(f"Market resolved ({winner}): P&L ${pnl:.4f}, LockedProfit was ${locked:.4f}")
+
+            # Update cumulative P&L and check loss limit
+            self.cumulative_pnl += pnl
+            logger.info(f"[CUMULATIVE P&L] Session total: ${self.cumulative_pnl:.2f}")
+
+            if self.max_daily_loss > 0 and self.cumulative_pnl <= -self.max_daily_loss:
+                self.loss_limit_reached = True
+                logger.warning("=" * 50)
+                logger.warning(f"MAX DAILY LOSS LIMIT REACHED: ${abs(self.cumulative_pnl):.2f} >= ${self.max_daily_loss:.2f}")
+                logger.warning("Bot will stop placing new orders but keep existing positions")
+                logger.warning("=" * 50)
 
             # Log resolution to CSV - pass pre_resolution_pos data
             # Note: We create a simple object to hold the pre-resolution state
@@ -2914,6 +4414,21 @@ class PaperTradingBot:
                     health_monitor.record_market_transition(self.strategy_name, old_market_slug, new_slug)
                     logger.info(f"[{self.strategy_name}] Successfully rotated to {new_slug}")
                     self._is_new_market = True  # Flag for next cycle
+                    self._merged_this_market = False  # Reset merge flag for new market
+                    self._replacement_count.clear()  # Reset replacement tracking for new market
+                    self._chase_exhausted_logged.clear()  # Reset log tracking for new market
+                    self._last_emergency_time.clear()  # Reset emergency cooldown for new market
+                    # Clear fill rate stats for old market (live mode only)
+                    if hasattr(self._engine, 'clear_fill_stats'):
+                        self._engine.clear_fill_stats(old_market_slug)
+                    # Reset market type detector for new market
+                    self._market_detector = MarketTypeDetector()
+                    self._detected_market_type = "UNKNOWN"
+                    logger.info(f"[MARKET_DETECTOR] Reset for new market {new_slug}")
+                    # Reset ONE BUY strategy for new market
+                    if self._one_buy_strategy:
+                        self._one_buy_strategy.reset()
+                        logger.info(f"[1BUY] Strategy reset for new market {new_slug}")
                     break
                 else:
                     logger.warning(f"[{self.strategy_name}] Rotation returned False (no next market?)")
@@ -2947,6 +4462,10 @@ class PaperTradingBot:
     async def cleanup(self) -> None:
         """Cleanup resources."""
         logger.info("Cleaning up...")
+
+        # Stop auto-redeemer first
+        if self._auto_redeemer:
+            await self._auto_redeemer.stop()
 
         if self._telegram:
             await self._telegram.stop()
@@ -3018,6 +4537,12 @@ class PaperTradingBot:
             mode = "Directional"
         elif self.accum_mode == "volume_weighted":
             mode = "Volume Weighted"
+        elif self.accum_mode == "calculus_maker":
+            mode = "Calculus Maker"
+        elif self.accum_mode == "fair_value_mm":
+            mode = "Fair Value MM"
+        elif self.accum_mode == "simple_hedger":
+            mode = "Simple Hedger"
         else:
             mode = "Standard"
 
@@ -3311,9 +4836,9 @@ async def main():
     parser.add_argument(
         '--accum-mode',
         type=str,
-        choices=['standard', 'volume_weighted'],
+        choices=['standard', 'volume_weighted', 'calculus_maker'],
         default='standard',
-        help='Accumulation strategy mode: standard (strict pair cost) or volume_weighted (Gabagool-style hedging)',
+        help='Accumulation strategy mode: standard, volume_weighted (Gabagool-style), or calculus_maker (exponential decay)',
     )
 
     # DIRECTIONAL MODE parameters

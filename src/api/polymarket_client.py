@@ -35,12 +35,6 @@ from py_clob_client.clob_types import (
     PostOrdersArgs,
     OpenOrderParams,
 )
-# Using vendored copy for security (not pulled from PyPI)
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "vendor"))
-from polymarket_apis import PolymarketGaslessWeb3Client, PolymarketWeb3Client
-
 from src.config import Config
 
 logger = logging.getLogger(__name__)
@@ -88,7 +82,6 @@ class PolymarketClient:
         self.config = config
         self._client: Optional[ClobClient] = None
         self._api_creds: Optional[ApiCreds] = None
-        self._web3_client: Optional[PolymarketGaslessWeb3Client] = None
         self.connected: bool = False
 
     async def connect(self) -> bool:
@@ -100,9 +93,10 @@ class PolymarketClient:
         2. Derives API credentials for authenticated operations
         3. Verifies the connection by fetching markets
 
-        Supports two wallet types:
-        - "eoa": Standard MetaMask/hardware wallet
-        - "magic": Email login (Magic wallet) - requires funder_address
+        Supports three wallet types:
+        - "eoa": Standard MetaMask/hardware wallet (signature_type=0)
+        - "magic": Email login (Magic wallet) - requires funder_address (signature_type=1)
+        - "gnosis_safe": Gnosis Safe wallet - for Builder Relayer (signature_type=2)
 
         Returns:
             True if connection successful
@@ -114,23 +108,37 @@ class PolymarketClient:
         try:
             # Create the base client with wallet for signing
             # Configuration differs based on wallet type
-            if self.config.wallet_type == "magic":
+            if self.config.wallet_type == "gnosis_safe":
+                # Gnosis Safe wallet - for Builder Relayer gasless transactions
+                # signature_type=2 for Gnosis Safe signatures
+                self._client = ClobClient(
+                    host=self.config.polymarket_host,
+                    key=self.config.wallet_private_key,
+                    chain_id=self.config.chain_id,
+                    signature_type=2,  # GNOSIS_SAFE signature type
+                    funder=self.config.safe_address,  # Safe address is the funder
+                )
+                logger.info(f"Using Gnosis Safe wallet: {self.config.safe_address}")
+            elif self.config.wallet_type == "magic":
                 # Magic/email wallet - uses proxy signing
                 # signature_type=1 for Magic wallet signatures
                 self._client = ClobClient(
                     host=self.config.polymarket_host,
                     key=self.config.wallet_private_key,
                     chain_id=self.config.chain_id,
-                    signature_type=1,  # Magic wallet signature type
+                    signature_type=1,  # POLY_PROXY signature type
                     funder=self.config.funder_address,  # Actual Polymarket account
                 )
+                logger.info(f"Using Magic wallet: {self.config.funder_address}")
             else:
                 # Standard EOA wallet (MetaMask, hardware wallet)
+                # signature_type=0 (default)
                 self._client = ClobClient(
                     host=self.config.polymarket_host,
                     key=self.config.wallet_private_key,
                     chain_id=self.config.chain_id,
                 )
+                logger.info("Using EOA wallet")
 
             # Derive API credentials for authenticated operations
             # This creates a session key derived from your wallet
@@ -153,25 +161,6 @@ class PolymarketClient:
                     f"Cannot reach Polymarket servers. "
                     f"Check your internet connection. Error: {e}"
                 )
-
-            # Initialize Web3 client for merge/redeem operations
-            try:
-                if self.config.wallet_type == "magic":
-                    # Magic wallet uses gasless relay (signature_type=1)
-                    self._web3_client = PolymarketGaslessWeb3Client(
-                        private_key=self.config.wallet_private_key,
-                        signature_type=1,
-                    )
-                else:
-                    # EOA wallet pays gas directly (signature_type=0)
-                    self._web3_client = PolymarketWeb3Client(
-                        private_key=self.config.wallet_private_key,
-                        signature_type=0,
-                    )
-                logger.info("Web3 client initialized for merge/redeem operations")
-            except Exception as e:
-                logger.warning(f"Web3 client init failed (merge/redeem unavailable): {e}")
-                self._web3_client = None
 
             self.connected = True
             return True
@@ -381,6 +370,7 @@ class PolymarketClient:
         """
         Get the Polymarket account address.
 
+        For Gnosis Safe wallets, returns the Safe address.
         For Magic wallets, returns the funder address (actual Polymarket account).
         For EOA wallets, returns the address derived from the private key.
 
@@ -390,6 +380,10 @@ class PolymarketClient:
         self._ensure_connected()
 
         try:
+            # For Gnosis Safe wallets, use the Safe address
+            if self.config.wallet_type == "gnosis_safe" and self.config.safe_address:
+                return self.config.safe_address
+
             # For Magic wallets, use the funder address (actual Polymarket account)
             if self.config.wallet_type == "magic" and self.config.funder_address:
                 return self.config.funder_address
@@ -742,245 +736,6 @@ class PolymarketClient:
         self._client = None
         self._api_creds = None
         self.connected = False
-
-    # ==================== Claiming / Redemption Methods ====================
-
-    async def validate_merge_possible(
-        self,
-        up_token_id: str,
-        down_token_id: str,
-        merge_amount: float,
-    ) -> Dict[str, Any]:
-        """
-        Pre-validate that a merge is possible before attempting on-chain.
-
-        Checks that both UP and DOWN balances are >= merge_amount.
-        Call this BEFORE attempting merge to get a clear error message
-        instead of cryptic "execution reverted: S" errors.
-
-        Args:
-            up_token_id: Token ID for UP outcome
-            down_token_id: Token ID for DOWN outcome
-            merge_amount: Number of pairs to merge
-
-        Returns:
-            Dict with:
-                - valid: bool
-                - up_balance: float
-                - down_balance: float
-                - error: str (if not valid)
-        """
-        self._ensure_connected()
-
-        try:
-            # Get current balances
-            up_balance = await self.get_token_balance(up_token_id)
-            down_balance = await self.get_token_balance(down_token_id)
-
-            # Check if merge is possible
-            if up_balance < merge_amount:
-                return {
-                    "valid": False,
-                    "up_balance": up_balance,
-                    "down_balance": down_balance,
-                    "error": f"Insufficient UP balance: have {up_balance:.2f}, need {merge_amount:.2f}",
-                }
-
-            if down_balance < merge_amount:
-                return {
-                    "valid": False,
-                    "up_balance": up_balance,
-                    "down_balance": down_balance,
-                    "error": f"Insufficient DOWN balance: have {down_balance:.2f}, need {merge_amount:.2f}",
-                }
-
-            logger.info(
-                f"[MERGE] Validation passed: UP={up_balance:.2f}, DOWN={down_balance:.2f}, "
-                f"merge_amount={merge_amount:.2f}"
-            )
-
-            return {
-                "valid": True,
-                "up_balance": up_balance,
-                "down_balance": down_balance,
-            }
-
-        except Exception as e:
-            return {
-                "valid": False,
-                "up_balance": 0,
-                "down_balance": 0,
-                "error": f"Failed to check balances: {e}",
-            }
-
-    async def merge_positions_safe(
-        self,
-        condition_id: str,
-        amount: float,
-        up_token_id: str,
-        down_token_id: str,
-        neg_risk: bool = True,
-        max_retries: int = 2,
-    ) -> Dict[str, Any]:
-        """
-        Merge positions with pre-validation and retry logic.
-
-        Validates balances before attempting merge, and retries on failure
-        with exponential backoff.
-
-        Args:
-            condition_id: The market's condition ID
-            amount: Number of pairs to merge
-            up_token_id: Token ID for UP outcome (for validation)
-            down_token_id: Token ID for DOWN outcome (for validation)
-            neg_risk: Whether this is a neg risk market
-            max_retries: Maximum retry attempts on failure
-
-        Returns:
-            Dict with merge result or validation error
-        """
-        import asyncio
-
-        # Pre-validate
-        validation = await self.validate_merge_possible(
-            up_token_id=up_token_id,
-            down_token_id=down_token_id,
-            merge_amount=amount,
-        )
-
-        if not validation["valid"]:
-            logger.warning(f"[MERGE] Validation failed: {validation['error']}")
-            return {
-                "success": False,
-                "validation_failed": True,
-                "error": validation["error"],
-                "up_balance": validation["up_balance"],
-                "down_balance": validation["down_balance"],
-            }
-
-        # Attempt merge with retries
-        last_error = None
-        for attempt in range(max_retries):
-            try:
-                result = await self.merge_positions(
-                    condition_id=condition_id,
-                    amount=amount,
-                    neg_risk=neg_risk,
-                )
-                result["success"] = result.get("status") == 1
-                return result
-
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    f"[MERGE] Attempt {attempt + 1}/{max_retries} failed: {e}"
-                )
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1.0 * (attempt + 1))  # Exponential backoff
-
-        return {
-            "success": False,
-            "error": str(last_error),
-            "attempts": max_retries,
-        }
-
-    async def merge_positions(
-        self,
-        condition_id: str,
-        amount: float,
-        neg_risk: bool = True
-    ) -> Dict[str, Any]:
-        """
-        Merge complementary positions (1 YES + 1 NO) into USDC.
-
-        This converts balanced pairs back to collateral WITHOUT waiting for
-        market resolution. Useful for locking in profits on hedged positions.
-
-        Args:
-            condition_id: The market's condition ID (bytes32 hex string)
-            amount: Number of pairs to merge (e.g., 10 = merge 10 YES + 10 NO)
-            neg_risk: Whether this is a neg risk market (default True for BTC markets)
-
-        Returns:
-            Transaction receipt dict with 'status', 'transaction_hash', 'gas_used'
-
-        Raises:
-            PolymarketClientError: If web3 client not available or tx fails
-        """
-        self._ensure_connected()
-
-        if self._web3_client is None:
-            raise PolymarketClientError(
-                "Web3 client not initialized. Merge requires web3 connection."
-            )
-
-        try:
-            logger.info(f"Merging {amount} pairs for condition {condition_id[:16]}...")
-            receipt = self._web3_client.merge_position(
-                condition_id=condition_id,
-                amount=amount,
-                neg_risk=neg_risk,
-            )
-            logger.info(f"Merge successful: {receipt.tx_hash.hex()}")
-            return {
-                "status": receipt.status,
-                "transaction_hash": receipt.tx_hash.hex(),
-                "gas_used": receipt.gas_used,
-            }
-        except Exception as e:
-            raise PolymarketClientError(f"Failed to merge positions: {e}")
-
-    async def redeem_positions(
-        self,
-        condition_id: str,
-        amounts: List[float],
-        neg_risk: bool = True
-    ) -> Dict[str, Any]:
-        """
-        Redeem winning positions into USDC after market resolution.
-
-        Call this after a market resolves to convert winning tokens to USDC.
-
-        Args:
-            condition_id: The market's condition ID (bytes32 hex string)
-            amounts: [yes_amount, no_amount] - shares of each outcome to redeem
-            neg_risk: Whether this is a neg risk market (default True for BTC markets)
-
-        Returns:
-            Transaction receipt dict with 'status', 'transaction_hash', 'gas_used'
-
-        Raises:
-            PolymarketClientError: If web3 client not available or tx fails
-        """
-        self._ensure_connected()
-
-        if self._web3_client is None:
-            raise PolymarketClientError(
-                "Web3 client not initialized. Redeem requires web3 connection."
-            )
-
-        try:
-            logger.info(f"Redeeming positions for condition {condition_id[:16]}...")
-            receipt = self._web3_client.redeem_position(
-                condition_id=condition_id,
-                amounts=amounts,
-                neg_risk=neg_risk,
-            )
-            # Handle tx_hash being either bytes or string
-            tx_hash = receipt.tx_hash
-            if hasattr(tx_hash, 'hex'):
-                tx_hash = tx_hash.hex()
-            elif not isinstance(tx_hash, str):
-                tx_hash = str(tx_hash)
-            logger.info(f"Redeem successful: {tx_hash}")
-            return {
-                "status": getattr(receipt, 'status', 1),
-                "transaction_hash": tx_hash,
-                "gas_used": getattr(receipt, 'gas_used', 0),
-            }
-        except Exception as e:
-            raise PolymarketClientError(f"Failed to redeem positions: {e}")
-
     async def get_market_info(self, condition_id: str = None, slug: str = None) -> Optional[Dict[str, Any]]:
         """
         Get market information including resolution status.
@@ -1026,7 +781,7 @@ class PolymarketClient:
             condition_id: The market's condition ID
 
         Returns:
-            True if market is resolved and claimable
+            True if market is resolved
         """
         market = await self.get_market_info(condition_id)
         if not market:
@@ -1243,337 +998,6 @@ class PolymarketClient:
             logger.warning(f"Market {condition_id[:20]}... is closed but winner unclear from API")
 
         return None
-
-    async def get_claimable_positions(
-        self,
-        verbose: bool = False,
-    ) -> List[Dict[str, Any]]:
-        """
-        Get all positions that are in resolved markets and can be claimed.
-
-        Args:
-            verbose: If True, log detailed information about why positions
-                     were included/excluded
-
-        Returns:
-            List of dicts with:
-            - token_id: The token ID
-            - condition_id: The market condition ID
-            - balance: Number of shares held
-            - is_winning: Whether this is the winning token
-            - estimated_value: Estimated USDC value ($1 per winning share)
-        """
-        self._ensure_connected()
-
-        claimable = []
-        wallet = self.get_wallet_address()
-
-        if verbose:
-            logger.info(f"[CLAIMABLE] Scanning for claimable positions for {wallet[:10]}...")
-
-        try:
-            # Try data-api with redeemable filter first
-            from vendor.polymarket_apis.clients.data_client import PolymarketDataClient
-            data_client = PolymarketDataClient()
-
-            try:
-                positions = data_client.get_positions(
-                    user=wallet,
-                    redeemable=True,
-                    size_threshold=0.0
-                )
-
-                if verbose:
-                    logger.info(f"[CLAIMABLE] Data API returned {len(positions)} redeemable positions")
-
-                for pos in positions:
-                    balance = float(getattr(pos, 'size', 0))
-                    if balance <= 0:
-                        if verbose:
-                            logger.debug(f"[CLAIMABLE] Skipping position with zero balance")
-                        continue
-
-                    claimable.append({
-                        "token_id": getattr(pos, 'asset', ''),
-                        "condition_id": getattr(pos, 'conditionId', ''),
-                        "balance": balance,
-                        "is_winning": True,  # redeemable means winning
-                        "estimated_value": balance,
-                        "outcome": getattr(pos, 'outcome', ''),
-                    })
-
-                    if verbose:
-                        logger.info(
-                            f"[CLAIMABLE] Found redeemable: {balance:.2f} shares, "
-                            f"condition={getattr(pos, 'conditionId', '')[:16]}..."
-                        )
-
-            except Exception as e:
-                if verbose:
-                    logger.warning(f"[CLAIMABLE] Data API failed: {e}")
-                # Fall through to GraphQL approach
-
-            # Also try GraphQL subgraph for any positions
-            if not claimable:
-                if verbose:
-                    logger.info("[CLAIMABLE] No positions from Data API, trying GraphQL...")
-
-                try:
-                    gql_positions = data_client.get_all_positions(user=wallet, size_threshold=0.0)
-
-                    if verbose:
-                        logger.info(f"[CLAIMABLE] GraphQL returned {len(gql_positions)} total positions")
-
-                    for pos in gql_positions:
-                        condition_id = pos.asset.condition.id if pos.asset and pos.asset.condition else ""
-                        if not condition_id:
-                            if verbose:
-                                logger.debug("[CLAIMABLE] Skipping position without condition_id")
-                            continue
-
-                        is_resolved = await self.is_market_resolved(condition_id)
-                        if not is_resolved:
-                            if verbose:
-                                logger.debug(f"[CLAIMABLE] Market not resolved: {condition_id[:16]}...")
-                            continue
-
-                        balance = float(pos.balance) / 1e6  # Convert from raw units
-                        if balance <= 0:
-                            if verbose:
-                                logger.debug(f"[CLAIMABLE] Zero balance for {condition_id[:16]}...")
-                            continue
-
-                        claimable.append({
-                            "token_id": pos.asset.id if pos.asset else "",
-                            "condition_id": condition_id,
-                            "balance": balance,
-                            "is_winning": True,  # We'll verify during redeem
-                            "estimated_value": balance,
-                            "outcome": "",
-                        })
-
-                        if verbose:
-                            logger.info(
-                                f"[CLAIMABLE] Found via GraphQL: {balance:.2f} shares, "
-                                f"condition={condition_id[:16]}..."
-                            )
-
-                except Exception as e:
-                    if verbose:
-                        logger.warning(f"[CLAIMABLE] GraphQL failed: {e}")
-
-            if verbose:
-                logger.info(f"[CLAIMABLE] Total claimable positions found: {len(claimable)}")
-
-            return claimable
-
-        except Exception as e:
-            logger.error(f"[CLAIMABLE] Critical error: {e}")
-            raise PolymarketClientError(f"Failed to get claimable positions: {e}")
-
-    async def scan_and_claim_recent_markets(self, hours_back: int = 24) -> List[Dict[str, Any]]:
-        """
-        Scan recent BTC 15m markets and claim any redeemable positions.
-
-        This is a more robust approach than relying on position APIs.
-        It generates recent market slugs and tries to redeem from each.
-
-        Args:
-            hours_back: How many hours of markets to scan (default 24)
-
-        Returns:
-            List of successful claim results
-        """
-        self._ensure_connected()
-        import aiohttp
-        from datetime import datetime, timezone, timedelta
-
-        results = []
-        now = datetime.now(timezone.utc)
-
-        # Generate market slugs for the past N hours
-        # BTC 15m markets have slugs like btc-updown-15m-{unix_timestamp}
-        # Timestamps are at :00, :15, :30, :45 of each hour
-
-        market_slugs = []
-        for hours_ago in range(hours_back):
-            check_time = now - timedelta(hours=hours_ago)
-            # Round down to nearest 15 minutes
-            minute = (check_time.minute // 15) * 15
-            base_time = check_time.replace(minute=minute, second=0, microsecond=0)
-
-            # Add the 4 markets in this hour
-            for i in range(4):
-                market_time = base_time - timedelta(minutes=i * 15)
-                ts = int(market_time.timestamp())
-                slug = f"btc-updown-15m-{ts}"
-                market_slugs.append(slug)
-
-        # Remove duplicates and sort - limit to 4 markets (30 min) for fast startup
-        market_slugs = sorted(set(market_slugs), reverse=True)[:4]
-
-        logger.info(f"[AUTO-CLAIM] Scanning {len(market_slugs)} recent markets...")
-
-        async with aiohttp.ClientSession() as session:
-            for slug in market_slugs:
-                try:
-                    # Get condition ID for this market
-                    url = f"https://gamma-api.polymarket.com/events?slug={slug}"
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                        if resp.status != 200:
-                            continue
-                        data = await resp.json()
-                        if not data:
-                            continue
-
-                        condition_id = data[0].get('markets', [{}])[0].get('conditionId')
-                        if not condition_id:
-                            continue
-
-                    # Try to redeem (both UP and DOWN in case we have either)
-                    try:
-                        receipt = await self.redeem_positions(
-                            condition_id=condition_id,
-                            amounts=[100, 100],  # Try to redeem up to 100 of each
-                            neg_risk=False,
-                        )
-                        # If we get here without exception, redeem succeeded
-                        logger.info(f"[AUTO-CLAIM] ✅ Claimed from {slug}")
-                        results.append({
-                            "slug": slug,
-                            "condition_id": condition_id,
-                            "status": "claimed",
-                        })
-                    except Exception as e:
-                        err = str(e).lower()
-                        if "not received yet" in err:
-                            # Market not resolved on-chain yet
-                            pass
-                        elif "payout already" in err or "already claimed" in err:
-                            # Already claimed
-                            pass
-                        elif "no balance" in err or "insufficient" in err:
-                            # No position in this market
-                            pass
-                        else:
-                            # Some other error, log it
-                            logger.debug(f"[AUTO-CLAIM] {slug}: {str(e)[:50]}")
-
-                except Exception as e:
-                    continue
-
-        if results:
-            logger.info(f"[AUTO-CLAIM] Successfully claimed from {len(results)} markets")
-        else:
-            logger.info("[AUTO-CLAIM] No claimable positions found")
-
-        return results
-
-    async def claim_winnings_via_sell(
-        self,
-        token_id: str,
-        amount: float,
-        min_price: float = 0.99,
-    ) -> Dict[str, Any]:
-        """
-        Claim winnings by selling winning tokens at market price.
-
-        This is the workaround for the lack of native redeem API.
-        After market resolution, winning tokens trade at ~$0.99-1.00.
-        Selling at 0.99 recovers 99% of the value.
-
-        Args:
-            token_id: The winning token to sell
-            amount: Number of shares to sell
-            min_price: Minimum sell price (default 0.99)
-
-        Returns:
-            Order result dict
-        """
-        self._ensure_connected()
-
-        try:
-            # Create and submit sell order
-            result = await self.place_order(
-                token_id=token_id,
-                side="SELL",
-                price=min_price,
-                size=amount,
-                order_type=OrderType.GTC,
-            )
-            return result
-        except Exception as e:
-            raise PolymarketClientError(f"Failed to claim via sell: {e}")
-
-    async def claim_all_winnings(
-        self,
-        dry_run: bool = True,
-    ) -> List[Dict[str, Any]]:
-        """
-        Claim all available winning positions.
-
-        PRIMARY: Redeem on-chain at $1.00 per share
-        FALLBACK: Sell at $0.99 (emergency only)
-
-        Args:
-            dry_run: If True, only simulate (don't execute trades)
-
-        Returns:
-            List of claim results with method used (redeem or sell_fallback)
-        """
-        results = []
-        claimable = await self.get_claimable_positions()
-
-        for pos in claimable:
-            if not pos["is_winning"]:
-                continue  # Skip losing positions
-
-            if pos["balance"] <= 0:
-                continue
-
-            result = {
-                "token_id": pos["token_id"],
-                "condition_id": pos["condition_id"],
-                "balance": pos["balance"],
-                "estimated_value": pos["balance"],  # $1 per winning share
-                "outcome": pos["outcome"],
-                "dry_run": dry_run,
-                "method": "redeem",
-            }
-
-            if dry_run:
-                result["status"] = "simulated"
-                result["message"] = f"Would redeem {pos['balance']} shares at $1.00"
-            else:
-                # PRIMARY: Try redeem at $1.00 (on-chain)
-                try:
-                    # Build amounts array: [yes_shares, no_shares]
-                    outcome = pos["outcome"].lower()
-                    if outcome in ["yes", "up"]:
-                        amounts = [pos["balance"], 0]
-                    else:
-                        amounts = [0, pos["balance"]]
-
-                    # Use neg_risk=False for resolved markets - calls ConditionalTokens directly
-                    receipt = await self.redeem_positions(
-                        condition_id=pos["condition_id"],
-                        amounts=amounts,
-                        neg_risk=False,
-                    )
-                    result["status"] = "redeemed"
-                    result["tx_hash"] = receipt.get("transaction_hash", "")
-                    logger.info(f"Redeemed {pos['balance']} {pos['outcome']} → ${pos['balance']:.2f}")
-
-                except Exception as e:
-                    # Redeem failed - log error, don't auto-sell
-                    # User can manually sell via frontend/Telegram if needed
-                    logger.error(f"Redeem failed for {pos['balance']} {pos['outcome']}: {e}")
-                    result["status"] = "redeem_failed"
-                    result["error"] = str(e)
-
-            results.append(result)
-
-        return results
 
     def __repr__(self) -> str:
         """String representation showing connection status."""

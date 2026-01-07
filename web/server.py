@@ -171,6 +171,38 @@ class CalculusMakerBotConfig(BaseModel):
     max_daily_loss: float = 0.0
 
 
+class FairValueMMBotConfig(BaseModel):
+    """Configuration for Fair Value MM strategy from web UI.
+
+    Uses Binance price feed to calculate fair value for UP/DOWN shares.
+    Posts at fair_value - edge (like real market makers).
+    """
+    mode: str  # "paper" or "live"
+    market: str = "btc-15m"
+    start_datetime: str  # ISO format (local time from browser)
+    end_datetime: str
+    starting_balance: float = 500.0
+
+    # Fair Value MM specific parameters
+    fv_edge: float = 0.02                 # Edge below fair value (2 cents)
+    fv_sensitivity_early: float = 0.10    # Price sensitivity at market open (10%)
+    fv_sensitivity_late: float = 0.50     # Price sensitivity near resolution (50%)
+    fv_reprice_threshold: float = 0.03    # Reprice if fair value changes 3c
+
+    # Reuse calculus maker parameters for should_buy() and get_size()
+    max_shares: int = 50
+    min_shares: int = 5
+    m_min: float = 0.01
+    m_max: float = 0.04
+    lambda_decay: float = 0.005
+    max_pair_cost: float = 0.995
+    max_imbalance_pct: float = 0.20
+    max_share_price: float = 0.98
+
+    # Max Daily Loss protection
+    max_daily_loss: float = 0.0
+
+
 class SimpleHedgerBotConfig(BaseModel):
     """Configuration for Simple Hedger strategy from web UI.
 
@@ -246,6 +278,7 @@ class StrategyState:
 # Multi-strategy state - supports running multiple accumulation modes simultaneously
 strategies = {
     "calculus_maker": StrategyState("calculus_maker"),  # Calculus MAKER (exponential decay + quadratic size)
+    "fair_value_mm": StrategyState("fair_value_mm"),    # Fair Value MM (Binance-priced like real MMs)
     "simple_hedger": StrategyState("simple_hedger"),    # Simple Hedger (flip strategy)
     "volume_weighted": StrategyState("volume_weighted"),  # Volume Weighted (Gabagool-style) mode
     "directional": StrategyState("directional"),
@@ -473,6 +506,7 @@ async def get_status():
     """Get current bot status for all strategies."""
     return {
         "calculus_maker": strategies["calculus_maker"].status,
+        "fair_value_mm": strategies["fair_value_mm"].status,
         "simple_hedger": strategies["simple_hedger"].status,
         "volume_weighted": strategies["volume_weighted"].status,
         "directional": strategies["directional"].status,
@@ -481,6 +515,7 @@ async def get_status():
         "accumulation": strategies["standard"].status,  # Alias to standard
         "running": (
             strategies["calculus_maker"].status["running"] or
+            strategies["fair_value_mm"].status["running"] or
             strategies["simple_hedger"].status["running"] or
             strategies["volume_weighted"].status["running"] or
             strategies["directional"].status["running"] or
@@ -1007,6 +1042,89 @@ async def start_calculus_maker(config: CalculusMakerBotConfig):
     return {"status": "started", "strategy": "calculus_maker", "config": config.dict()}
 
 
+@app.post("/api/start/fair_value_mm")
+async def start_fair_value_mm(config: FairValueMMBotConfig):
+    """Start the Fair Value MM trading strategy."""
+    strategy = strategies["fair_value_mm"]
+
+    # Check if actually running (task exists and not done) vs just stale status
+    actually_running = (
+        strategy.status["running"] and
+        strategy.task is not None and
+        not strategy.task.done()
+    )
+
+    if actually_running:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Fair Value MM strategy is already running"}
+        )
+
+    # Reset stale status if task is done but status wasn't updated
+    if strategy.status["running"] and (strategy.task is None or strategy.task.done()):
+        strategy.status["running"] = False
+        strategy.reset_trading_data()
+        strategy.task = None
+
+    # Validate datetime
+    try:
+        start_dt = datetime.fromisoformat(config.start_datetime)
+        end_dt = datetime.fromisoformat(config.end_datetime)
+        if end_dt <= start_dt:
+            return JSONResponse(status_code=400, content={"error": "End time must be after start time"})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": f"Invalid datetime: {e}"})
+
+    # Validate Fair Value MM parameters
+    if config.min_shares < 5:
+        return JSONResponse(status_code=400, content={"error": "Min shares must be at least 5 (Polymarket minimum)"})
+    if config.max_shares < config.min_shares:
+        return JSONResponse(status_code=400, content={"error": "Max shares must be >= min shares"})
+    if config.fv_edge < 0.01 or config.fv_edge > 0.10:
+        return JSONResponse(status_code=400, content={"error": "Edge must be between 1c and 10c"})
+
+    # Validate balance for live mode
+    if config.mode == "live":
+        try:
+            from src.config import Config
+            from src.api.polymarket_client import PolymarketClient
+
+            pm_config = Config()
+            pm_config.validate()
+            client = PolymarketClient(pm_config)
+            await client.connect()
+            actual_balance = await client.get_balance()
+            await client.disconnect()
+
+            if config.starting_balance > actual_balance:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": f"Starting balance ${config.starting_balance:.2f} exceeds "
+                                 f"Polymarket balance ${actual_balance:.2f}"
+                    }
+                )
+            logger.info(f"[LIVE] Balance check passed: ${actual_balance:.2f} available")
+        except Exception as e:
+            return JSONResponse(status_code=400, content={"error": f"Failed to check Polymarket balance: {e}"})
+
+    # Update strategy status
+    strategy.status = {
+        "running": True,
+        "strategy": "fair_value_mm",
+        "error": None,
+        "config": config.dict(),
+        "start_time": datetime.now(timezone.utc).isoformat(),
+        "balance": config.starting_balance,
+    }
+
+    # Start bot in background
+    strategy.task = asyncio.create_task(run_fair_value_mm_bot(config, strategy))
+
+    await broadcast_status()
+    return {"status": "started", "strategy": "fair_value_mm", "config": config.dict()}
+
+
 @app.post("/api/start/simple_hedger")
 async def start_simple_hedger(config: SimpleHedgerBotConfig):
     """Start the Simple Hedger trading strategy."""
@@ -1487,6 +1605,89 @@ async def run_calculus_bot(config: CalculusMakerBotConfig, strategy: StrategySta
         # Don't remove from restart_configs - health monitor may restart
 
 
+async def run_fair_value_mm_bot(config: FairValueMMBotConfig, strategy: StrategyState):
+    """Run the Fair Value MM trading bot asynchronously with resilience.
+
+    Uses Binance price feed to calculate fair value for UP/DOWN shares.
+    Posts at fair_value - edge (like real market makers).
+    """
+    # Store config for auto-restart
+    restart_configs["fair_value_mm"] = config.dict()
+
+    try:
+        from scripts.run_paper_bot import PaperTradingBot
+
+        # CRITICAL: Normalize times to UTC at the API boundary
+        start_dt_utc = normalize_datetime_to_utc(config.start_datetime)
+        end_dt_utc = normalize_datetime_to_utc(config.end_datetime)
+
+        logger.info(f"[fair_value_mm] Session time window (UTC): {start_dt_utc.isoformat()} to {end_dt_utc.isoformat()}")
+
+        # Wait until start time (compare in UTC)
+        now_utc = datetime.now(timezone.utc)
+        if start_dt_utc > now_utc:
+            wait_seconds = (start_dt_utc - now_utc).total_seconds()
+            strategy.status["waiting_until"] = start_dt_utc.isoformat()
+            await broadcast_status()
+            await asyncio.sleep(wait_seconds)
+
+        strategy.status.pop("waiting_until", None)
+        strategy.status["trading_started"] = datetime.now(timezone.utc).isoformat()
+        strategy.status["end_datetime"] = end_dt_utc.isoformat()
+        await broadcast_status()
+
+        duration_minutes = (end_dt_utc - start_dt_utc).total_seconds() / 60.0
+        web_callback = create_web_callback_for_strategy("fair_value_mm")
+
+        # Create Fair Value MM bot with strategy-specific config
+        bot = PaperTradingBot.from_fair_value_mm_config(
+            config.dict(),
+            web_callback=web_callback,
+            session_start_utc=start_dt_utc,
+            session_end_utc=end_dt_utc,
+            trading_mode=config.mode,
+        )
+        strategy.instance = bot
+
+        logger.info("[fair_value_mm] Initializing bot...")
+        await bot.initialize()
+
+        logger.info(f"[fair_value_mm] Starting trading loop for {duration_minutes:.1f} minutes")
+        await bot.run(duration_minutes=duration_minutes)
+
+        strategy.status["running"] = False
+        strategy.status["completed"] = True
+        strategy.reset_trading_data()
+        strategy.instance = None
+        # Clear restart config on normal completion
+        if "fair_value_mm" in restart_configs:
+            del restart_configs["fair_value_mm"]
+            logger.info("[fair_value_mm] Cleared restart config - session completed normally")
+        logger.info("[fair_value_mm] Trading session completed normally")
+        await broadcast_status()
+
+    except asyncio.CancelledError:
+        strategy.status["running"] = False
+        strategy.status["error"] = "Stopped by user"
+        strategy.reset_trading_data()
+        strategy.instance = None
+        if "fair_value_mm" in restart_configs:
+            del restart_configs["fair_value_mm"]
+            logger.info("[fair_value_mm] Cleared restart config - stopped by user")
+        logger.info("[fair_value_mm] Stopped by user")
+        await broadcast_status()
+        raise
+    except Exception as e:
+        strategy.status["running"] = False
+        strategy.status["error"] = str(e)
+        strategy.reset_trading_data()
+        strategy.instance = None
+        logger.error(f"[fair_value_mm] Error: {e}")
+        logger.error(f"[fair_value_mm] Traceback: {traceback.format_exc()}")
+        await broadcast_status()
+        # Don't remove from restart_configs - health monitor may restart
+
+
 async def run_simple_hedger_bot(config: SimpleHedgerBotConfig, strategy: StrategyState):
     """Run the Simple Hedger trading bot asynchronously.
 
@@ -1519,12 +1720,16 @@ async def run_simple_hedger_bot(config: SimpleHedgerBotConfig, strategy: Strateg
 
         duration_minutes = (end_dt_utc - start_dt_utc).total_seconds() / 60.0
 
+        # Create web callback for frontend updates
+        web_callback = create_web_callback_for_strategy("simple_hedger")
+
         # Create Simple Hedger bot with session time window
         bot = SimpleHedgerBot(
             live_mode=(config.mode == "live"),
             initial_balance=config.starting_balance,
             session_start_utc=start_dt_utc,
             session_end_utc=end_dt_utc,
+            web_callback=web_callback,
         )
         strategy.instance = bot
 

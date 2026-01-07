@@ -32,6 +32,7 @@ class MessageType(Enum):
     BOOK = "book"
     PRICE_CHANGE = "price_change"
     LAST_TRADE_PRICE = "last_trade_price"
+    MARKET_RESOLVED = "market_resolved"  # Requires custom_feature_enabled flag
 
 
 @dataclass
@@ -132,10 +133,62 @@ class TradeUpdate:
         )
 
 
+@dataclass
+class MarketResolved:
+    """
+    Market resolution notification.
+
+    Emitted when a market is resolved on Polymarket.
+    Requires custom_feature_enabled flag to receive.
+    """
+    market_id: str
+    question: str
+    condition_id: str
+    slug: str
+    description: str
+    assets_ids: List[str]
+    outcomes: List[str]
+    winning_asset_id: str
+    winning_outcome: str
+    event_id: Optional[str] = None
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @classmethod
+    def from_message(cls, data: dict) -> "MarketResolved":
+        """Create from WebSocket message."""
+        event_msg = data.get("event_message", {}) or {}
+        ts_str = data.get("timestamp")
+        timestamp = datetime.now(timezone.utc)
+        if ts_str:
+            try:
+                timestamp = datetime.fromtimestamp(int(ts_str) / 1000, tz=timezone.utc)
+            except (ValueError, TypeError):
+                pass
+
+        return cls(
+            market_id=data.get("id", ""),
+            question=data.get("question", ""),
+            condition_id=data.get("market", ""),
+            slug=data.get("slug", ""),
+            description=data.get("description", ""),
+            assets_ids=data.get("assets_ids", []),
+            outcomes=data.get("outcomes", []),
+            winning_asset_id=data.get("winning_asset_id", ""),
+            winning_outcome=data.get("winning_outcome", ""),
+            event_id=event_msg.get("id"),
+            timestamp=timestamp,
+        )
+
+    def is_btc_15min_market(self) -> bool:
+        """Check if this is a BTC 15-minute Up/Down market."""
+        return "btc-updown-15m" in self.slug.lower()
+
+
 # Callback type aliases
 BookCallback = Callable[[BookUpdate], None]
 PriceCallback = Callable[[PriceChange], None]
 TradeCallback = Callable[[TradeUpdate], None]
+MarketResolvedCallback = Callable[[MarketResolved], None]
 
 
 class WebSocketClient:
@@ -143,12 +196,14 @@ class WebSocketClient:
     WebSocket client for Polymarket real-time data.
 
     Provides streaming orderbook updates with auto-reconnect.
+    Supports market_resolved events for instant resolution notifications.
 
     Example:
-        client = WebSocketClient()
+        client = WebSocketClient(custom_features=True)
 
         # Register callbacks
         client.on_book_update(lambda update: print(update))
+        client.on_market_resolved(lambda m: print(f"Resolved: {m.winning_outcome}"))
 
         # Connect and subscribe
         await client.connect()
@@ -165,6 +220,7 @@ class WebSocketClient:
         self,
         url: str = WS_MARKET_URL,
         auto_reconnect: bool = True,
+        custom_features: bool = False,
     ):
         """
         Initialize WebSocket client.
@@ -172,9 +228,11 @@ class WebSocketClient:
         Args:
             url: WebSocket endpoint URL
             auto_reconnect: Whether to auto-reconnect on disconnect
+            custom_features: Enable market_resolved events (for instant resolution notifications)
         """
         self.url = url
         self.auto_reconnect = auto_reconnect
+        self.custom_features = custom_features
 
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._connected = False
@@ -185,6 +243,7 @@ class WebSocketClient:
         self._book_callbacks: List[BookCallback] = []
         self._price_callbacks: List[PriceCallback] = []
         self._trade_callbacks: List[TradeCallback] = []
+        self._market_resolved_callbacks: List[MarketResolvedCallback] = []
 
         # Reconnect state
         self._reconnect_delay = self.DEFAULT_RECONNECT_DELAY
@@ -207,6 +266,15 @@ class WebSocketClient:
         """Register callback for trade updates."""
         self._trade_callbacks.append(callback)
 
+    def on_market_resolved(self, callback: MarketResolvedCallback) -> None:
+        """
+        Register callback for market resolution notifications.
+
+        Requires custom_features=True to receive events.
+        Use this to trigger position redemption when a market resolves.
+        """
+        self._market_resolved_callbacks.append(callback)
+
     async def connect(self) -> bool:
         """
         Connect to WebSocket server.
@@ -216,7 +284,13 @@ class WebSocketClient:
         """
         try:
             logger.info(f"Connecting to {self.url}")
-            self._ws = await websockets.connect(self.url)
+            self._ws = await websockets.connect(
+                self.url,
+                ping_interval=10,
+                ping_timeout=10,
+                open_timeout=10,
+                close_timeout=10,
+            )
             self._connected = True
             self._reconnect_delay = self.DEFAULT_RECONNECT_DELAY
 
@@ -257,17 +331,21 @@ class WebSocketClient:
             logger.warning("Cannot subscribe: not connected")
             return False
 
-        # Build subscription message
-        message = {
-            "type": "market",
+        # Build subscription message with custom features flag if enabled
+        message: Dict[str, Any] = {
             "assets_ids": token_ids,
         }
+
+        if self.custom_features:
+            message["custom_feature_enabled"] = True
+        else:
+            message["type"] = "market"
 
         try:
             await self._ws.send(json.dumps(message))
             self._subscribed_tokens.update(token_ids)
 
-            logger.info(f"Subscribed to {len(token_ids)} tokens")
+            logger.info(f"Subscribed to {len(token_ids)} tokens (custom_features={self.custom_features})")
             return True
 
         except Exception as e:
@@ -369,8 +447,28 @@ class WebSocketClient:
     async def _process_single_message(self, data: dict) -> None:
         """Process a single message (not a list)."""
         try:
+            event_type = data.get("event_type")
+
+            # Market resolved notification (custom feature)
+            if event_type == "market_resolved":
+                update = MarketResolved.from_message(data)
+                for callback in self._market_resolved_callbacks:
+                    try:
+                        callback(update)
+                    except Exception as e:
+                        logger.error(f"MarketResolved callback error: {e}")
+
+            # Trade update
+            elif event_type == "last_trade_price":
+                update = TradeUpdate.from_message(data)
+                for callback in self._trade_callbacks:
+                    try:
+                        callback(update)
+                    except Exception as e:
+                        logger.error(f"Trade callback error: {e}")
+
             # Book update - has bids/asks
-            if "bids" in data or "asks" in data:
+            elif "bids" in data or "asks" in data:
                 update = BookUpdate.from_message(data)
                 for callback in self._book_callbacks:
                     try:
@@ -387,14 +485,7 @@ class WebSocketClient:
                     except Exception as e:
                         logger.error(f"Price callback error: {e}")
 
-            # Trade update
-            elif data.get("event_type") == "last_trade_price":
-                update = TradeUpdate.from_message(data)
-                for callback in self._trade_callbacks:
-                    try:
-                        callback(update)
-                    except Exception as e:
-                        logger.error(f"Trade callback error: {e}")
+            # Silently ignore other event types (tick_size_change, etc.)
 
         except Exception as e:
             logger.error(f"Error processing message: {e}")

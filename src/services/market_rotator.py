@@ -139,6 +139,8 @@ class MarketRotator:
         market_window_minutes: float = DEFAULT_MARKET_WINDOW_MINUTES,
         schedule: Optional[TradingSchedule] = None,
         on_rotation: Optional[Callable[[RotationEvent], None]] = None,
+        session_start_utc: Optional[datetime] = None,
+        session_end_utc: Optional[datetime] = None,
     ):
         """
         Initialize MarketRotator.
@@ -151,6 +153,8 @@ class MarketRotator:
             market_window_minutes: Only consider markets ending within this window (default 60)
             schedule: Optional TradingSchedule to restrict trading hours/dates
             on_rotation: Callback when rotation occurs
+            session_start_utc: Optional UTC start time for session - only trade markets ending AFTER this
+            session_end_utc: Optional UTC end time for session - only trade markets ending BEFORE this
         """
         self.finder = finder
         self.continuous = continuous
@@ -159,6 +163,10 @@ class MarketRotator:
         self.market_window_minutes = market_window_minutes
         self.schedule = schedule
         self.on_rotation = on_rotation
+
+        # CRITICAL: Session time window for market selection enforcement
+        self.session_start_utc = session_start_utc
+        self.session_end_utc = session_end_utc
 
         # Session state
         self._current_market: Optional[BTCMarket] = None
@@ -259,24 +267,37 @@ class MarketRotator:
         Start a new trading session.
 
         Discovers available markets and initializes the first market.
+        If session_start_utc and session_end_utc are set, uses time-range based
+        market discovery to ONLY select markets within the configured window.
 
         Returns:
             True if session started successfully, False if no markets available
         """
         logger.info("Starting new trading session")
 
-        # Discover markets
-        if self.continuous:
-            # Continuous mode: use rolling window
+        # CRITICAL: Use time-range based discovery if session window is configured
+        if self.session_start_utc and self.session_end_utc:
+            logger.info(
+                f"Using time-range market selection: "
+                f"{self.session_start_utc.isoformat()} to {self.session_end_utc.isoformat()}"
+            )
+            self._available_markets = await self.finder.get_markets_in_time_range(
+                start_utc=self.session_start_utc,
+                end_utc=self.session_end_utc,
+            )
+        else:
+            # Fallback to rolling window approach
             window_hours = self.market_window_minutes / 60.0
             self._available_markets = await self.finder.get_markets_in_window(
                 hours=window_hours,
             )
-        else:
-            # Session mode: find all active markets up to limit
-            self._available_markets = await self.finder.find_btc_15min_markets(
-                active_only=True,
-                limit=self.max_markets + 2,
+
+        # If no markets in window, log warning but don't fall back to all markets
+        # This prevents trading on markets that are hours away
+        if not self._available_markets:
+            logger.warning(
+                f"No markets found within configured time window. "
+                "Will not trade on out-of-range markets."
             )
 
         if not self._available_markets:
@@ -327,10 +348,15 @@ class MarketRotator:
             logger.debug(f"Market {self._current_market.slug} expired")
             return True
 
-        # Check if market no longer accepting orders
+        # Only rotate on accepting_orders=False if < 60 seconds remaining
+        # Polymarket API sets accepting_orders=False 7-10 min early - ignore until near end
         if not self._current_market.accepting_orders:
-            logger.debug(f"Market {self._current_market.slug} not accepting orders")
-            return True
+            time_left = self._current_market.time_remaining()
+            if time_left < 60:
+                logger.debug(f"Market {self._current_market.slug} not accepting orders and {time_left:.0f}s remaining")
+                return True
+            else:
+                logger.debug(f"Market {self._current_market.slug} not accepting orders but {time_left:.0f}s remaining - waiting")
 
         return False
 
@@ -342,8 +368,10 @@ class MarketRotator:
         if self._current_market.is_expired():
             return RotationReason.MARKET_EXPIRED
 
+        # Only count as not accepting if < 60s remaining
         if not self._current_market.accepting_orders:
-            return RotationReason.MARKET_NOT_ACCEPTING
+            if self._current_market.time_remaining() < 60:
+                return RotationReason.MARKET_NOT_ACCEPTING
 
         return None
 
@@ -403,22 +431,21 @@ class MarketRotator:
         return True
 
     async def _find_next_market(self) -> Optional[BTCMarket]:
-        """Find the next market to rotate to within the window."""
-        # Refresh available markets
-        if self.continuous:
-            # Continuous mode: use rolling window
+        """Find the next market to rotate to within the configured time window."""
+        # CRITICAL: Use time-range based discovery if session window is configured
+        if self.session_start_utc and self.session_end_utc:
+            self._available_markets = await self.finder.get_markets_in_time_range(
+                start_utc=self.session_start_utc,
+                end_utc=self.session_end_utc,
+            )
+        else:
+            # Fallback to rolling window approach
             window_hours = self.market_window_minutes / 60.0
             self._available_markets = await self.finder.get_markets_in_window(
                 hours=window_hours,
             )
-        else:
-            # Session mode: find next active markets
-            self._available_markets = await self.finder.find_btc_15min_markets(
-                active_only=True,
-                limit=self.max_markets + 2,
-            )
 
-        # Filter out current market
+        # Filter out current market and expired markets
         candidates = [
             m for m in self._available_markets
             if not m.is_expired()
@@ -426,11 +453,14 @@ class MarketRotator:
         ]
 
         if not candidates:
+            logger.info("No more markets available within configured time window")
             return None
 
         # Return the one ending soonest
         candidates.sort(key=lambda m: m.end_time)
-        return candidates[0]
+        next_market = candidates[0]
+        logger.debug(f"Next market candidate: {next_market.slug}")
+        return next_market
 
     def is_session_complete(self) -> bool:
         """

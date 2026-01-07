@@ -1,0 +1,37 @@
+{
+  "strategy_name": "standard",
+  "trading_mode": "live",
+  "balance": 200.815347,
+  "initial_balance": 170.0,
+  "realized_pnl": 0.0,
+  "session_start": "2026-01-05T13:24:29.317333+00:00",
+  "last_save": "2026-01-05T13:31:55.143583+00:00",
+  "trade_count": 4,
+  "current_market_slug": "btc-updown-15m-1767619800",
+  "positions": {
+    "btc-updown-15m-1767618900": {
+      "market_slug": "btc-updown-15m-1767618900",
+      "up_shares": 5.0,
+      "up_avg_price": 0.45999999999999996,
+      "down_shares": 0.0,
+      "down_avg_price": 0.0,
+      "hedged_pairs": 0.0,
+      "pair_cost": 0,
+      "locked_profit": 0.0,
+      "last_updated": "2026-01-05T13:26:20.145987+00:00"
+    },
+    "btc-updown-15m-1767619800": {
+      "market_slug": "btc-updown-15m-1767619800",
+      "up_shares": 10.0,
+      "up_avg_price": 0.45,
+      "down_shares": 5.0,
+      "down_avg_price": 0.51,
+      "hedged_pairs": 5.0,
+      "pair_cost": 0.96,
+      "locked_profit": 0.20000000000000018,
+      "last_updated": "2026-01-05T13:31:55.143562+00:00"
+    }
+  },
+  "recent_trades": [],
+  "version": 1
+}

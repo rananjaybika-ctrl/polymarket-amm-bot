@@ -314,6 +314,192 @@ def check_prospective_pair_cost(
     return (True, prospective_pair_cost, "OK")
 
 
+def check_prospective_pair_cost_with_market(
+    side: str,
+    buy_price: float,
+    other_side_best_ask: float,
+    max_pair_cost: float = 0.98
+) -> Tuple[bool, float, str]:
+    """
+    Check if buying would result in unprofitable hedge at CURRENT market prices.
+
+    This is the key protection against trending markets. Instead of checking
+    against average price already held, we check what the hedge would actually
+    cost RIGHT NOW.
+
+    Based on Telegram alpha insight:
+    "If you are trying to buy the cheap side first while the expensive goes up
+    you'll lose the leg"
+
+    Args:
+        side: "UP" or "DOWN" - which side we're about to buy
+        buy_price: Price we're about to pay for this side
+        other_side_best_ask: Current best ask for the OTHER side (hedge cost)
+        max_pair_cost: Maximum acceptable pair cost (default $0.98)
+
+    Returns:
+        Tuple of (should_buy, prospective_pair_cost, reason)
+
+    Example:
+        # Market trending: UP at 85c, DOWN at 20c
+        # We're about to buy DOWN at 20c
+        >>> check_prospective_pair_cost_with_market(
+        ...     side="DOWN",
+        ...     buy_price=0.20,
+        ...     other_side_best_ask=0.85,  # UP ask
+        ...     max_pair_cost=0.98
+        ... )
+        (False, 1.05, "Hedge at market would cost $1.050 > $0.980")
+
+        # Market neutral: UP at 52c, DOWN at 47c
+        >>> check_prospective_pair_cost_with_market(
+        ...     side="DOWN",
+        ...     buy_price=0.47,
+        ...     other_side_best_ask=0.52,  # UP ask
+        ...     max_pair_cost=0.98
+        ... )
+        (True, 0.99, "OK - hedge at market costs $0.990")
+    """
+    # Calculate what pair cost would be if we bought this AND hedged at market
+    prospective_pair_cost = buy_price + other_side_best_ask
+
+    # BLOCK if completing hedge at market would exceed max pair cost
+    if prospective_pair_cost > max_pair_cost:
+        return (
+            False,
+            prospective_pair_cost,
+            f"Hedge at market would cost ${prospective_pair_cost:.3f} > ${max_pair_cost:.3f}"
+        )
+
+    # Allow if hedge is still profitable
+    profit = 1.0 - prospective_pair_cost
+    return (
+        True,
+        prospective_pair_cost,
+        f"OK - hedge at market costs ${prospective_pair_cost:.3f} (profit ${profit:.3f})"
+    )
+
+
+def get_dynamic_target_shares(
+    base_target: int,
+    trend_state: 'TrendState',
+    time_remaining_secs: float = 900.0,
+) -> int:
+    """
+    Reduce target shares in trending conditions.
+
+    Answers user question: "How to stop at 10/10 instead of 15/15 if
+    prospective pair cost exceeds limit?"
+
+    Args:
+        base_target: Normal target shares (e.g., 15)
+        trend_state: Current trend state from TrendDetector
+        time_remaining_secs: Time left in market (for additional late reduction)
+
+    Returns:
+        Adjusted target shares
+
+    Examples:
+        >>> from src.services.trend_detector import TrendState
+        >>> get_dynamic_target_shares(15, TrendState.NEUTRAL)
+        15
+        >>> get_dynamic_target_shares(15, TrendState.STRONG)
+        10
+        >>> get_dynamic_target_shares(15, TrendState.EXTREME)
+        5  # Rounded down to multiple of 5
+        >>> get_dynamic_target_shares(15, TrendState.STRONG, time_remaining_secs=120)
+        5  # Further reduced late in market, rounded to multiple of 5
+    """
+    # Import here to avoid circular dependency
+    try:
+        from src.services.trend_detector import TrendState
+    except ImportError:
+        # Fallback if TrendDetector not available
+        return base_target
+
+    # Reduction factors by trend state
+    reductions = {
+        TrendState.NEUTRAL: 1.0,   # 15/15 - full target
+        TrendState.MILD: 0.85,     # ~12.75 → 10 (rounded down)
+        TrendState.STRONG: 0.67,   # ~10 - significant reduction
+        TrendState.EXTREME: 0.50,  # ~7.5 → 5 (rounded down)
+    }
+
+    factor = reductions.get(trend_state, 1.0)
+
+    # Further reduce if late in market (less time to hedge safely)
+    if time_remaining_secs < 300:  # Last 5 minutes
+        factor *= 0.8
+
+    raw_target = int(base_target * factor)
+
+    # Round DOWN to nearest multiple of SIZE_INCREMENT (5)
+    # e.g., 12 → 10, 7 → 5, 10 → 10
+    rounded_target = (raw_target // SIZE_INCREMENT) * SIZE_INCREMENT
+
+    return max(MIN_ORDER_SIZE, rounded_target)
+
+
+def calculate_fair_value(
+    price_vs_strike_pct: float,
+    time_remaining_secs: float,
+    sensitivity_early: float = 0.10,
+    sensitivity_late: float = 0.50,
+) -> Tuple[float, float]:
+    """
+    Calculate fair value for UP and DOWN based on Binance signal.
+
+    For 15-min BTC binary markets:
+    - BTC above strike → UP wins ($1), DOWN loses ($0)
+    - Fair value = probability of winning
+
+    The sensitivity increases as time runs out:
+    - Early: small adjustment (time for reversal)
+    - Late: large adjustment (direction likely final)
+
+    Args:
+        price_vs_strike_pct: BTC % change from strike (e.g., +0.5 means BTC up 0.5%)
+        time_remaining_secs: Seconds until resolution (0-900)
+        sensitivity_early: Price sensitivity at market open (default 0.10)
+        sensitivity_late: Price sensitivity near resolution (default 0.50)
+
+    Returns:
+        (fair_up, fair_down): Fair values for each side
+
+    Examples:
+        >>> calculate_fair_value(0.0, 900)  # At strike, 15 min left
+        (0.50, 0.50)
+        >>> calculate_fair_value(0.5, 900)  # BTC +0.5%, 15 min left
+        (0.55, 0.45)
+        >>> calculate_fair_value(0.5, 300)  # BTC +0.5%, 5 min left
+        (0.65, 0.35)
+        >>> calculate_fair_value(1.0, 120)  # BTC +1%, 2 min left
+        (0.80, 0.20)
+    """
+    # Clamp time to valid range
+    time_remaining_secs = max(0, min(MARKET_DURATION, time_remaining_secs))
+
+    # Sensitivity increases as time runs out (linear interpolation)
+    # Early (900s): sensitivity_early, Late (0s): sensitivity_late
+    time_factor = 1 - (time_remaining_secs / MARKET_DURATION)
+    sensitivity = sensitivity_early + (sensitivity_late - sensitivity_early) * time_factor
+
+    # Calculate fair value adjustment
+    # price_vs_strike_pct is already a percentage (e.g., 0.5 = 0.5%)
+    # We convert to probability adjustment (e.g., +0.5% with sensitivity 0.10 = +0.05 probability)
+    adjustment = price_vs_strike_pct * sensitivity
+
+    # Calculate fair values
+    fair_up = 0.50 + adjustment
+    fair_down = 0.50 - adjustment
+
+    # Clamp to valid range [0.05, 0.95] - never go to extremes
+    fair_up = max(0.05, min(0.95, fair_up))
+    fair_down = max(0.05, min(0.95, fair_down))
+
+    return fair_up, fair_down
+
+
 # =============================================================================
 # STRATEGY CLASS
 # =============================================================================
@@ -364,14 +550,25 @@ class CalculusMakerStrategy:
         max_shares: int = DEFAULT_MAX_SHARES,
         min_shares: int = DEFAULT_MIN_SHARES,
         max_pair_cost: float = 1.0,
+        m_min: float = None,
+        m_max: float = None,
+        lambda_decay: float = None,
     ):
         self.max_shares = max_shares
         self.min_shares = max(min_shares, MIN_ORDER_SIZE)
         self.max_pair_cost = max_pair_cost
 
+        # Instance-level threshold params (avoids global mutation)
+        self.m_min = m_min if m_min is not None else M_MIN
+        self.m_max = m_max if m_max is not None else M_MAX
+        self.lambda_decay = lambda_decay if lambda_decay is not None else LAMBDA
+
     def get_threshold(self, time_remaining: float) -> float:
-        """Get mispricing threshold for current time."""
-        return get_mispricing_threshold(time_remaining)
+        """Get mispricing threshold using instance parameters."""
+        t = max(0, min(time_remaining, MARKET_DURATION))
+        return self.m_min + (self.m_max - self.m_min) * math.exp(
+            -self.lambda_decay * (MARKET_DURATION - t)
+        )
 
     def get_size(self, time_remaining: float) -> int:
         """Get order size for current time (small early, ramp up late)."""
@@ -390,10 +587,12 @@ class CalculusMakerStrategy:
         return get_calculus_price(best_bid, time_remaining, is_emergency, best_ask)
 
     def should_buy(self, pair_cost: float, time_remaining: float) -> bool:
-        """Check if should buy at current conditions."""
+        """Check if should buy at current conditions (uses instance params)."""
         if pair_cost > self.max_pair_cost:
             return False
-        return should_buy_calculus(pair_cost, time_remaining)
+        threshold = self.get_threshold(time_remaining)
+        mispricing = 1.0 - pair_cost
+        return mispricing >= threshold
 
     def evaluate(
         self,
