@@ -114,5 +114,34 @@ T=1.4s: Quote pull check finally runs, z=2.5
 ## Status
 - [x] Implement OR filter in trend_detector.py
 - [x] Deploy to AWS
-- [ ] Add high-frequency quote check inside main loop
-- [ ] Consider event-driven WebSocket for fastest reaction
+- [x] Implement event-driven WebSocket (Solution #1)
+- [x] BinanceClient.on_z_threshold_crossed() - fires on z >= 2.0
+- [x] LiveTradingEngine.event_driven_pull() - cancels opposite side
+- [x] Bot registers callback on market entry, tears down on rotation
+
+## Architecture Summary
+```
+Binance WebSocket tick (~100ms interval)
+         │
+         ▼
+BinanceClient._receive_loop()
+         │
+         ▼
+_check_z_threshold_and_fire()
+         │
+    z crossed 2.0?
+         │
+    ┌────┴────┐
+    │ YES     │ NO
+    ▼         ▼
+Fire callback  Continue
+         │
+         ▼
+on_z_threshold() [in run_paper_bot.py]
+         │
+         ▼
+asyncio.create_task(engine.event_driven_pull())
+         │
+         ▼
+Cancel order on opposite side (~100-200ms total)
+```
