@@ -71,6 +71,7 @@ from src.strategies.calculus_maker import (
     calculate_fair_value,
 )
 from src.services.trend_detector import TrendDetector, TrendState, TrendDirection
+from src.api.websocket_client import UserWebSocketClient, OrderFill
 from src.utils.market_detector import MarketTypeDetector
 from src.services.health_monitor import get_health_monitor, HealthMonitor
 from src.services.auto_redeemer import AutoRedeemer
@@ -432,6 +433,7 @@ class PaperTradingBot:
         accum_pair_cost_target: float = 0.995,  # Target pair cost for normal trading
         accum_pair_cost_limit: float = 1.02,  # Max pair cost for rebalancing
         accum_max_imbalance_pct: float = 0.20,  # Max imbalance as % of target (20% = 6 shares)
+        hard_max_imbalance: int = 10,  # HARD LIMIT: Stop ALL trading if imbalance >= this
         accum_target_shares: int = 50,  # Target shares per side per market (capped by max_position_pct)
         accum_buy_both_sides: bool = True,  # Try to buy both sides each cycle
         max_position_pct: float = 0.17,  # Max shares per side as % of balance (17% of $100 = 17 shares)
@@ -470,7 +472,8 @@ class PaperTradingBot:
         # Set to False to revert to parallel ordering (place both sides simultaneously)
         # When True: prevents asymmetric fills but may reduce total volume
         # Risk: expensive side may stall, blocking all accumulation
-        sequential_ordering_enabled: bool = False,  # DISABLED - parallel mode is safer
+        # NOTE: Changed to True after 30/10 disaster - parallel mode caused asymmetric fills
+        sequential_ordering_enabled: bool = True,  # ENABLED - prevents asymmetric fills
         # MAX DAILY LOSS - Stop trading if cumulative loss exceeds this amount
         # Set to 0 to disable the limit
         # When limit is hit, bot stops placing new orders but keeps existing positions
@@ -521,6 +524,7 @@ class PaperTradingBot:
         self.accum_pair_cost_target = accum_pair_cost_target
         self.accum_pair_cost_limit = accum_pair_cost_limit
         self.accum_max_imbalance_pct = accum_max_imbalance_pct
+        self.hard_max_imbalance = hard_max_imbalance  # HARD LIMIT: Stop ALL trading if imbalance >= this
         self.max_position_pct = max_position_pct
         # Calculate max allowed shares from max_position_pct (15% of $100 = 15 shares)
         max_shares_from_pct = int(max_position_pct * initial_balance)
@@ -612,6 +616,14 @@ class PaperTradingBot:
         # Event-driven quote pull tracking (100-200ms reaction time)
         self._event_pull_market: Optional[str] = None  # Current market for event callbacks
         self._event_pull_callback: Optional[Callable] = None  # Stored callback reference
+
+        # User WebSocket for instant fill notifications (replaces 2-second polling)
+        self._user_ws: Optional[UserWebSocketClient] = None
+        self._user_ws_task: Optional[asyncio.Task] = None
+        self._ws_fill_queue: asyncio.Queue = asyncio.Queue()  # For async fill notifications
+
+        # HARD STOP log throttling (once per 60s to avoid log spam)
+        self._last_hard_stop_log: float = 0.0
 
         # Calculus MAKER strategy instance (also used by fair_value_mm mode)
         self._calculus_strategy: Optional[CalculusMakerStrategy] = None
@@ -946,6 +958,7 @@ class PaperTradingBot:
             accum_trade_size=config.get("accum_trade_size", 1),
             accum_target_shares=config.get("accum_target_shares", 15),
             accum_max_imbalance_pct=config.get("accum_max_imbalance_pct", 0.15),
+            hard_max_imbalance=config.get("hard_max_imbalance", 10),
             accum_pair_cost_target=config.get("accum_pair_cost_target", 0.995),
             accum_pair_cost_limit=config.get("accum_pair_cost_limit", 1.02),
             accum_buy_both_sides=config.get("accum_buy_both_sides", True),
@@ -1069,15 +1082,16 @@ class PaperTradingBot:
             # When OFF: jumps to ask immediately, fills both sides or neither
             gradual_chase_enabled=config.get("gradual_chase_enabled", False),
             # Sequential ordering: place expensive side first, wait for fill before cheap side
-            # When OFF (default): place both sides simultaneously - simpler and safer
-            # When ON: prevents asymmetric fills but can get stuck
-            sequential_ordering_enabled=config.get("sequential_ordering_enabled", False),
+            # When ON (default): prevents asymmetric fills (30/10 disaster fix)
+            # When OFF: place both sides simultaneously - faster but risky
+            sequential_ordering_enabled=config.get("sequential_ordering_enabled", True),
             # Max daily loss: stop trading if cumulative loss exceeds this amount
             # Stops placing new orders but keeps existing positions
             max_daily_loss=config.get("max_daily_loss", 10.0),
             # General parameters
             accum_max_share_price=config.get("max_share_price", 0.98),
             accum_max_imbalance_pct=config.get("max_imbalance_pct", 0.20),
+            hard_max_imbalance=config.get("hard_max_imbalance", 10),
             accum_target_shares=config.get("max_shares", 50),
             # Output - use trading_mode to determine CSV prefix
             csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_calculus_maker.csv",
@@ -1140,6 +1154,7 @@ class PaperTradingBot:
             # General parameters
             accum_max_share_price=config.get("max_share_price", 0.98),
             accum_max_imbalance_pct=config.get("max_imbalance_pct", 0.20),
+            hard_max_imbalance=config.get("hard_max_imbalance", 10),
             accum_target_shares=config.get("max_shares", 50),
             # Output
             csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_fair_value_mm.csv",
@@ -2453,6 +2468,10 @@ class PaperTradingBot:
                 f"{self._config.auto_redeem_interval_minutes:.0f} minutes"
             )
 
+        # Start user WebSocket for instant fill notifications (live mode only)
+        if self.trading_mode == "live":
+            await self._setup_user_websocket()
+
         # Start rotator session
         if not await self._rotator.start_session():
             logger.error("Failed to start session - no markets available")
@@ -2685,6 +2704,33 @@ class PaperTradingBot:
         current_down = position.down_size if position else 0.0
         current_up_cost = position.up_cost if position else 0.0
         current_down_cost = position.down_cost if position else 0.0
+
+        # ============================================================================
+        # HARD MAX IMBALANCE LIMIT (CRITICAL SAFETY - First line of defense)
+        # ============================================================================
+        # If imbalance exceeds this, STOP ALL trading immediately.
+        # This prevents runaway accumulation like the 30 UP / 10 DOWN disaster.
+        # The predictive blocking at line ~3500 failed because:
+        #   1. It only blocked ONE side (the surplus side)
+        #   2. It was predictive (assumed both orders fill) not reactive
+        #   3. VPS speed meant cycle completed before fills, using stale position data
+        # This hard limit catches all edge cases by checking ACTUAL position.
+        # ============================================================================
+        hard_max = self.hard_max_imbalance  # Configurable via web UI (default 10)
+        current_imbalance = abs(current_up - current_down)
+        if current_imbalance >= hard_max:
+            # Throttle log to once per 60 seconds to avoid spam
+            now = time.time()
+            if now - self._last_hard_stop_log >= 60:
+                logger.critical(
+                    f"🛑 HARD STOP: Imbalance {current_imbalance:.0f} >= {hard_max} "
+                    f"(UP={current_up:.0f}, DOWN={current_down:.0f}). "
+                    f"NO NEW ORDERS until balanced. Manual intervention may be required."
+                )
+                self._last_hard_stop_log = now
+            # Update display to show we're stopped
+            self._update_live_display()
+            return  # Don't place ANY orders - wait for fills or manual intervention
 
         # Always update display at start of cycle to keep time_remaining in sync
         # This is critical - without it, early returns cause stale time to be shown
@@ -3492,41 +3538,69 @@ class PaperTradingBot:
             # FAIR VALUE MM: Skip ALL imbalance checks - this strategy is DESIGNED to be directional
             # It only buys undervalued sides, so imbalance is expected and intentional
             logger.debug(f"[FV_MM] Skipping imbalance check - directional strategy")
-        elif buy_up and buy_down:
-            # Buying both sides - check NET imbalance after both trades
-            new_up = current_up + up_buy_size
-            new_down = current_down + down_buy_size
-            net_imbalance = abs(new_up - new_down)
-            if net_imbalance > max_imbalance:
-                # Block whichever side creates more imbalance
-                if new_up > new_down:
-                    buy_up = False
-                    logger.info(f"⛔ {mode_label} BLOCKED UP: net imbalance {net_imbalance:.0f} > limit {max_imbalance}")
-                else:
-                    buy_down = False
-                    logger.info(f"⛔ {mode_label} BLOCKED DOWN: net imbalance {net_imbalance:.0f} > limit {max_imbalance}")
         else:
-            # Buying only one side - check individual imbalance
-            # IMPORTANT: Allow trades that REDUCE imbalance, even if result still > limit
+            # ============================================================================
+            # IMBALANCE BLOCKING (FIXED: Block BOTH sides when imbalanced)
+            # ============================================================================
+            # BUG FIX: Previously only blocked the surplus side, letting the other through.
+            # This caused 30 UP / 10 DOWN because UP kept filling while DOWN didn't.
+            #
+            # NEW LOGIC:
+            # 1. If currently imbalanced, block BOTH sides unless trade REDUCES imbalance
+            # 2. Never let one side run ahead while waiting for the other to catch up
+            # 3. Only trades that bring us closer to balance are allowed
+            # ============================================================================
             current_imbalance = abs(current_up - current_down)
-            if buy_up:
+
+            # Calculate what imbalance would be after each trade
+            new_up_imbalance = abs((current_up + up_buy_size) - current_down) if buy_up else current_imbalance
+            new_down_imbalance = abs(current_up - (current_down + down_buy_size)) if buy_down else current_imbalance
+
+            # If already over limit, only allow trades that REDUCE imbalance
+            if current_imbalance > max_imbalance:
+                # We're already imbalanced - be very strict
+                if buy_up:
+                    if new_up_imbalance >= current_imbalance:
+                        buy_up = False
+                        logger.info(f"⛔ {mode_label} BLOCKED UP: imbalanced {current_imbalance:.0f} > limit, UP doesn't reduce")
+                    else:
+                        logger.info(f"✅ {mode_label} ALLOWING UP: reduces imbalance {current_imbalance:.0f} → {new_up_imbalance:.0f}")
+
+                if buy_down:
+                    if new_down_imbalance >= current_imbalance:
+                        buy_down = False
+                        logger.info(f"⛔ {mode_label} BLOCKED DOWN: imbalanced {current_imbalance:.0f} > limit, DOWN doesn't reduce")
+                    else:
+                        logger.info(f"✅ {mode_label} ALLOWING DOWN: reduces imbalance {current_imbalance:.0f} → {new_down_imbalance:.0f}")
+
+            # If buying both sides, check net result
+            elif buy_up and buy_down:
                 new_up = current_up + up_buy_size
-                new_imbalance = abs(new_up - current_down)
-                # Only block if trade would INCREASE imbalance (or not improve it)
-                if new_imbalance > max_imbalance and new_imbalance >= current_imbalance:
-                    buy_up = False
-                    logger.info(f"⛔ {mode_label} BLOCKED UP: would create imbalance {new_imbalance:.0f} > limit {max_imbalance}")
-                elif new_imbalance > max_imbalance:
-                    logger.info(f"✅ {mode_label} ALLOWING UP: reduces imbalance {current_imbalance:.0f} → {new_imbalance:.0f}")
-            if buy_down:
                 new_down = current_down + down_buy_size
-                new_imbalance = abs(current_up - new_down)
-                # Only block if trade would INCREASE imbalance (or not improve it)
-                if new_imbalance > max_imbalance and new_imbalance >= current_imbalance:
+                net_imbalance = abs(new_up - new_down)
+
+                if net_imbalance > max_imbalance:
+                    # CRITICAL FIX: Block BOTH sides, not just surplus side
+                    # This prevents runaway accumulation when one side fills and other doesn't
+                    buy_up = False
                     buy_down = False
-                    logger.info(f"⛔ {mode_label} BLOCKED DOWN: would create imbalance {new_imbalance:.0f} > limit {max_imbalance}")
-                elif new_imbalance > max_imbalance:
-                    logger.info(f"✅ {mode_label} ALLOWING DOWN: reduces imbalance {current_imbalance:.0f} → {new_imbalance:.0f}")
+                    surplus_side = "UP" if new_up > new_down else "DOWN"
+                    logger.info(
+                        f"⛔ {mode_label} BLOCKED BOTH: net imbalance {net_imbalance:.0f} > limit {max_imbalance} "
+                        f"({surplus_side} surplus). Waiting for balance."
+                    )
+
+            # Buying only one side - check if it would exceed limit
+            else:
+                if buy_up:
+                    if new_up_imbalance > max_imbalance:
+                        buy_up = False
+                        logger.info(f"⛔ {mode_label} BLOCKED UP: would create imbalance {new_up_imbalance:.0f} > limit {max_imbalance}")
+
+                if buy_down:
+                    if new_down_imbalance > max_imbalance:
+                        buy_down = False
+                        logger.info(f"⛔ {mode_label} BLOCKED DOWN: would create imbalance {new_down_imbalance:.0f} > limit {max_imbalance}")
 
         # Execute trades with DYNAMIC ORDERING
         # Buy cheaper side first to minimize slippage risk
@@ -3555,31 +3629,183 @@ class PaperTradingBot:
         pending_trades = []
 
         if self.sequential_ordering_enabled:
-            # SEQUENTIAL ORDER EXECUTION (FEATURE FLAG: sequential_ordering_enabled=True)
-            # Place expensive side first, wait for fill before placing cheap side
-            # Prevents asymmetric fills but may reduce volume if expensive side stalls
-            # To disable: set sequential_ordering_enabled=False in config
+            # ============================================================================
+            # FILL-VERIFIED SEQUENTIAL PAIRING (30/10 disaster fix)
+            # ============================================================================
+            # BUG FIX: Previous logic used position to decide ordering, but position
+            # doesn't update until fills propagate (2+ seconds). On fast VPS, multiple
+            # cycles could run before position updated, placing duplicate expensive orders.
+            #
+            # NEW LOGIC:
+            # 1. Track pending orders per market
+            # 2. If expensive side has pending order, DON'T place anything new
+            # 3. Only when expensive side CONFIRMED FILLED, place hedge
+            # 4. Uses pending order tracking instead of stale position data
+            # ============================================================================
 
             up_is_expensive = raw_up_ask >= raw_down_ask
-            up_shares = current_up
-            down_shares = current_down
+            expensive_side = "UP" if up_is_expensive else "DOWN"
+            cheap_side = "DOWN" if up_is_expensive else "UP"
 
-            if up_is_expensive:
-                # UP is expensive - place UP first, DOWN only after UP is ahead
-                if up_shares <= down_shares and up_order:
-                    pending_trades.append(up_order)
-                    logger.debug(f"[SEQ_ORDER] UP is expensive (${raw_up_ask:.2f}), placing UP first (UP={up_shares}, DOWN={down_shares})")
-                elif up_shares > down_shares and down_order:
-                    pending_trades.append(down_order)
-                    logger.debug(f"[SEQ_ORDER] UP filled, now placing DOWN to catch up (UP={up_shares}, DOWN={down_shares})")
+            # Initialize pending order tracking if not exists
+            if not hasattr(self, '_pending_expensive_orders'):
+                self._pending_expensive_orders = {}  # market_slug -> {"side": str, "placed_at": time}
+
+            pending_key = market.slug
+            pending_info = self._pending_expensive_orders.get(pending_key)
+
+            # Check if we have a pending expensive order
+            if pending_info:
+                pending_side = pending_info["side"]
+                pending_time = pending_info.get("placed_at", 0)
+                pending_age = time.time() - pending_time
+
+                # Check if it filled (position increased for that side)
+                if pending_side == "UP":
+                    expected_fill = pending_info.get("expected_size", 5)
+                    # Check against last known position
+                    last_pos = pending_info.get("position_when_placed", 0)
+                    if current_up > last_pos:
+                        # Expensive side filled! Clear tracking, place hedge
+                        del self._pending_expensive_orders[pending_key]
+                        filled_amount = current_up - last_pos
+                        logger.info(
+                            f"[SEQ_PAIR] ✓ Expensive UP filled +{filled_amount:.0f} "
+                            f"(position {last_pos:.0f} → {current_up:.0f}). Now placing DOWN hedge."
+                        )
+                        # FORCE hedge even if down_order is None (buy_down was blocked)
+                        if down_order:
+                            pending_trades.append(down_order)
+                        else:
+                            # Create forced hedge order
+                            hedge_size = min(filled_amount, down_buy_size) if down_buy_size > 0 else filled_amount
+                            hedge_size = max(5, int(hedge_size))
+                            forced_order = {
+                                "side": "DOWN",
+                                "price": down_price if down_price > 0 else raw_down_ask,
+                                "size": hedge_size,
+                                "best_ask": raw_down_ask,
+                                "best_bid": raw_down_bid,
+                            }
+                            pending_trades.append(forced_order)
+                            logger.info(f"[SEQ_PAIR] FORCED DOWN hedge (buy_down was blocked)")
+                    elif pending_age > 30:
+                        # Timeout - expensive side didn't fill in 30s, cancel and reset
+                        del self._pending_expensive_orders[pending_key]
+                        logger.warning(
+                            f"[SEQ_PAIR] ⏱ Expensive UP timed out after {pending_age:.0f}s. "
+                            f"Resetting - will retry next cycle."
+                        )
+                        # Don't place anything this cycle
+                    else:
+                        # Still waiting for fill
+                        logger.debug(
+                            f"[SEQ_PAIR] Waiting for UP to fill ({pending_age:.0f}s elapsed, "
+                            f"pos still {current_up:.0f})"
+                        )
+                        # Don't place anything
+                else:  # pending_side == "DOWN"
+                    last_pos = pending_info.get("position_when_placed", 0)
+                    if current_down > last_pos:
+                        # Expensive side filled! Clear tracking, place hedge
+                        del self._pending_expensive_orders[pending_key]
+                        filled_amount = current_down - last_pos
+                        logger.info(
+                            f"[SEQ_PAIR] ✓ Expensive DOWN filled +{filled_amount:.0f} "
+                            f"(position {last_pos:.0f} → {current_down:.0f}). Now placing UP hedge."
+                        )
+                        # FORCE hedge even if up_order is None (buy_up was blocked)
+                        if up_order:
+                            pending_trades.append(up_order)
+                        else:
+                            # Create forced hedge order
+                            hedge_size = min(filled_amount, up_buy_size) if up_buy_size > 0 else filled_amount
+                            hedge_size = max(5, int(hedge_size))
+                            forced_order = {
+                                "side": "UP",
+                                "price": up_price if up_price > 0 else raw_up_ask,
+                                "size": hedge_size,
+                                "best_ask": raw_up_ask,
+                                "best_bid": raw_up_bid,
+                            }
+                            pending_trades.append(forced_order)
+                            logger.info(f"[SEQ_PAIR] FORCED UP hedge (buy_up was blocked)")
+                    elif pending_age > 30:
+                        # Timeout
+                        del self._pending_expensive_orders[pending_key]
+                        logger.warning(
+                            f"[SEQ_PAIR] ⏱ Expensive DOWN timed out after {pending_age:.0f}s. "
+                            f"Resetting - will retry next cycle."
+                        )
+                    else:
+                        logger.debug(
+                            f"[SEQ_PAIR] Waiting for DOWN to fill ({pending_age:.0f}s elapsed, "
+                            f"pos still {current_down:.0f})"
+                        )
             else:
-                # DOWN is expensive - place DOWN first, UP only after DOWN is ahead
-                if down_shares <= up_shares and down_order:
-                    pending_trades.append(down_order)
-                    logger.debug(f"[SEQ_ORDER] DOWN is expensive (${raw_down_ask:.2f}), placing DOWN first (UP={up_shares}, DOWN={down_shares})")
-                elif down_shares > up_shares and up_order:
-                    pending_trades.append(up_order)
-                    logger.debug(f"[SEQ_ORDER] DOWN filled, now placing UP to catch up (UP={up_shares}, DOWN={down_shares})")
+                # No pending order - check if balanced or need to start expensive side
+                if current_up == current_down:
+                    # Balanced - place expensive side first
+                    expensive_order = up_order if expensive_side == "UP" else down_order
+                    if expensive_order:
+                        pending_trades.append(expensive_order)
+                        # Track this as pending
+                        self._pending_expensive_orders[pending_key] = {
+                            "side": expensive_side,
+                            "placed_at": time.time(),
+                            "position_when_placed": current_up if expensive_side == "UP" else current_down,
+                            "expected_size": expensive_order["size"],
+                        }
+                        logger.info(
+                            f"[SEQ_PAIR] Placing expensive {expensive_side} @ ${expensive_order['price']:.4f} "
+                            f"(will wait for fill before hedging)"
+                        )
+                elif current_up > current_down:
+                    # UP ahead - need DOWN to catch up (DOWN is the hedge)
+                    # FORCE hedge order even if buy_down was blocked - hedging is mandatory!
+                    if down_order:
+                        pending_trades.append(down_order)
+                        logger.debug(f"[SEQ_PAIR] Placing DOWN hedge (UP={current_up:.0f}, DOWN={current_down:.0f})")
+                    else:
+                        # buy_down was blocked, but we MUST hedge - create forced order
+                        imbal = current_up - current_down
+                        hedge_size = min(imbal, buy_size, down_buy_size) if buy_size > 0 else min(imbal, down_buy_size)
+                        hedge_size = max(5, int(hedge_size))  # Polymarket minimum
+                        forced_order = {
+                            "side": "DOWN",
+                            "price": down_price if down_price > 0 else raw_down_ask,
+                            "size": hedge_size,
+                            "best_ask": raw_down_ask,
+                            "best_bid": raw_down_bid,
+                        }
+                        pending_trades.append(forced_order)
+                        logger.info(
+                            f"[SEQ_PAIR] FORCED DOWN hedge (UP={current_up:.0f}, DOWN={current_down:.0f}) "
+                            f"- buy_down was blocked but hedge is mandatory!"
+                        )
+                else:
+                    # DOWN ahead - need UP to catch up (UP is the hedge)
+                    # FORCE hedge order even if buy_up was blocked - hedging is mandatory!
+                    if up_order:
+                        pending_trades.append(up_order)
+                        logger.debug(f"[SEQ_PAIR] Placing UP hedge (UP={current_up:.0f}, DOWN={current_down:.0f})")
+                    else:
+                        # buy_up was blocked, but we MUST hedge - create forced order
+                        imbal = current_down - current_up
+                        hedge_size = min(imbal, buy_size, up_buy_size) if buy_size > 0 else min(imbal, up_buy_size)
+                        hedge_size = max(5, int(hedge_size))  # Polymarket minimum
+                        forced_order = {
+                            "side": "UP",
+                            "price": up_price if up_price > 0 else raw_up_ask,
+                            "size": hedge_size,
+                            "best_ask": raw_up_ask,
+                            "best_bid": raw_up_bid,
+                        }
+                        pending_trades.append(forced_order)
+                        logger.info(
+                            f"[SEQ_PAIR] FORCED UP hedge (UP={current_up:.0f}, DOWN={current_down:.0f}) "
+                            f"- buy_up was blocked but hedge is mandatory!"
+                        )
         else:
             # PARALLEL ORDER EXECUTION (DEFAULT - sequential_ordering_enabled=False)
             # Place both sides simultaneously, sorted by price (expensive first)
@@ -3916,6 +4142,22 @@ class PaperTradingBot:
                             logger.info(f"[1BUY] ✅ DOWN FILLED at ${fill_price:.2f} → FULLY HEDGED pair_cost=${status['pair_cost']:.2f}")
                         else:
                             logger.info(f"[1BUY] ✅ DOWN FILLED at ${fill_price:.2f} → directional (waiting for UP)")
+            else:
+                # PAPER MODE FIX: Clear sequential pairing tracking if expensive order failed to fill
+                # This prevents 30-second timeout waiting for a fill that already failed
+                if (
+                    self.sequential_ordering_enabled and
+                    hasattr(self, '_pending_expensive_orders') and
+                    self.trading_mode == "paper"
+                ):
+                    pending_key = market.slug
+                    pending_info = self._pending_expensive_orders.get(pending_key)
+                    if pending_info and pending_info.get("side") == side:
+                        del self._pending_expensive_orders[pending_key]
+                        logger.debug(
+                            f"[SEQ_PAIR] Paper fill failed for {side}, cleared tracking. "
+                            f"Will retry next cycle."
+                        )
 
         # Log position status periodically
         if self._opportunities_checked % 10 == 0 or trades_made > 0:
@@ -3994,6 +4236,17 @@ class PaperTradingBot:
         current_down_cost = position.down_cost if position else 0.0
         up_avg = position.up_avg_price if position else 0.0
         down_avg = position.down_avg_price if position else 0.0
+
+        # HARD MAX IMBALANCE LIMIT (same as accumulation cycle)
+        hard_max = self.hard_max_imbalance  # Configurable via web UI (default 10)
+        current_imbalance = abs(current_up - current_down)
+        if current_imbalance >= hard_max:
+            logger.critical(
+                f"🛑 [DIRECTIONAL] HARD STOP: Imbalance {current_imbalance} >= {hard_max} "
+                f"(UP={current_up}, DOWN={current_down}). NO NEW ORDERS."
+            )
+            self._update_live_display()
+            return
 
         # Update strategy with current position
         self._directional_strategy.update_position(
@@ -4303,6 +4556,112 @@ class PaperTradingBot:
         self._event_pull_callback = None
         self._event_pull_market = None
 
+    async def _setup_user_websocket(self) -> bool:
+        """
+        Set up user WebSocket for instant fill notifications.
+
+        Replaces 2-second polling with ~100ms WebSocket callbacks.
+        Only active in LIVE mode.
+
+        Returns:
+            True if connected successfully
+        """
+        if self.trading_mode != "live":
+            return False
+
+        if self._user_ws is not None:
+            return self._user_ws.connected
+
+        # Get API credentials from config
+        try:
+            config = Config()
+            api_key = config.polymarket_api_key
+            api_secret = config.polymarket_secret
+            api_passphrase = config.polymarket_passphrase
+
+            if not all([api_key, api_secret, api_passphrase]):
+                logger.warning("[USER_WS] Missing API credentials, skipping WebSocket")
+                return False
+
+            # Create client
+            self._user_ws = UserWebSocketClient(
+                api_key=api_key,
+                api_secret=api_secret,
+                api_passphrase=api_passphrase,
+            )
+
+            # Register fill callback
+            def on_fill(fill: OrderFill):
+                """Handle fill notification from WebSocket."""
+                try:
+                    # Map outcome to side
+                    outcome_upper = fill.outcome.upper() if fill.outcome else ""
+                    if outcome_upper in ("YES", "UP"):
+                        fill_side = "UP"
+                    elif outcome_upper in ("NO", "DOWN"):
+                        fill_side = "DOWN"
+                    else:
+                        fill_side = fill.side
+
+                    # Put fill info in queue for main loop to process
+                    self._ws_fill_queue.put_nowait({
+                        "side": fill_side,
+                        "size": fill.size_matched,
+                        "price": fill.price,
+                        "status": fill.status,
+                        "order_id": fill.order_id,
+                        "timestamp": fill.timestamp,
+                    })
+
+                    # If this is a full fill for our pending expensive order, clear it immediately
+                    if hasattr(self, '_pending_expensive_orders'):
+                        for market_slug, info in list(self._pending_expensive_orders.items()):
+                            if info.get("side") == fill_side and fill.is_fully_filled:
+                                logger.info(
+                                    f"[USER_WS] ✓ Expensive {fill_side} confirmed filled via WebSocket! "
+                                    f"Clearing pending, hedge will be placed next cycle."
+                                )
+                                # Don't delete here - let the main loop handle it
+                                # to avoid race conditions
+                                break
+
+                except Exception as e:
+                    logger.error(f"[USER_WS] Fill callback error: {e}")
+
+            self._user_ws.on_fill(on_fill)
+
+            # Connect
+            connected = await self._user_ws.connect()
+            if not connected:
+                logger.warning("[USER_WS] Failed to connect")
+                return False
+
+            # Start the WebSocket loop in background
+            self._user_ws_task = asyncio.create_task(self._user_ws.run())
+            logger.info("[USER_WS] Started - instant fill notifications enabled (~100ms)")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"[USER_WS] Setup failed: {e}")
+            return False
+
+    async def _teardown_user_websocket(self) -> None:
+        """Disconnect user WebSocket."""
+        if self._user_ws:
+            await self._user_ws.disconnect()
+            self._user_ws = None
+
+        if self._user_ws_task:
+            self._user_ws_task.cancel()
+            try:
+                await self._user_ws_task
+            except asyncio.CancelledError:
+                pass
+            self._user_ws_task = None
+
+        logger.debug("[USER_WS] Disconnected")
+
     async def _handle_market_rotation(self, market) -> None:
         """Handle market rotation and position resolution with resilience."""
         old_market_slug = market.slug
@@ -4555,6 +4914,9 @@ class PaperTradingBot:
             await self._finder.close()
         if self._binance_client:
             await self._binance_client.disconnect()
+
+        # Disconnect user WebSocket
+        await self._teardown_user_websocket()
 
         # Final stats
         runtime = datetime.now(timezone.utc) - self._start_time if self._start_time else timedelta(0)

@@ -513,3 +513,308 @@ class WebSocketClient:
         """String representation."""
         status = "connected" if self.connected else "disconnected"
         return f"WebSocketClient({status}, subs={len(self._subscribed_tokens)})"
+
+
+# =============================================================================
+# USER WEBSOCKET CLIENT - Real-time fill notifications
+# =============================================================================
+
+@dataclass
+class OrderFill:
+    """Order fill notification from user WebSocket."""
+    order_id: str
+    token_id: str
+    side: str  # "BUY" or "SELL"
+    price: float
+    size_matched: float
+    original_size: float
+    status: str  # "LIVE", "MATCHED", "CANCELED"
+    outcome: str  # "Yes" or "No" (UP or DOWN)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @property
+    def is_fully_filled(self) -> bool:
+        return self.status == "MATCHED" or self.size_matched >= self.original_size
+
+    @property
+    def fill_pct(self) -> float:
+        return self.size_matched / self.original_size if self.original_size > 0 else 0
+
+
+# Callback type for fill notifications
+FillCallback = Callable[[OrderFill], None]
+
+
+class UserWebSocketClient:
+    """
+    WebSocket client for user-specific events (order fills, cancellations).
+
+    Connects to WS_USER_URL and provides instant fill notifications,
+    replacing the 2-second polling approach.
+
+    Usage:
+        client = UserWebSocketClient(api_key="...", api_secret="...", api_passphrase="...")
+        client.on_fill(lambda fill: print(f"Filled: {fill.side} {fill.size_matched} @ {fill.price}"))
+        await client.connect()
+        await client.run()
+    """
+
+    DEFAULT_RECONNECT_DELAY = 1.0
+    MAX_RECONNECT_DELAY = 30.0
+
+    def __init__(
+        self,
+        api_key: str,
+        api_secret: str,
+        api_passphrase: str,
+        auto_reconnect: bool = True,
+    ):
+        """
+        Initialize user WebSocket client.
+
+        Args:
+            api_key: Polymarket API key
+            api_secret: Polymarket API secret
+            api_passphrase: Polymarket API passphrase
+            auto_reconnect: Whether to auto-reconnect on disconnect
+        """
+        self.url = WS_USER_URL
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.api_passphrase = api_passphrase
+        self.auto_reconnect = auto_reconnect
+
+        self._ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._connected = False
+        self._running = False
+        self._authenticated = False
+
+        # Callbacks
+        self._fill_callbacks: List[FillCallback] = []
+
+        # Reconnect state
+        self._reconnect_delay = self.DEFAULT_RECONNECT_DELAY
+        self._reconnect_task: Optional[asyncio.Task] = None
+
+        # Track orders we're watching
+        self._watched_orders: Dict[str, dict] = {}  # order_id -> {side, token_id, ...}
+
+    @property
+    def connected(self) -> bool:
+        return self._connected and self._ws is not None and self._authenticated
+
+    def on_fill(self, callback: FillCallback) -> None:
+        """Register callback for fill notifications."""
+        self._fill_callbacks.append(callback)
+
+    def watch_order(self, order_id: str, side: str, token_id: str, size: float, price: float) -> None:
+        """
+        Add an order to watch for fills.
+
+        Args:
+            order_id: The order ID to watch
+            side: "UP" or "DOWN"
+            token_id: The token ID
+            size: Expected fill size
+            price: Order price
+        """
+        self._watched_orders[order_id] = {
+            "side": side,
+            "token_id": token_id,
+            "size": size,
+            "price": price,
+            "watched_at": datetime.now(timezone.utc),
+        }
+        logger.debug(f"[USER_WS] Watching order {order_id[:16]}... for {side} fill")
+
+    def unwatch_order(self, order_id: str) -> None:
+        """Stop watching an order."""
+        self._watched_orders.pop(order_id, None)
+
+    async def connect(self) -> bool:
+        """Connect to user WebSocket and authenticate."""
+        try:
+            logger.info(f"[USER_WS] Connecting to {self.url}")
+            self._ws = await websockets.connect(
+                self.url,
+                ping_interval=10,
+                ping_timeout=10,
+                open_timeout=10,
+                close_timeout=10,
+            )
+            self._connected = True
+            self._reconnect_delay = self.DEFAULT_RECONNECT_DELAY
+
+            # Authenticate
+            auth_message = {
+                "auth": {
+                    "apiKey": self.api_key,
+                    "secret": self.api_secret,
+                    "passphrase": self.api_passphrase,
+                }
+            }
+            await self._ws.send(json.dumps(auth_message))
+            logger.info("[USER_WS] Sent authentication")
+
+            # Wait for auth response
+            try:
+                response = await asyncio.wait_for(self._ws.recv(), timeout=5.0)
+                data = json.loads(response)
+                if data.get("error"):
+                    logger.error(f"[USER_WS] Auth failed: {data.get('error')}")
+                    self._authenticated = False
+                    return False
+                self._authenticated = True
+                logger.info("[USER_WS] Authenticated successfully")
+            except asyncio.TimeoutError:
+                logger.warning("[USER_WS] Auth response timeout, assuming success")
+                self._authenticated = True
+
+            return True
+
+        except Exception as e:
+            logger.error(f"[USER_WS] Connection failed: {e}")
+            self._connected = False
+            self._authenticated = False
+            return False
+
+    async def disconnect(self) -> None:
+        """Disconnect from WebSocket."""
+        self._running = False
+        self._connected = False
+        self._authenticated = False
+
+        if self._reconnect_task:
+            self._reconnect_task.cancel()
+            self._reconnect_task = None
+
+        if self._ws:
+            await self._ws.close()
+            self._ws = None
+
+        logger.info("[USER_WS] Disconnected")
+
+    async def run(self) -> None:
+        """Run the WebSocket event loop."""
+        self._running = True
+
+        while self._running:
+            try:
+                if not self._ws:
+                    if self.auto_reconnect:
+                        await self._reconnect()
+                    else:
+                        break
+                    continue
+
+                message = await self._ws.recv()
+                await self._handle_message(message)
+
+            except ConnectionClosed:
+                logger.warning("[USER_WS] Connection closed")
+                self._connected = False
+                self._authenticated = False
+
+                if self.auto_reconnect and self._running:
+                    await self._reconnect()
+                else:
+                    break
+
+            except Exception as e:
+                logger.error(f"[USER_WS] Error in loop: {e}")
+                if not self._running:
+                    break
+
+    async def _reconnect(self) -> None:
+        """Reconnect with exponential backoff."""
+        logger.info(f"[USER_WS] Reconnecting in {self._reconnect_delay:.1f}s...")
+        await asyncio.sleep(self._reconnect_delay)
+
+        self._reconnect_delay = min(
+            self._reconnect_delay * 2,
+            self.MAX_RECONNECT_DELAY,
+        )
+
+        await self.connect()
+
+    async def _handle_message(self, raw_message: str) -> None:
+        """Process incoming message."""
+        try:
+            data = json.loads(raw_message)
+
+            # Handle list of messages
+            if isinstance(data, list):
+                for item in data:
+                    await self._process_single_message(item)
+            else:
+                await self._process_single_message(data)
+
+        except json.JSONDecodeError as e:
+            logger.debug(f"[USER_WS] Invalid JSON: {e}")
+        except Exception as e:
+            logger.error(f"[USER_WS] Error handling message: {e}")
+
+    async def _process_single_message(self, data: dict) -> None:
+        """Process a single message."""
+        try:
+            event_type = data.get("event_type") or data.get("type")
+
+            # Order events (placement, update, cancellation)
+            if event_type == "order" or data.get("original_size") is not None:
+                order_id = data.get("id", "")
+                status = data.get("status", "")
+                size_matched = float(data.get("size_matched", 0))
+                original_size = float(data.get("original_size", 0))
+
+                # Check if this is a fill we care about
+                if size_matched > 0:
+                    fill = OrderFill(
+                        order_id=order_id,
+                        token_id=data.get("asset_id", ""),
+                        side=data.get("side", ""),
+                        price=float(data.get("price", 0)),
+                        size_matched=size_matched,
+                        original_size=original_size,
+                        status=status,
+                        outcome=data.get("outcome", ""),
+                    )
+
+                    # Map outcome to UP/DOWN
+                    outcome_upper = fill.outcome.upper() if fill.outcome else ""
+                    if outcome_upper in ("YES", "UP"):
+                        fill_side = "UP"
+                    elif outcome_upper in ("NO", "DOWN"):
+                        fill_side = "DOWN"
+                    else:
+                        fill_side = fill.side
+
+                    logger.info(
+                        f"[USER_WS] 🔔 FILL: {fill_side} {fill.size_matched:.0f}/{fill.original_size:.0f} "
+                        f"@ ${fill.price:.4f} ({fill.status})"
+                    )
+
+                    # Fire callbacks
+                    for callback in self._fill_callbacks:
+                        try:
+                            callback(fill)
+                        except Exception as e:
+                            logger.error(f"[USER_WS] Fill callback error: {e}")
+
+            # Trade events
+            elif event_type == "trade":
+                trade_status = data.get("status", "")
+                size = float(data.get("size", 0))
+                price = float(data.get("price", 0))
+                side = data.get("side", "")
+                outcome = data.get("outcome", "")
+
+                logger.debug(
+                    f"[USER_WS] Trade: {outcome} {side} {size:.0f} @ ${price:.4f} ({trade_status})"
+                )
+
+        except Exception as e:
+            logger.error(f"[USER_WS] Error processing message: {e}")
+
+    def __repr__(self) -> str:
+        status = "connected" if self.connected else "disconnected"
+        return f"UserWebSocketClient({status}, watching={len(self._watched_orders)})"
