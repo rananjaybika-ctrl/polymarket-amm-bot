@@ -8,8 +8,11 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/polymarket-amm-bot
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/home/ubuntu/polymarket-amm-bot/.env
+# CRITICAL: Check kill switch BEFORE starting - if exists, refuse to start
+ExecStartPre=/bin/sh -c 'test ! -f /home/ubuntu/polymarket-amm-bot/.kill_switch || (echo "Kill switch active - refusing to start" && exit 1)'
 ExecStart=/home/ubuntu/polymarket-amm-bot/venv/bin/python scripts/run_paper_bot.py --trading-mode live --accum-mode calculus_maker
-Restart=on-failure
+# Changed from on-failure to no - manual control only
+Restart=no
 RestartSec=10
 StandardOutput=append:/home/ubuntu/polymarket-amm-bot/logs/bot.log
 StandardError=append:/home/ubuntu/polymarket-amm-bot/logs/bot.log

@@ -11,17 +11,23 @@ Features:
 
 import sys
 import os
+from pathlib import Path
+
+# Load .env file BEFORE anything else reads os.environ
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent / ".env")
+
 import asyncio
 import logging
 import traceback
 import subprocess
-from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 from zoneinfo import ZoneInfo
 
 # Kill switch file - when this exists, bot refuses to start
-KILL_SWITCH_FILE = Path("/tmp/polymarket_killed")
+# IMPORTANT: Use project directory, NOT /tmp (which is cleared on reboot)
+KILL_SWITCH_FILE = Path(__file__).parent.parent / ".kill_switch"
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -163,6 +169,10 @@ AUTH_PASSWORD = os.environ.get("POLYBOT_PASSWORD", "CHANGE_ME_IMMEDIATELY")
 
 def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
     """Verify HTTP Basic Auth credentials."""
+    # Debug: log what we're comparing (remove after debugging)
+    logger.info(f"[AUTH DEBUG] Expected user: '{AUTH_USERNAME}', got: '{credentials.username}'")
+    logger.debug(f"[AUTH DEBUG] Expected pass length: {len(AUTH_PASSWORD)}, got: {len(credentials.password)}")
+
     # Use constant-time comparison to prevent timing attacks
     username_correct = secrets.compare_digest(
         credentials.username.encode("utf8"),
@@ -174,7 +184,7 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
     )
 
     if not (username_correct and password_correct):
-        logger.warning(f"[AUTH] Failed login attempt for user: {credentials.username}")
+        logger.warning(f"[AUTH] Failed login attempt for user: {credentials.username} (pass_ok={password_correct})")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
@@ -449,6 +459,12 @@ async def handle_auto_restart(strategy_name: str):
     """Handle auto-restart for a crashed strategy."""
     logger.info(f"[AUTO-RESTART] Attempting restart for {strategy_name}")
 
+    # CRITICAL: Check kill switch BEFORE any auto-restart
+    if is_kill_switch_active():
+        logger.warning(f"[AUTO-RESTART] BLOCKED - kill switch is active. No auto-restart for {strategy_name}")
+        restart_configs.pop(strategy_name, None)  # Clear config to prevent future attempts
+        return
+
     # Check if we have stored config for this strategy
     if strategy_name not in restart_configs:
         logger.error(f"[AUTO-RESTART] No stored config for {strategy_name}")
@@ -617,14 +633,14 @@ async def get_strategy_health(strategy_name: str):
 
 
 @app.get("/")
-async def root():
-    """Serve the main HTML page."""
+async def root(username: str = Depends(verify_credentials)):
+    """Serve the main HTML page. Requires authentication."""
     return FileResponse(str(STATIC_DIR / "index.html"))
 
 
 @app.get("/api/status")
-async def get_status():
-    """Get current bot status for all strategies."""
+async def get_status(username: str = Depends(verify_credentials)):
+    """Get current bot status for all strategies. Requires authentication."""
     return {
         "calculus_maker": strategies["calculus_maker"].status,
         "fair_value_mm": strategies["fair_value_mm"].status,
@@ -1451,6 +1467,17 @@ async def graceful_stop_strategy(strategy_name: str, username: str = Depends(ver
             logger.info(f"[GRACEFUL-STOP] Cleared restart config for {strategy_name} - auto-restart disabled")
         # Activate kill switch to prevent systemd restart
         activate_kill_switch(reason=f"Graceful stop - {strategy_name} via web UI")
+
+        # FIXED: Also cancel the task after a short delay to ensure it actually stops
+        # Don't wait forever for graceful stop - force cancel after 10 seconds
+        if strategy.task and not strategy.task.done():
+            async def force_cancel_after_delay():
+                await asyncio.sleep(10)  # Give 10 seconds for graceful stop
+                if strategy.task and not strategy.task.done():
+                    logger.warning(f"[GRACEFUL-STOP] Force cancelling {strategy_name} task after timeout")
+                    strategy.task.cancel()
+            asyncio.create_task(force_cancel_after_delay())
+
         return {"success": True, "cancelled_orders": cancelled_orders, "kill_switch_activated": True, "message": f"Cancelled {cancelled_orders} orders, graceful stop requested for {strategy_name}"}
     else:
         return JSONResponse(status_code=400, content={"error": "Strategy does not support graceful stop", "success": False})
@@ -1501,6 +1528,20 @@ async def emergency_stop_strategy(strategy_name: str, username: str = Depends(ve
         # Activate kill switch to prevent systemd restart
         activate_kill_switch(reason=f"Emergency stop - {strategy_name} via web UI")
         results["kill_switch_activated"] = True
+
+        # FIXED: Clear state files to prevent position restoration on restart
+        state_dir = Path(__file__).parent.parent / "state"
+        state_files_cleared = []
+        for mode in ["live", "paper"]:
+            state_file = state_dir / f"state_{strategy_name}_{mode}.json"
+            if state_file.exists():
+                try:
+                    state_file.unlink()
+                    state_files_cleared.append(str(state_file.name))
+                    logger.info(f"[EMERGENCY-STOP] Cleared state file: {state_file.name}")
+                except Exception as e:
+                    logger.warning(f"[EMERGENCY-STOP] Failed to clear state file {state_file.name}: {e}")
+        results["state_files_cleared"] = state_files_cleared
 
         strategy.status = {
             "running": False,
@@ -1613,7 +1654,9 @@ async def run_accumulation_bot(config: AccumulationBotConfig, strategy: Strategy
         logger.error(f"[{accum_mode}] Error: {e}")
         logger.error(f"[{accum_mode}] Traceback: {traceback.format_exc()}")
         await broadcast_status()
-        # Don't remove from restart_configs - health monitor may restart on crash
+        # FIXED: Clear restart_configs on crash to prevent rogue auto-restart
+        restart_configs.pop(accum_mode, None)
+        logger.info(f"[{accum_mode}] Cleared restart config - no auto-restart will occur")
 
 
 async def run_directional_bot(config: DirectionalBotConfig, strategy: StrategyState):
@@ -1694,7 +1737,9 @@ async def run_directional_bot(config: DirectionalBotConfig, strategy: StrategySt
         logger.error(f"[directional] Error: {e}")
         logger.error(f"[directional] Traceback: {traceback.format_exc()}")
         await broadcast_status()
-        # Don't remove from restart_configs - health monitor may restart
+        # FIXED: Clear restart_configs on crash to prevent rogue auto-restart
+        restart_configs.pop("directional", None)
+        logger.info("[directional] Cleared restart config - no auto-restart will occur")
 
 
 async def run_calculus_bot(config: CalculusMakerBotConfig, strategy: StrategyState):
@@ -1777,7 +1822,9 @@ async def run_calculus_bot(config: CalculusMakerBotConfig, strategy: StrategySta
         logger.error(f"[calculus_maker] Error: {e}")
         logger.error(f"[calculus_maker] Traceback: {traceback.format_exc()}")
         await broadcast_status()
-        # Don't remove from restart_configs - health monitor may restart
+        # FIXED: Clear restart_configs on crash to prevent rogue auto-restart
+        restart_configs.pop("calculus_maker", None)
+        logger.info("[calculus_maker] Cleared restart config - no auto-restart will occur")
 
 
 async def run_fair_value_mm_bot(config: FairValueMMBotConfig, strategy: StrategyState):
@@ -1860,7 +1907,9 @@ async def run_fair_value_mm_bot(config: FairValueMMBotConfig, strategy: Strategy
         logger.error(f"[fair_value_mm] Error: {e}")
         logger.error(f"[fair_value_mm] Traceback: {traceback.format_exc()}")
         await broadcast_status()
-        # Don't remove from restart_configs - health monitor may restart
+        # FIXED: Clear restart_configs on crash to prevent rogue auto-restart
+        restart_configs.pop("fair_value_mm", None)
+        logger.info("[fair_value_mm] Cleared restart config - no auto-restart will occur")
 
 
 async def run_simple_hedger_bot(config: SimpleHedgerBotConfig, strategy: StrategyState):

@@ -5394,6 +5394,13 @@ def parse_time(time_str: str) -> Optional[datetime]:
 
 async def main():
     """Main entry point."""
+    # CRITICAL: Check kill switch BEFORE doing anything else
+    kill_switch_path = Path(__file__).parent.parent / ".kill_switch"
+    if kill_switch_path.exists():
+        logger.error(f"[KILL SWITCH] Bot startup BLOCKED - kill switch is active at {kill_switch_path}")
+        logger.error("[KILL SWITCH] To re-enable, delete the kill switch file or use the web UI")
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(description='Paper Trading Bot (Accumulation Mode)')
     parser.add_argument(
         '--duration', '-d',

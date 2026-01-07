@@ -6,6 +6,13 @@ BOT_DIR="/home/ubuntu/polymarket-amm-bot"
 LOG_FILE="$BOT_DIR/logs/bot.log"
 ALERT_FILE="$BOT_DIR/logs/last_alert"
 SERVICE_NAME="polymarket-bot"
+KILL_SWITCH="$BOT_DIR/.kill_switch"
+
+# CRITICAL: Check kill switch FIRST - if active, do NOT restart anything
+if [ -f "$KILL_SWITCH" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Kill switch is ACTIVE - skipping all health checks and restarts"
+    exit 0
+fi
 
 # Load env for Telegram (optional)
 [ -f "$BOT_DIR/.env" ] && source "$BOT_DIR/.env"
