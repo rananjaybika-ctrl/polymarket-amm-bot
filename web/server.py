@@ -10,13 +10,18 @@ Features:
 """
 
 import sys
+import os
 import asyncio
 import logging
 import traceback
+import subprocess
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 from zoneinfo import ZoneInfo
+
+# Kill switch file - when this exists, bot refuses to start
+KILL_SWITCH_FILE = Path("/tmp/polymarket_killed")
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
@@ -65,6 +70,80 @@ from src.config import Config
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+# =============================================================================
+# KILL SWITCH - Prevents bot from restarting after manual stop
+# =============================================================================
+
+def activate_kill_switch(reason: str = "manual") -> bool:
+    """
+    Activate the kill switch to prevent bot from running.
+
+    Creates a kill file AND attempts to disable systemd service.
+    This ensures the bot won't restart even if:
+    - The process crashes
+    - systemd tries to restart it
+    - The server restarts
+
+    Args:
+        reason: Why the kill switch was activated (logged to file)
+
+    Returns:
+        True if kill switch was activated successfully
+    """
+    try:
+        # Write kill file with timestamp and reason
+        KILL_SWITCH_FILE.write_text(
+            f"Killed at {datetime.now(timezone.utc).isoformat()}\n"
+            f"Reason: {reason}\n"
+        )
+        logger.critical(f"[KILL SWITCH] Activated: {reason}")
+
+        # Try to disable systemd service (may fail if not on systemd)
+        try:
+            subprocess.run(
+                ["sudo", "systemctl", "stop", "polymarket-bot"],
+                capture_output=True,
+                timeout=10
+            )
+            subprocess.run(
+                ["sudo", "systemctl", "disable", "polymarket-bot"],
+                capture_output=True,
+                timeout=10
+            )
+            logger.critical("[KILL SWITCH] systemd service stopped and disabled")
+        except Exception as e:
+            # Not on systemd or no permissions - that's ok, kill file still works
+            logger.warning(f"[KILL SWITCH] Could not disable systemd: {e}")
+
+        return True
+    except Exception as e:
+        logger.error(f"[KILL SWITCH] Failed to activate: {e}")
+        return False
+
+
+def clear_kill_switch() -> bool:
+    """
+    Clear the kill switch to allow bot to run again.
+
+    Returns:
+        True if kill switch was cleared (or didn't exist)
+    """
+    try:
+        if KILL_SWITCH_FILE.exists():
+            KILL_SWITCH_FILE.unlink()
+            logger.info("[KILL SWITCH] Cleared - bot can start again")
+        return True
+    except Exception as e:
+        logger.error(f"[KILL SWITCH] Failed to clear: {e}")
+        return False
+
+
+def is_kill_switch_active() -> bool:
+    """Check if kill switch is currently active."""
+    return KILL_SWITCH_FILE.exists()
+
+
 app = FastAPI(title="Polymarket Trading Bot", version="1.0.0")
 
 # Serve static files
@@ -86,6 +165,7 @@ class AccumulationBotConfig(BaseModel):
     accum_trade_size: int = 1
     accum_target_shares: int = 15
     accum_max_imbalance_pct: float = 0.20  # Max imbalance as % of target (20% = 6 shares)
+    hard_max_imbalance: int = 10           # HARD LIMIT: Stop ALL trading if imbalance >= this
     accum_pair_cost_target: float = 0.995  # Target for normal trading (buy cheap)
     accum_pair_cost_limit: float = 1.02    # Max for rebalancing only
     accum_buy_both_sides: bool = True
@@ -156,6 +236,7 @@ class CalculusMakerBotConfig(BaseModel):
     lambda_decay: float = 0.005           # Decay constant for mispricing threshold
     max_pair_cost: float = 0.995          # Maximum pair cost to accept
     max_imbalance_pct: float = 0.20       # Max imbalance as % of position (20% = 6 shares)
+    hard_max_imbalance: int = 10          # HARD LIMIT: Stop ALL trading if imbalance >= this
     max_share_price: float = 0.98         # Never buy above this price
 
 
@@ -241,6 +322,7 @@ class BotConfig(BaseModel):
     accum_trade_size: int = 1
     accum_target_shares: int = 15
     accum_max_imbalance_pct: float = 0.20  # 20% of target (6 shares)
+    hard_max_imbalance: int = 10          # HARD LIMIT: Stop ALL trading if imbalance >= this
     accum_pair_cost_target: float = 0.995
     accum_pair_cost_limit: float = 1.02
     accum_buy_both_sides: bool = True
@@ -521,7 +603,28 @@ async def get_status():
             strategies["directional"].status["running"] or
             strategies["standard"].status["running"]
         ),
+        "kill_switch_active": is_kill_switch_active(),
     }
+
+
+@app.get("/api/kill-switch")
+async def get_kill_switch_status():
+    """Check if kill switch is active."""
+    active = is_kill_switch_active()
+    reason = None
+    if active and KILL_SWITCH_FILE.exists():
+        try:
+            reason = KILL_SWITCH_FILE.read_text()
+        except Exception:
+            pass
+    return {"active": active, "reason": reason}
+
+
+@app.post("/api/kill-switch/clear")
+async def clear_kill_switch_endpoint():
+    """Clear the kill switch to allow bot to start again."""
+    success = clear_kill_switch()
+    return {"success": success, "active": is_kill_switch_active()}
 
 
 @app.post("/api/validate")
@@ -677,23 +780,23 @@ async def stop_bot():
             health_monitor.unregister_strategy(strategy_name)
         logger.info("[MANUAL-STOP] Unregistered all strategies from health monitor")
 
+    # Activate kill switch to prevent systemd restart
+    activate_kill_switch(reason="Manual stop via web UI")
+
     # Notify connected clients
     await broadcast_status()
 
-    return {"status": "stopped"}
+    return {"status": "stopped", "kill_switch_activated": True}
 
 
 @app.post("/api/emergency-stop")
 async def emergency_stop():
-    """Emergency sell all positions and stop ALL bots (NUKE ALL)."""
+    """Cancel all orders and stop ALL bots (NUKE ALL). Does NOT sell positions."""
     global bot_task, bot_status, bot_instance
 
     results = {
         "status": "emergency_stopped",
-        "positions_closed": 0,
-        "total_proceeds": 0.0,
-        "total_cost": 0.0,
-        "realized_pnl": 0.0,
+        "orders_cancelled": 0,
         "details": [],
         "strategies_stopped": []
     }
@@ -705,15 +808,23 @@ async def emergency_stop():
                 logger.info(f"[NUKE-ALL] Stopping {strategy_name}...")
                 # Request graceful stop
                 strategy.instance.request_stop()
-                # Execute emergency sell
-                sell_results = await strategy.instance.emergency_sell_all()
-                results["positions_closed"] += sell_results.get("positions_closed", 0)
-                results["total_proceeds"] += sell_results.get("total_proceeds", 0.0)
-                results["total_cost"] += sell_results.get("total_cost", 0.0)
-                results["realized_pnl"] += sell_results.get("realized_pnl", 0.0)
-                results["details"].extend(sell_results.get("details", []))
+
+                # Cancel all open orders (but DO NOT sell positions)
+                if hasattr(strategy.instance, 'client'):
+                    try:
+                        client = strategy.instance.client
+                        open_orders = await client.get_open_orders()
+                        if open_orders:
+                            order_ids = [o.get('id') for o in open_orders if o.get('id')]
+                            if order_ids:
+                                await client.cancel_orders(order_ids)
+                                results["orders_cancelled"] += len(order_ids)
+                                logger.info(f"[NUKE-ALL] Cancelled {len(order_ids)} orders for {strategy_name}")
+                    except Exception as e:
+                        logger.warning(f"[NUKE-ALL] Failed to cancel orders for {strategy_name}: {e}")
+
                 results["strategies_stopped"].append(strategy_name)
-                logger.info(f"[NUKE-ALL] {strategy_name} emergency sell complete")
+                logger.info(f"[NUKE-ALL] {strategy_name} stopped (positions kept)")
             except Exception as e:
                 logger.error(f"[NUKE-ALL] Error stopping {strategy_name}: {e}")
                 results["details"].append({"strategy": strategy_name, "error": str(e)})
@@ -733,13 +844,18 @@ async def emergency_stop():
         strategy.instance = None
         strategy.task = None
 
-    # === ALSO STOP LEGACY BOT IF RUNNING ===
+    # === ALSO STOP LEGACY BOT IF RUNNING (cancel orders only, no sell) ===
     if bot_instance:
         try:
-            sell_results = await bot_instance.emergency_sell_all()
-            results["positions_closed"] += sell_results.get("positions_closed", 0)
-            results["total_proceeds"] += sell_results.get("total_proceeds", 0.0)
-            results["details"].extend(sell_results.get("details", []))
+            if hasattr(bot_instance, 'client'):
+                client = bot_instance.client
+                open_orders = await client.get_open_orders()
+                if open_orders:
+                    order_ids = [o.get('id') for o in open_orders if o.get('id')]
+                    if order_ids:
+                        await client.cancel_orders(order_ids)
+                        results["orders_cancelled"] += len(order_ids)
+                        logger.info(f"[NUKE-ALL] Cancelled {len(order_ids)} orders for legacy bot")
         except Exception as e:
             results["details"].append({"legacy_bot": True, "error": str(e)})
 
@@ -759,6 +875,10 @@ async def emergency_stop():
         for strategy_name in list(strategies.keys()):
             health_monitor.unregister_strategy(strategy_name)
         logger.info("[NUKE-ALL] Unregistered all strategies from health monitor")
+
+    # CRITICAL: Activate kill switch to prevent systemd from restarting
+    activate_kill_switch(reason="NUKE ALL - emergency stop via web UI")
+    results["kill_switch_activated"] = True
 
     # Update legacy status
     bot_status = {
@@ -962,6 +1082,9 @@ async def start_directional(config: DirectionalBotConfig):
 @app.post("/api/start/calculus_maker")
 async def start_calculus_maker(config: CalculusMakerBotConfig):
     """Start the Calculus MAKER trading strategy."""
+    # Clear kill switch when user explicitly starts - they want to run
+    clear_kill_switch()
+
     strategy = strategies["calculus_maker"]
 
     # Check if actually running (task exists and not done) vs just stale status
@@ -1246,8 +1369,11 @@ async def stop_strategy(strategy_name: str):
         health_monitor.unregister_strategy(strategy_name)
         logger.info(f"[MANUAL-STOP] Unregistered {strategy_name} from health monitor")
 
+    # Activate kill switch to prevent systemd restart
+    activate_kill_switch(reason=f"Manual stop - {strategy_name} via web UI")
+
     await broadcast_status()
-    return {"status": "stopping", "cancelled_orders": cancelled_orders, "message": "Cancelled open orders and stopping (auto-restart disabled)"}
+    return {"status": "stopping", "cancelled_orders": cancelled_orders, "kill_switch_activated": True, "message": "Cancelled open orders and stopping (auto-restart disabled)"}
 
 
 @app.post("/api/graceful-stop/{strategy_name}")
@@ -1284,14 +1410,16 @@ async def graceful_stop_strategy(strategy_name: str):
         if strategy_name in restart_configs:
             del restart_configs[strategy_name]
             logger.info(f"[GRACEFUL-STOP] Cleared restart config for {strategy_name} - auto-restart disabled")
-        return {"success": True, "cancelled_orders": cancelled_orders, "message": f"Cancelled {cancelled_orders} orders, graceful stop requested for {strategy_name}"}
+        # Activate kill switch to prevent systemd restart
+        activate_kill_switch(reason=f"Graceful stop - {strategy_name} via web UI")
+        return {"success": True, "cancelled_orders": cancelled_orders, "kill_switch_activated": True, "message": f"Cancelled {cancelled_orders} orders, graceful stop requested for {strategy_name}"}
     else:
         return JSONResponse(status_code=400, content={"error": "Strategy does not support graceful stop", "success": False})
 
 
 @app.post("/api/emergency-stop/{strategy_name}")
 async def emergency_stop_strategy(strategy_name: str):
-    """Emergency sell all positions and stop a specific strategy."""
+    """Cancel all orders and stop a specific strategy. Does NOT sell positions."""
     try:
         if strategy_name not in strategies:
             return JSONResponse(status_code=404, content={"error": f"Unknown strategy: {strategy_name}"})
@@ -1301,17 +1429,21 @@ async def emergency_stop_strategy(strategy_name: str):
         results = {
             "status": "emergency_stopped",
             "strategy": strategy_name,
-            "positions_closed": 0,
-            "total_proceeds": 0.0,
-            "total_cost": 0.0,
-            "realized_pnl": 0.0,
+            "orders_cancelled": 0,
             "details": []
         }
 
-        if strategy.instance:
+        # Cancel all open orders (but DO NOT sell positions)
+        if strategy.instance and hasattr(strategy.instance, 'client'):
             try:
-                sell_results = await strategy.instance.emergency_sell_all()
-                results.update(sell_results)
+                client = strategy.instance.client
+                open_orders = await client.get_open_orders()
+                if open_orders:
+                    order_ids = [o.get('id') for o in open_orders if o.get('id')]
+                    if order_ids:
+                        await client.cancel_orders(order_ids)
+                        results["orders_cancelled"] = len(order_ids)
+                        logger.info(f"[EMERGENCY-STOP] Cancelled {len(order_ids)} orders for {strategy_name}")
             except Exception as e:
                 results["error"] = str(e)
 
@@ -1326,6 +1458,10 @@ async def emergency_stop_strategy(strategy_name: str):
         if strategy_name in restart_configs:
             del restart_configs[strategy_name]
             logger.info(f"[EMERGENCY-STOP] Cleared restart config for {strategy_name} - auto-restart disabled")
+
+        # Activate kill switch to prevent systemd restart
+        activate_kill_switch(reason=f"Emergency stop - {strategy_name} via web UI")
+        results["kill_switch_activated"] = True
 
         strategy.status = {
             "running": False,
