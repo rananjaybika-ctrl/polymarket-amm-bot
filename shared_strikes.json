@@ -1,209 +1,4 @@
 {
-  "btc-updown-15m-1767657600": {
-    "strike_price": 94082.24,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-05T21:45:19.045745+00:00"
-  },
-  "btc-updown-15m-1767651300": {
-    "strike_price": 94181.99,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-05T22:15:21.295933+00:00"
-  },
-  "btc-updown-15m-1767652200": {
-    "strike_price": 94252.65,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-05T22:30:36.660061+00:00"
-  },
-  "btc-updown-15m-1767653100": {
-    "strike_price": 94273.23,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-05T22:45:17.737476+00:00"
-  },
-  "btc-updown-15m-1767654000": {
-    "strike_price": 94171.22,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-05T23:00:18.525170+00:00"
-  },
-  "btc-updown-15m-1767654900": {
-    "strike_price": 94049.83,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-05T23:15:17.957618+00:00"
-  },
-  "btc-updown-15m-1767655800": {
-    "strike_price": 93996.97,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-05T23:30:15.478412+00:00"
-  },
-  "btc-updown-15m-1767656700": {
-    "strike_price": 93919.72,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-05T23:45:12.299899+00:00"
-  },
-  "btc-updown-15m-1767658500": {
-    "strike_price": 93725.93,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T00:15:16.959680+00:00"
-  },
-  "btc-updown-15m-1767659400": {
-    "strike_price": 93807.71,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T00:30:18.935882+00:00"
-  },
-  "btc-updown-15m-1767660300": {
-    "strike_price": 93650.64,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T00:45:17.951552+00:00"
-  },
-  "btc-updown-15m-1767661200": {
-    "strike_price": 93816.7,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T01:00:18.008637+00:00"
-  },
-  "btc-updown-15m-1767662100": {
-    "strike_price": 93917.31,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T01:15:15.045443+00:00"
-  },
-  "btc-updown-15m-1767663000": {
-    "strike_price": 94116.72,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T01:30:16.075643+00:00"
-  },
-  "btc-updown-15m-1767663900": {
-    "strike_price": 93832.0,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T01:45:17.883894+00:00"
-  },
-  "btc-updown-15m-1767664800": {
-    "strike_price": 93771.82,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T02:00:14.280227+00:00"
-  },
-  "btc-updown-15m-1767665700": {
-    "strike_price": 93752.13,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T02:15:18.987167+00:00"
-  },
-  "btc-updown-15m-1767666600": {
-    "strike_price": 93699.07,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T02:30:16.671933+00:00"
-  },
-  "btc-updown-15m-1767667500": {
-    "strike_price": 93619.43,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T02:45:17.537299+00:00"
-  },
-  "btc-updown-15m-1767668400": {
-    "strike_price": 93620.6,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T03:00:13.075355+00:00"
-  },
-  "btc-updown-15m-1767669300": {
-    "strike_price": 93757.12,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T03:15:17.250210+00:00"
-  },
-  "btc-updown-15m-1767670200": {
-    "strike_price": 93794.67,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T03:30:15.041555+00:00"
-  },
-  "btc-updown-15m-1767671100": {
-    "strike_price": 93776.55,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T03:45:13.947094+00:00"
-  },
-  "btc-updown-15m-1767672000": {
-    "strike_price": 93769.24,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T04:00:15.405073+00:00"
-  },
-  "btc-updown-15m-1767672900": {
-    "strike_price": 93962.98,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T04:15:16.731911+00:00"
-  },
-  "btc-updown-15m-1767692700": {
-    "strike_price": 93458.0,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T09:45:08.848850+00:00"
-  },
-  "btc-updown-15m-1767693600": {
-    "strike_price": 93462.72,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T10:00:10.431425+00:00"
-  },
-  "btc-updown-15m-1767702600": {
-    "strike_price": 93865.69,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T12:30:08.911373+00:00"
-  },
-  "btc-updown-15m-1767703500": {
-    "strike_price": 93821.62,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T12:45:21.310859+00:00"
-  },
-  "btc-updown-15m-1767704400": {
-    "strike_price": 93872.16,
-    "source": "fair_value_mm_accum",
-    "timestamp": "2026-01-06T13:00:12.068876+00:00"
-  },
-  "btc-updown-15m-1767707100": {
-    "strike_price": 93696.85,
-    "source": "fair_value_mm_accum",
-    "timestamp": "2026-01-06T13:45:19.813573+00:00"
-  },
-  "btc-updown-15m-1767708000": {
-    "strike_price": 93716.53,
-    "source": "accumulation_accum",
-    "timestamp": "2026-01-06T14:00:02.631105+00:00"
-  },
-  "btc-updown-15m-1767708900": {
-    "strike_price": 94092.62,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T14:15:11.858533+00:00"
-  },
-  "btc-updown-15m-1767709800": {
-    "strike_price": 94319.85,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T14:30:13.090306+00:00"
-  },
-  "btc-updown-15m-1767710700": {
-    "strike_price": 94087.1,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T14:45:10.271064+00:00"
-  },
-  "btc-updown-15m-1767711600": {
-    "strike_price": 93836.81,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T15:00:12.237637+00:00"
-  },
-  "btc-updown-15m-1767712500": {
-    "strike_price": 93756.0,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T15:15:16.506522+00:00"
-  },
-  "btc-updown-15m-1767713400": {
-    "strike_price": 94130.53,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T15:30:13.287313+00:00"
-  },
-  "btc-updown-15m-1767714300": {
-    "strike_price": 93497.95,
-    "source": "calculus_maker_accum",
-    "timestamp": "2026-01-06T15:47:12.488888+00:00"
-  },
-  "btc-updown-15m-1767716100": {
-    "strike_price": 93481.3,
-    "source": "fair_value_mm_accum",
-    "timestamp": "2026-01-06T16:16:00.369038+00:00"
-  },
-  "btc-updown-15m-1767718800": {
-    "strike_price": 92850.61,
-    "source": "fair_value_mm_accum",
-    "timestamp": "2026-01-06T16:30:25.504093+00:00"
-  },
   "btc-updown-15m-1767719700": {
     "strike_price": 92616.55,
     "source": "calculus_maker_accum",
@@ -448,5 +243,20 @@
     "strike_price": 92748.82,
     "source": "fair_value_mm_accum",
     "timestamp": "2026-01-07T05:15:20.139572+00:00"
+  },
+  "btc-updown-15m-1767801600": {
+    "strike_price": 91349.96,
+    "source": "accumulation_accum",
+    "timestamp": "2026-01-07T16:01:55.092754+00:00"
+  },
+  "btc-updown-15m-1767802500": {
+    "strike_price": 91596.14,
+    "source": "accumulation_accum",
+    "timestamp": "2026-01-07T16:25:14.245997+00:00"
+  },
+  "btc-updown-15m-1767805200": {
+    "strike_price": 91264.54,
+    "source": "accumulation_accum",
+    "timestamp": "2026-01-07T17:09:10.610860+00:00"
   }
 }

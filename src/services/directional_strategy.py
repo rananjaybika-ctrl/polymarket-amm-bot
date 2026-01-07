@@ -75,7 +75,12 @@ class DirectionalConfig:
     # Hedging
     pair_cost_target: float = 0.95        # Target pair cost
     emergency_threshold_secs: int = 300   # 5 minutes
-    emergency_max_price: float = 0.65     # Max price for emergency hedges (stricter than normal)
+    emergency_max_price: float = 0.65     # Legacy: Max price for emergency hedges (used as fallback)
+    # Time-dynamic emergency caps (relaxes as deadline approaches)
+    emergency_price_7min: float = 0.60    # > 7 min: conservative cap
+    emergency_price_5min: float = 0.70    # 7-5 min: moderate cap
+    emergency_price_2min: float = 0.80    # 5-2 min: aggressive cap
+    emergency_price_final: float = 0.90   # < 2 min: desperate cap
 
 
 @dataclass
@@ -463,6 +468,27 @@ class DirectionalTradingStrategy:
             return "DOWN"
         return "UP"
 
+    def _get_emergency_max_price(self) -> float:
+        """
+        Get time-dynamic emergency price cap.
+
+        Relaxes the max hedge price as market deadline approaches:
+          > 7 min: $0.60 (conservative)
+          7-5 min: $0.70 (moderate)
+          5-2 min: $0.80 (aggressive)
+          < 2 min: $0.90 (desperate)
+        """
+        time_remaining = self._time_remaining_secs
+
+        if time_remaining > 420:  # > 7 min
+            return self.config.emergency_price_7min
+        elif time_remaining > 300:  # 7-5 min
+            return self.config.emergency_price_5min
+        elif time_remaining > 120:  # 5-2 min
+            return self.config.emergency_price_2min
+        else:  # < 2 min
+            return self.config.emergency_price_final
+
     def _get_bias_side(self) -> str:
         """Get the side matching current bias."""
         return "UP" if self.state.bias == Bias.BULLISH else "DOWN"
@@ -683,22 +709,31 @@ class DirectionalTradingStrategy:
         if imbalance == 0:
             return None
 
-        # CRITICAL: Only execute at price < emergency_max_price (stricter than normal)
-        if price >= self.config.emergency_max_price:
+        # CRITICAL: Use time-dynamic emergency price cap
+        # Relaxes as deadline approaches: 7min:$0.60 → 5min:$0.70 → 2min:$0.80 → final:$0.90
+        emergency_max = self._get_emergency_max_price()
+
+        if price >= emergency_max:
             logger.warning(
                 f"EMERGENCY HEDGE BLOCKED: {hedge_side} ask ${price:.2f} >= "
-                f"${self.config.emergency_max_price:.2f} - accepting unhedged position"
+                f"${emergency_max:.2f} (time-dynamic cap, {self._time_remaining_secs}s left) "
+                f"- accepting unhedged position"
             )
             return None
 
         # Buy aggressively - larger chunks
         chunk_size = min(10, imbalance)
 
+        logger.info(
+            f"EMERGENCY HEDGE: {hedge_side} @ ${price:.2f} (cap=${emergency_max:.2f}, "
+            f"{self._time_remaining_secs}s left, {imbalance} to hedge)"
+        )
+
         return TradeDecision(
             side=hedge_side,
             price=price,
             size=chunk_size,
-            reason=f"EMERGENCY: {hedge_side} ({imbalance} to hedge, <5min)",
+            reason=f"EMERGENCY: {hedge_side} ({imbalance} to hedge, {self._time_remaining_secs}s left)",
             phase=DirectionalPhase.EMERGENCY_HEDGE,
             is_hedge=True,
         )
