@@ -22,7 +22,9 @@ Usage:
 import asyncio
 import logging
 import math
+import ssl
 from typing import Optional, List, Dict, Any, Literal
+import aiohttp
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
     ApiCreds,
@@ -83,6 +85,57 @@ class PolymarketClient:
         self._client: Optional[ClobClient] = None
         self._api_creds: Optional[ApiCreds] = None
         self.connected: bool = False
+
+        # Persistent HTTP session with connection pooling for low latency
+        self._http_session: Optional[aiohttp.ClientSession] = None
+        self._http_connector: Optional[aiohttp.TCPConnector] = None
+
+    async def _get_http_session(self) -> aiohttp.ClientSession:
+        """
+        Get or create persistent HTTP session with connection pooling.
+
+        This reduces latency by:
+        - Reusing TCP connections (no handshake per request)
+        - Caching DNS lookups (5 min TTL)
+        - Reusing TLS sessions
+        - Keeping connections alive
+
+        Returns:
+            Configured aiohttp.ClientSession
+        """
+        if self._http_session is None or self._http_session.closed:
+            # Create optimized connector with connection pooling
+            self._http_connector = aiohttp.TCPConnector(
+                limit=100,              # Total connection pool size
+                limit_per_host=20,      # Connections per host (Polymarket APIs)
+                ttl_dns_cache=300,      # Cache DNS for 5 minutes
+                keepalive_timeout=30,   # Keep connections alive 30s
+                enable_cleanup_closed=True,
+            )
+
+            # Optimized timeout configuration
+            timeout = aiohttp.ClientTimeout(
+                total=30,       # Overall timeout
+                connect=5,      # TCP connection timeout
+                sock_read=10,   # Socket read timeout
+            )
+
+            self._http_session = aiohttp.ClientSession(
+                connector=self._http_connector,
+                timeout=timeout,
+            )
+            logger.debug("Created persistent HTTP session with connection pooling")
+
+        return self._http_session
+
+    async def close_http_session(self) -> None:
+        """Close the persistent HTTP session."""
+        if self._http_session and not self._http_session.closed:
+            await self._http_session.close()
+            self._http_session = None
+        if self._http_connector and not self._http_connector.closed:
+            await self._http_connector.close()
+            self._http_connector = None
 
     async def connect(self) -> bool:
         """
@@ -733,6 +786,7 @@ class PolymarketClient:
 
         Cleans up resources. Safe to call multiple times.
         """
+        await self.close_http_session()
         self._client = None
         self._api_creds = None
         self.connected = False
@@ -751,8 +805,6 @@ class PolymarketClient:
         self._ensure_connected()
 
         try:
-            import aiohttp
-
             # Prefer slug-based query (returns accurate outcomePrices for resolved markets)
             if slug:
                 url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
@@ -761,15 +813,16 @@ class PolymarketClient:
             else:
                 return None
 
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        # API returns list when querying by parameters
-                        if isinstance(data, list) and len(data) > 0:
-                            return data[0]
-                        return data if data else None
-                    return None
+            # Use persistent session with connection pooling
+            session = await self._get_http_session()
+            async with session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    # API returns list when querying by parameters
+                    if isinstance(data, list) and len(data) > 0:
+                        return data[0]
+                    return data if data else None
+                return None
         except Exception as e:
             raise PolymarketClientError(f"Failed to get market info: {e}")
 

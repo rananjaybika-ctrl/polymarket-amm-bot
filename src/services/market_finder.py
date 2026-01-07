@@ -106,9 +106,27 @@ class MarketFinder:
         self._client: Optional[httpx.AsyncClient] = None
 
     async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create HTTP client."""
+        """
+        Get or create HTTP client with HTTP/2 and connection pooling.
+
+        LATENCY OPTIMIZATION:
+        - HTTP/2 enables multiplexing (multiple requests on single connection)
+        - Connection limits optimized for Polymarket API patterns
+        """
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            # Configure connection limits for better pooling
+            limits = httpx.Limits(
+                max_connections=20,         # Total connection pool
+                max_keepalive_connections=10,  # Keep-alive connections
+                keepalive_expiry=30.0,      # Keep connections alive 30s
+            )
+
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout,
+                http2=True,                 # Enable HTTP/2 multiplexing
+                limits=limits,
+            )
+            logger.debug("Created httpx client with HTTP/2 enabled")
         return self._client
 
     async def close(self) -> None:
@@ -221,8 +239,8 @@ class MarketFinder:
         Get the current market and upcoming markets.
 
         Calculates expected market slugs based on current time and
-        fetches them directly. This ensures we get currently active
-        markets rather than only future ones.
+        fetches them IN PARALLEL for lower latency. This ensures we get
+        currently active markets rather than only future ones.
 
         Args:
             count: Number of markets to fetch (including current)
@@ -233,17 +251,24 @@ class MarketFinder:
         now = datetime.now(timezone.utc)
         slugs = self._generate_market_slugs(count=count, now=now)
 
-        markets = []
-        for slug in slugs:
+        # LATENCY OPTIMIZATION: Fetch all markets in parallel instead of sequentially
+        # This reduces ~50ms per market * count = significant savings
+        async def fetch_market_safe(slug: str) -> Optional[BTCMarket]:
+            """Fetch a single market, returning None on error."""
             try:
                 market = await self.get_market_by_slug(slug)
                 if market:
-                    markets.append(market)
                     logger.debug(f"Fetched market: {slug}")
-                else:
-                    logger.debug(f"Market not found: {slug}")
+                return market
             except Exception as e:
                 logger.warning(f"Failed to fetch market {slug}: {e}")
+                return None
+
+        # Fetch all markets concurrently
+        results = await asyncio.gather(*[fetch_market_safe(slug) for slug in slugs])
+
+        # Filter out None results and maintain order
+        markets = [m for m in results if m is not None]
 
         if markets:
             logger.info(
