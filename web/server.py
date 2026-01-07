@@ -676,9 +676,10 @@ async def get_kill_switch_status():
 
 
 @app.post("/api/kill-switch/clear")
-async def clear_kill_switch_endpoint():
-    """Clear the kill switch to allow bot to start again."""
+async def clear_kill_switch_endpoint(username: str = Depends(verify_credentials)):
+    """Clear the kill switch to allow bot to start again. Requires authentication."""
     success = clear_kill_switch()
+    logger.info(f"[KILL-SWITCH] Cleared by user {username}")
     return {"success": success, "active": is_kill_switch_active()}
 
 
@@ -962,6 +963,9 @@ async def emergency_stop(username: str = Depends(verify_credentials)):
 @app.post("/api/start/accumulation")
 async def start_accumulation(config: AccumulationBotConfig, username: str = Depends(verify_credentials)):
     """Start an Accumulation trading strategy. Requires authentication."""
+    # Clear kill switch when user explicitly starts - they want to run
+    clear_kill_switch()
+
     # Determine which strategy slot to use based on accum_mode
     strategy_name = config.accum_mode  # "standard" or "volume_weighted"
     if strategy_name not in ["standard", "volume_weighted"]:
@@ -1058,6 +1062,9 @@ async def start_volume_weighted(config: AccumulationBotConfig, username: str = D
 @app.post("/api/start/directional")
 async def start_directional(config: DirectionalBotConfig, username: str = Depends(verify_credentials)):
     """Start the Directional trading strategy. Requires authentication."""
+    # Clear kill switch when user explicitly starts - they want to run
+    clear_kill_switch()
+
     strategy = strategies["directional"]
 
     # Check if actually running (task exists and not done) vs just stale status
@@ -1223,6 +1230,9 @@ async def start_calculus_maker(config: CalculusMakerBotConfig, username: str = D
 @app.post("/api/start/fair_value_mm")
 async def start_fair_value_mm(config: FairValueMMBotConfig, username: str = Depends(verify_credentials)):
     """Start the Fair Value MM trading strategy. Requires authentication."""
+    # Clear kill switch when user explicitly starts - they want to run
+    clear_kill_switch()
+
     strategy = strategies["fair_value_mm"]
 
     # Check if actually running (task exists and not done) vs just stale status
@@ -1306,6 +1316,9 @@ async def start_fair_value_mm(config: FairValueMMBotConfig, username: str = Depe
 @app.post("/api/start/simple_hedger")
 async def start_simple_hedger(config: SimpleHedgerBotConfig, username: str = Depends(verify_credentials)):
     """Start the Simple Hedger trading strategy. Requires authentication."""
+    # Clear kill switch when user explicitly starts - they want to run
+    clear_kill_switch()
+
     strategy = strategies["simple_hedger"]
 
     # Check if actually running
