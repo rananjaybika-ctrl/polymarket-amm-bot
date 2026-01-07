@@ -4875,6 +4875,13 @@ async def main():
         default=False,
         help='Quiet mode - suppress HTTP logs and reduce noise (useful with --live-display)',
     )
+    parser.add_argument(
+        '--trading-mode',
+        type=str,
+        choices=['paper', 'live'],
+        default='paper',
+        help='Trading mode: paper (simulated) or live (real orders). Default: paper',
+    )
 
     # ACCUMULATION MODE parameters (now the only mode)
     parser.add_argument(
@@ -5050,6 +5057,8 @@ async def main():
         directional_config=directional_config,
         # Quiet mode
         quiet_mode=args.quiet,
+        # Trading mode (paper or live)
+        trading_mode=args.trading_mode,
     )
 
     # Handle signals
