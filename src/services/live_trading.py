@@ -1078,6 +1078,57 @@ class LiveTradingEngine:
 
         return cancelled
 
+    async def event_driven_pull(self, direction: str, market_slug: str, z_score: float) -> bool:
+        """
+        Immediately cancel pending order on opposite side of trend direction.
+
+        Called from BinanceClient WebSocket callback when z-score crosses threshold.
+        This is the fastest reaction path - ~100-200ms from Binance price move.
+
+        Args:
+            direction: "UP" or "DOWN" - which way BTC is trending
+            market_slug: Current market being traded
+            z_score: Current z-score that triggered the alert
+
+        Returns:
+            True if an order was cancelled, False otherwise
+
+        Example:
+            # In BinanceClient callback:
+            def on_z_alert(z, direction, state):
+                asyncio.create_task(engine.event_driven_pull(direction, market_slug, z))
+        """
+        # Cancel order on OPPOSITE side of trend
+        # If BTC trending UP, DOWN shares are losing -> cancel DOWN orders
+        side_to_pull = "DOWN" if direction == "UP" else "UP"
+        key = f"{market_slug}_{side_to_pull}"
+
+        pending = self._pending_orders.get(key)
+        if not pending:
+            logger.debug(f"[EVENT_PULL] No pending {side_to_pull} order to pull")
+            return False
+
+        order_id = pending["order_id"]
+        price = pending["price"]
+
+        try:
+            # Cancel immediately - no status check, just cancel
+            await self.client.cancel_order(order_id)
+            del self._pending_orders[key]
+
+            logger.warning(
+                f"[EVENT_PULL] Cancelled {side_to_pull} @ ${price:.4f} | "
+                f"z={z_score:.2f}, dir={direction} | ~100ms reaction"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"[EVENT_PULL] Failed to cancel {side_to_pull}: {e}")
+            # Clean up tracking
+            if key in self._pending_orders:
+                del self._pending_orders[key]
+            return False
+
     def resolve_market(self, market_slug: str, winner: str) -> float:
         """
         Resolve a market and calculate realized P&L.

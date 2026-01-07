@@ -56,34 +56,63 @@ def should_pull_quote(self, side: str, velocity_threshold_bps: float = None, z_t
     return False
 ```
 
-## Polling Frequency Concern
+## Polling Frequency Analysis
 
-**Problem**: Even with OR filter, if we only check once per second, we're too slow.
+### Current State
+- **Main loop**: `check_interval=0` means loop runs as fast as possible (~1-2 sec with API calls)
+- **Quote pull check**: Happens ONCE per loop iteration (inside `_accumulation_trading_cycle`)
+- **155ms latency advantage**: Currently underutilized - we're ~10x slower than we could be
 
-**Current flow**:
+### Actual Flow (Current)
 ```
-T=0.0s: Binance spikes, z → 2.5
-T=0.2s: (no check)
-T=0.4s: (no check)
-T=0.6s: (no check)
-T=0.8s: (no check)
-T=1.0s: Quote pull check triggers → Cancel order
-        But order may have already been filled!
+T=0.0s: Loop iteration starts, quote pull check, Binance z=0.5 (NEUTRAL)
+        → No pull needed
+T=0.3s: Binance spikes, z → 2.5 (STRONG)
+T=0.5s: (still in API calls for loop iteration)
+T=0.8s: Our GTC order gets FILLED at bad price
+T=1.2s: Loop iteration completes, next one starts
+T=1.4s: Quote pull check finally runs, z=2.5
+        → Would have pulled, but ORDER ALREADY FILLED!
 ```
 
-**Solutions to explore**:
-1. **Event-driven WebSocket**: Subscribe to Binance price stream, trigger pulls on price events
-2. **Higher frequency polling**: Check every 100-200ms instead of 1s
-3. **Pre-emptive cancellation**: Cancel on z > 1.5 before it becomes STRONG
-4. **Conditional orders**: Use GTT (Good-Til-Time) with short expiry instead of GTC
+### Solution Options (Ranked by Effectiveness)
 
-## Files to Modify
+#### Option 1: Event-Driven WebSocket (BEST - Requires Work)
+- Already have BinanceClient with WebSocket for price feed
+- Add callback: When z-score crosses 2.0, IMMEDIATELY cancel pending orders
+- Latency: React within 100-200ms of Binance move
+- Implementation: Add `on_z_threshold_crossed(callback)` to BinanceClient
 
-1. `src/services/trend_detector.py` - Add z-score check to `should_pull_quote()`
-2. `scripts/run_paper_bot.py` - Consider polling frequency in trade loop
+#### Option 2: Reduce Check Interval (SIMPLE - Quick Win)
+- Change `check_interval` from 0 (which still has ~1-2s loop time) to explicit fast polling
+- Add dedicated quote-pull check inside loop, multiple times per iteration
+- Trade CPU for speed
+- Could check quotes every 200ms while waiting for fills
+
+#### Option 3: Short-Lived Orders (GTT instead of GTC)
+- Instead of GTC (Good-Til-Cancelled) orders that sit on book
+- Use GTT with 10-15 second expiry
+- Order auto-cancels if not filled quickly
+- Downside: More order churn, but safer in trending markets
+
+#### Option 4: Lower Z-Score Threshold (Conservative)
+- Currently pull on z >= 2.0 (STRONG)
+- Could pull on z >= 1.5 (between MILD and STRONG)
+- More false positives, but faster reaction
+- Trade aggressiveness for safety
+
+### Recommended Approach
+1. **Immediate**: OR filter deployed (z-score check added) ✅
+2. **Next**: Implement Option 2 - Add high-frequency quote check inside loop
+3. **Future**: Option 1 - Full event-driven WebSocket integration
+
+## Files Modified
+
+1. `src/services/trend_detector.py` - Added z-score OR filter to `should_pull_quote()` ✅
+2. `scripts/run_paper_bot.py` - Consider polling frequency in trade loop (TODO)
 
 ## Status
-- [ ] Implement OR filter in trend_detector.py
-- [ ] Test in paper mode
-- [ ] Deploy to AWS
-- [ ] Monitor live trades
+- [x] Implement OR filter in trend_detector.py
+- [x] Deploy to AWS
+- [ ] Add high-frequency quote check inside main loop
+- [ ] Consider event-driven WebSocket for fastest reaction

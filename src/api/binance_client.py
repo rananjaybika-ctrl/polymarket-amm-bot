@@ -12,12 +12,17 @@ import statistics
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Deque, List, Optional
+from typing import Callable, Deque, List, Optional
 
 import websockets
 from websockets.exceptions import ConnectionClosed
 
 logger = logging.getLogger(__name__)
+
+
+# Type for z-score threshold callbacks
+# callback(z_score: float, direction: str, trend_state: str)
+ZScoreCallback = Callable[[float, str, str], None]
 
 
 @dataclass
@@ -53,6 +58,10 @@ class BinanceClient:
     REST_URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
     KLINES_URL = "https://api.binance.com/api/v3/klines"
 
+    # Z-score thresholds for event-driven callbacks
+    Z_STRONG_THRESHOLD = 2.0
+    Z_EXTREME_THRESHOLD = 3.0
+
     def __init__(self, window_seconds: int = 60, max_history_seconds: int = 3600):
         """
         Initialize Binance client.
@@ -77,6 +86,13 @@ class BinanceClient:
         self._reconnect_delay: float = 1.0
         self._max_reconnect_delay: float = 30.0
         self._reconnect_task: Optional[asyncio.Task] = None
+
+        # Event-driven z-score threshold callbacks
+        # These fire IMMEDIATELY when z-score crosses STRONG threshold
+        self._z_threshold_callbacks: List[ZScoreCallback] = []
+        self._last_z_state: str = "neutral"  # Track state changes: neutral, strong, extreme
+        self._callback_cooldown_secs: float = 1.0  # Minimum time between callbacks
+        self._last_callback_time: float = 0.0
 
     async def connect(self) -> None:
         """Connect to Binance WebSocket stream and start receiving prices."""
@@ -135,6 +151,11 @@ class BinanceClient:
 
                     self._current_price = price
                     self._price_history.append(PricePoint(timestamp=now, price=price))
+
+                    # EVENT-DRIVEN: Check z-score on every tick
+                    # This is the key latency advantage - react within 100ms of Binance move
+                    if self._z_threshold_callbacks and self._strike_price > 0:
+                        self._check_z_threshold_and_fire()
 
             except (json.JSONDecodeError, KeyError, ValueError) as e:
                 logger.debug(f"Failed to parse Binance message: {e}")
@@ -410,3 +431,122 @@ class BinanceClient:
         # Cap z-score to reasonable range (standard practice)
         # Raw z can be huge when per-tick volatility is tiny but total move is large
         return min(raw_z, 5.0)
+
+    # =========================================================================
+    # EVENT-DRIVEN QUOTE PULLING
+    # =========================================================================
+    # React within 100-200ms of Binance price moves instead of waiting for
+    # main loop iteration (1-2 seconds). This is the key latency advantage.
+
+    def on_z_threshold_crossed(self, callback: ZScoreCallback) -> None:
+        """
+        Register callback for when z-score crosses STRONG threshold (2.0).
+
+        The callback is fired IMMEDIATELY when z-score transitions from
+        neutral/mild to strong/extreme. This enables 100-200ms reaction time
+        to Binance price moves, compared to 1-2 second polling.
+
+        Args:
+            callback: Function(z_score, direction, trend_state) called on threshold cross
+                      direction: "UP" if price > strike, "DOWN" if price < strike
+                      trend_state: "strong" or "extreme"
+
+        Example:
+            def on_trend_alert(z_score, direction, trend_state):
+                if direction == "UP":
+                    # Cancel DOWN orders immediately
+                    asyncio.create_task(cancel_down_orders())
+
+            binance.on_z_threshold_crossed(on_trend_alert)
+        """
+        self._z_threshold_callbacks.append(callback)
+        logger.info(f"Registered z-threshold callback (total: {len(self._z_threshold_callbacks)})")
+
+    def remove_z_threshold_callback(self, callback: ZScoreCallback) -> bool:
+        """Remove a previously registered callback."""
+        try:
+            self._z_threshold_callbacks.remove(callback)
+            return True
+        except ValueError:
+            return False
+
+    def clear_z_threshold_callbacks(self) -> None:
+        """Remove all z-threshold callbacks."""
+        self._z_threshold_callbacks.clear()
+        self._last_z_state = "neutral"
+        logger.info("Cleared all z-threshold callbacks")
+
+    def reset_z_state(self) -> None:
+        """
+        Reset z-state tracking for new market.
+
+        Call this when switching to a new market so we don't miss the first
+        threshold crossing. The strike price change means old z-state is invalid.
+        """
+        self._last_z_state = "neutral"
+        self._last_callback_time = 0.0
+        logger.debug("Reset z-state for new market")
+
+    def _check_z_threshold_and_fire(self) -> None:
+        """
+        Check z-score and fire callbacks on state CHANGE to strong/extreme.
+
+        Called on every Binance WebSocket tick. Tracks state transitions to
+        avoid firing repeatedly while in same state.
+
+        State machine:
+            neutral <-> strong <-> extreme
+                     ↑ FIRE        ↑ FIRE (on entry)
+        """
+        import time
+
+        # Calculate current z-score
+        z_score = self.calculate_z_score()
+        abs_z = abs(z_score)
+
+        # Determine current state
+        if abs_z >= self.Z_EXTREME_THRESHOLD:
+            new_state = "extreme"
+        elif abs_z >= self.Z_STRONG_THRESHOLD:
+            new_state = "strong"
+        else:
+            new_state = "neutral"
+
+        # Determine direction
+        if self.price_vs_strike_pct > 0.1:
+            direction = "UP"
+        elif self.price_vs_strike_pct < -0.1:
+            direction = "DOWN"
+        else:
+            direction = "FLAT"
+
+        # Check for state TRANSITION into strong/extreme
+        # Fire when: neutral -> strong, neutral -> extreme, or strong -> extreme
+        should_fire = False
+
+        if self._last_z_state == "neutral" and new_state in ("strong", "extreme"):
+            should_fire = True  # Crossed into danger zone
+        elif self._last_z_state == "strong" and new_state == "extreme":
+            should_fire = True  # Getting worse
+
+        # Cooldown to prevent callback spam
+        now = time.time()
+        if should_fire and (now - self._last_callback_time) < self._callback_cooldown_secs:
+            should_fire = False  # Still in cooldown
+
+        # Fire callbacks
+        if should_fire and self._z_threshold_callbacks:
+            logger.warning(
+                f"[EVENT] Z-threshold crossed: {self._last_z_state} -> {new_state} | "
+                f"z={z_score:.2f}, dir={direction}, price=${self._current_price:,.2f}"
+            )
+            self._last_callback_time = now
+
+            for callback in self._z_threshold_callbacks:
+                try:
+                    callback(z_score, direction, new_state)
+                except Exception as e:
+                    logger.error(f"Z-threshold callback error: {e}")
+
+        # Update state
+        self._last_z_state = new_state
