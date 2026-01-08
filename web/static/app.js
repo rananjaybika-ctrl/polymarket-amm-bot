@@ -24,6 +24,14 @@ const modes = {
         timeRemaining: 0,
         countdownInterval: null
     },
+    'spread-capture': {
+        status: 'stopped',
+        running: false,
+        config: {},
+        liveData: {},
+        timeRemaining: 0,
+        countdownInterval: null
+    },
     'volume-weighted': {
         status: 'stopped',
         running: false,
@@ -47,7 +55,7 @@ let reconnectTimeout = null;
  * Called before WebSocket connects to ensure clean slate.
  */
 function clearAllPositionDisplays() {
-    ['calculus-maker', 'fair-value-mm', 'volume-weighted'].forEach(mode => {
+    ['calculus-maker', 'fair-value-mm', 'spread-capture', 'volume-weighted'].forEach(mode => {
         // Position quantities and prices
         setElementText(`${mode}-up-qty`, '--');
         setElementText(`${mode}-down-qty`, '--');
@@ -94,7 +102,7 @@ function init() {
     setDefaultDatetimes();
 
     // Setup config toggles
-    ['calculus-maker', 'fair-value-mm', 'volume-weighted'].forEach(mode => {
+    ['calculus-maker', 'fair-value-mm', 'spread-capture', 'volume-weighted'].forEach(mode => {
         const toggleBtn = document.getElementById(`toggle-${mode}`);
         const configContent = document.getElementById(`config-${mode}`);
 
@@ -107,6 +115,7 @@ function init() {
     // Setup action buttons
     setupModeButtons('calculus-maker');
     setupModeButtons('fair-value-mm');
+    setupModeButtons('spread-capture');
     setupModeButtons('volume-weighted');
 
     // Connect WebSocket
@@ -126,7 +135,7 @@ function setDefaultDatetimes() {
     const startStr = formatDatetimeLocal(start);
     const endStr = formatDatetimeLocal(end);
 
-    ['calculus-maker', 'fair-value-mm', 'volume-weighted'].forEach(mode => {
+    ['calculus-maker', 'fair-value-mm', 'spread-capture', 'volume-weighted'].forEach(mode => {
         const startEl = document.getElementById(`${mode}-start`);
         const endEl = document.getElementById(`${mode}-end`);
         if (startEl) startEl.value = startStr;
@@ -218,6 +227,7 @@ function routeMessage(data) {
         // Status update for all modes
         if (data.calculus_maker) updateModeStatus('calculus-maker', data.calculus_maker);
         if (data.fair_value_mm) updateModeStatus('fair-value-mm', data.fair_value_mm);
+        if (data.spread_capture) updateModeStatus('spread-capture', data.spread_capture);
         if (data.volume_weighted) updateModeStatus('volume-weighted', data.volume_weighted);
     } else if (data.type === 'trading_update') {
         // Route trading update to specific mode's card
@@ -235,6 +245,7 @@ async function fetchStatus() {
 
         if (data.calculus_maker) updateModeStatus('calculus-maker', data.calculus_maker);
         if (data.fair_value_mm) updateModeStatus('fair-value-mm', data.fair_value_mm);
+        if (data.spread_capture) updateModeStatus('spread-capture', data.spread_capture);
         if (data.volume_weighted) updateModeStatus('volume-weighted', data.volume_weighted);
     } catch (error) {
         console.error('Failed to fetch status:', error);
@@ -598,6 +609,21 @@ function getFairValueMMConfig() {
     };
 }
 
+function getSpreadCaptureConfig() {
+    return {
+        mode: document.getElementById('spread-capture-paper').checked ? 'paper' : 'live',
+        start_datetime: document.getElementById('spread-capture-start').value,
+        end_datetime: document.getElementById('spread-capture-end').value,
+        starting_balance: parseFloat(document.getElementById('spread-capture-balance-input').value),
+        entry_size: parseInt(document.getElementById('spread-capture-entry-size').value),
+        target_shares: parseInt(document.getElementById('spread-capture-target').value),
+        min_profit: parseFloat(document.getElementById('spread-capture-min-profit').value),
+        max_share_price: parseFloat(document.getElementById('spread-capture-max-price').value),
+        hard_max_imbalance: parseInt(document.getElementById('spread-capture-max-imbalance').value),
+        max_daily_loss: parseFloat(document.getElementById('spread-capture-max-loss').value) || 0
+    };
+}
+
 // ============================================
 // ACTION HANDLERS
 // ============================================
@@ -615,6 +641,9 @@ async function handleStart(modeName) {
     } else if (modeName === 'fair-value-mm') {
         config = getFairValueMMConfig();
         endpoint = '/api/start/fair_value_mm';
+    } else if (modeName === 'spread-capture') {
+        config = getSpreadCaptureConfig();
+        endpoint = '/api/start/spread_capture';
     } else if (modeName === 'volume-weighted') {
         config = getVolumeWeightedConfig();
         endpoint = '/api/start/accumulation';
@@ -679,6 +708,7 @@ async function handleStop(modeName) {
         if (modeName === 'volume-weighted') strategy = 'volume_weighted';
         else if (modeName === 'calculus-maker') strategy = 'calculus_maker';
         else if (modeName === 'fair-value-mm') strategy = 'fair_value_mm';
+        else if (modeName === 'spread-capture') strategy = 'spread_capture';
         await fetch(`/api/stop/${strategy}`, { method: 'POST' });
     } catch (error) {
         showError(modeName, 'Failed to stop: ' + error.message);
@@ -709,6 +739,7 @@ async function handleNuke(modeName) {
         if (modeName === 'volume-weighted') strategy = 'volume_weighted';
         else if (modeName === 'calculus-maker') strategy = 'calculus_maker';
         else if (modeName === 'fair-value-mm') strategy = 'fair_value_mm';
+        else if (modeName === 'spread-capture') strategy = 'spread_capture';
         const res = await fetch(`/api/emergency-stop/${strategy}`, { method: 'POST' });
         const data = await res.json();
 

@@ -297,6 +297,31 @@ class FairValueMMBotConfig(BaseModel):
     max_daily_loss: float = 0.0
 
 
+class SpreadCaptureBotConfig(BaseModel):
+    """Configuration for Spread Capture strategy from web UI.
+
+    Z-score based spread capture for sub-$1.00 pair opportunities.
+    Dynamically adjusts entry/hedge offsets based on trend strength.
+    """
+    mode: str  # "paper" or "live"
+    market: str = "btc-15m"
+    start_datetime: str  # ISO format (local time from browser)
+    end_datetime: str
+    starting_balance: float = 500.0
+
+    # Spread Capture specific parameters
+    entry_size: int = 5                   # Shares per entry order
+    target_shares: int = 15               # Total target per market
+    min_profit: float = 0.005             # Minimum profit per pair (profit ceiling)
+    max_share_price: float = 0.95         # Never buy above this
+
+    # Shared parameters
+    hard_max_imbalance: int = 10          # Defer to emergency above this
+
+    # Max Daily Loss protection
+    max_daily_loss: float = 0.0
+
+
 # Legacy config for backward compatibility
 class BotConfig(BaseModel):
     """Configuration from web UI (legacy - use AccumulationBotConfig)."""
@@ -351,6 +376,7 @@ class StrategyState:
 strategies = {
     "calculus_maker": StrategyState("calculus_maker"),  # Calculus MAKER (exponential decay + quadratic size)
     "fair_value_mm": StrategyState("fair_value_mm"),    # Fair Value MM (Binance-based pricing)
+    "spread_capture": StrategyState("spread_capture"),  # Spread Capture (z-score based offsets)
     "volume_weighted": StrategyState("volume_weighted"),  # Volume Weighted (Gabagool-style) mode
     # Legacy - keep for backward compat but not shown in UI
     "standard": StrategyState("standard"),
@@ -574,6 +600,7 @@ async def get_status(username: str = Depends(verify_credentials)):
     return {
         "calculus_maker": strategies["calculus_maker"].status,
         "fair_value_mm": strategies["fair_value_mm"].status,
+        "spread_capture": strategies["spread_capture"].status,
         "volume_weighted": strategies["volume_weighted"].status,
         # Legacy format for backward compatibility
         "standard": strategies["standard"].status,
@@ -581,6 +608,7 @@ async def get_status(username: str = Depends(verify_credentials)):
         "running": (
             strategies["calculus_maker"].status["running"] or
             strategies["fair_value_mm"].status["running"] or
+            strategies["spread_capture"].status["running"] or
             strategies["volume_weighted"].status["running"] or
             strategies["standard"].status["running"]
         ),
@@ -1157,6 +1185,90 @@ async def start_fair_value_mm(config: FairValueMMBotConfig, username: str = Depe
     return {"status": "started", "strategy": "fair_value_mm", "config": config.dict()}
 
 
+@app.post("/api/start/spread_capture")
+async def start_spread_capture(config: SpreadCaptureBotConfig, username: str = Depends(verify_credentials)):
+    """Start the Spread Capture trading strategy. Requires authentication."""
+    # Clear kill switch when user explicitly starts
+    clear_kill_switch()
+
+    strategy = strategies["spread_capture"]
+
+    # Check if actually running
+    actually_running = (
+        strategy.status["running"] and
+        strategy.task is not None and
+        not strategy.task.done()
+    )
+
+    if actually_running:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Spread Capture strategy is already running"}
+        )
+
+    # Reset stale status
+    if strategy.status["running"] and (strategy.task is None or strategy.task.done()):
+        strategy.status["running"] = False
+        strategy.reset_trading_data()
+        strategy.task = None
+
+    # Validate datetime
+    try:
+        start_dt = datetime.fromisoformat(config.start_datetime)
+        end_dt = datetime.fromisoformat(config.end_datetime)
+        if end_dt <= start_dt:
+            return JSONResponse(status_code=400, content={"error": "End time must be after start time"})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": f"Invalid datetime: {e}"})
+
+    # Validate parameters
+    if config.entry_size < 5:
+        return JSONResponse(status_code=400, content={"error": "Entry size must be at least 5 (Polymarket minimum)"})
+    if config.target_shares < config.entry_size:
+        return JSONResponse(status_code=400, content={"error": "Target shares must be >= entry size"})
+
+    # Validate balance for live mode
+    if config.mode == "live":
+        try:
+            from src.config import Config
+            from src.api.polymarket_client import PolymarketClient
+
+            pm_config = Config()
+            pm_config.validate()
+            client = PolymarketClient(pm_config)
+            await client.connect()
+            actual_balance = await client.get_balance()
+            await client.disconnect()
+
+            if config.starting_balance > actual_balance:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": f"Starting balance ${config.starting_balance:.2f} exceeds "
+                                 f"Polymarket balance ${actual_balance:.2f}"
+                    }
+                )
+            logger.info(f"[LIVE] Balance check passed: ${actual_balance:.2f} available")
+        except Exception as e:
+            return JSONResponse(status_code=400, content={"error": f"Failed to check Polymarket balance: {e}"})
+
+    # Update strategy status
+    strategy.status = {
+        "running": True,
+        "strategy": "spread_capture",
+        "error": None,
+        "config": config.dict(),
+        "start_time": datetime.now(timezone.utc).isoformat(),
+        "balance": config.starting_balance,
+    }
+
+    # Start bot in background
+    strategy.task = asyncio.create_task(run_spread_capture_bot(config, strategy))
+
+    await broadcast_status()
+    return {"status": "started", "strategy": "spread_capture", "config": config.dict()}
+
+
 @app.post("/api/stop/{strategy_name}")
 async def stop_strategy(strategy_name: str, username: str = Depends(verify_credentials)):
     """Gracefully stop a strategy. Requires authentication."""
@@ -1602,6 +1714,88 @@ async def run_fair_value_mm_bot(config: FairValueMMBotConfig, strategy: Strategy
         logger.info("[fair_value_mm] Cleared restart config - no auto-restart will occur")
 
 
+async def run_spread_capture_bot(config: SpreadCaptureBotConfig, strategy: StrategyState):
+    """Run the Spread Capture trading bot asynchronously.
+
+    Z-score based spread capture for sub-$1.00 pair opportunities.
+    """
+    # Store config for auto-restart
+    restart_configs["spread_capture"] = config.dict()
+
+    try:
+        from scripts.run_paper_bot import PaperTradingBot
+
+        # Normalize times to UTC
+        start_dt_utc = normalize_datetime_to_utc(config.start_datetime)
+        end_dt_utc = normalize_datetime_to_utc(config.end_datetime)
+
+        logger.info(f"[spread_capture] Session time window (UTC): {start_dt_utc.isoformat()} to {end_dt_utc.isoformat()}")
+
+        # Wait until start time
+        now_utc = datetime.now(timezone.utc)
+        if start_dt_utc > now_utc:
+            wait_seconds = (start_dt_utc - now_utc).total_seconds()
+            strategy.status["waiting_until"] = start_dt_utc.isoformat()
+            await broadcast_status()
+            await asyncio.sleep(wait_seconds)
+
+        strategy.status.pop("waiting_until", None)
+        strategy.status["trading_started"] = datetime.now(timezone.utc).isoformat()
+        strategy.status["end_datetime"] = end_dt_utc.isoformat()
+        await broadcast_status()
+
+        duration_minutes = (end_dt_utc - start_dt_utc).total_seconds() / 60.0
+        web_callback = create_web_callback_for_strategy("spread_capture")
+
+        # Create Spread Capture bot
+        bot = PaperTradingBot.from_spread_capture_config(
+            config.dict(),
+            web_callback=web_callback,
+            session_start_utc=start_dt_utc,
+            session_end_utc=end_dt_utc,
+            trading_mode=config.mode,
+        )
+        strategy.instance = bot
+
+        logger.info("[spread_capture] Initializing bot...")
+        await bot.initialize()
+
+        logger.info(f"[spread_capture] Starting trading loop for {duration_minutes:.1f} minutes")
+        await bot.run(duration_minutes=duration_minutes)
+
+        strategy.status["running"] = False
+        strategy.status["completed"] = True
+        strategy.reset_trading_data()
+        strategy.instance = None
+        if "spread_capture" in restart_configs:
+            del restart_configs["spread_capture"]
+            logger.info("[spread_capture] Cleared restart config - session completed normally")
+        logger.info("[spread_capture] Trading session completed normally")
+        await broadcast_status()
+
+    except asyncio.CancelledError:
+        strategy.status["running"] = False
+        strategy.status["error"] = "Stopped by user"
+        strategy.reset_trading_data()
+        strategy.instance = None
+        if "spread_capture" in restart_configs:
+            del restart_configs["spread_capture"]
+            logger.info("[spread_capture] Cleared restart config - stopped by user")
+        logger.info("[spread_capture] Stopped by user")
+        await broadcast_status()
+        raise
+    except Exception as e:
+        strategy.status["running"] = False
+        strategy.status["error"] = str(e)
+        strategy.reset_trading_data()
+        strategy.instance = None
+        logger.error(f"[spread_capture] Error: {e}")
+        logger.error(f"[spread_capture] Traceback: {traceback.format_exc()}")
+        await broadcast_status()
+        restart_configs.pop("spread_capture", None)
+        logger.info("[spread_capture] Cleared restart config - no auto-restart will occur")
+
+
 def create_web_callback_for_strategy(strategy_name: str):
     """Create a callback function for a specific strategy to send trading updates."""
     def callback(data: dict):
@@ -1637,6 +1831,7 @@ async def websocket_endpoint(websocket: WebSocket):
             "type": "status",
             "calculus_maker": strategies["calculus_maker"].status,
             "fair_value_mm": strategies["fair_value_mm"].status,
+            "spread_capture": strategies["spread_capture"].status,
             "volume_weighted": strategies["volume_weighted"].status,
             "standard": strategies["standard"].status,
             "accumulation": strategies["standard"].status,  # Legacy alias
@@ -1658,6 +1853,7 @@ async def broadcast_status():
         "type": "status",
         "calculus_maker": strategies["calculus_maker"].status,
         "fair_value_mm": strategies["fair_value_mm"].status,
+        "spread_capture": strategies["spread_capture"].status,
         "volume_weighted": strategies["volume_weighted"].status,
         "standard": strategies["standard"].status,
         "accumulation": strategies["standard"].status,  # Legacy alias

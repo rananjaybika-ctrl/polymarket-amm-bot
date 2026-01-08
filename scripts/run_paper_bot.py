@@ -61,8 +61,12 @@ from src.strategies.calculus_maker import (
     check_prospective_pair_cost_with_market,
     get_dynamic_target_shares,
 )
+from src.strategies.spread_capture import (
+    SpreadCaptureStrategy,
+    SpreadCapturePhase,
+)
 from src.services.trend_detector import TrendDetector, TrendState, TrendDirection
-from src.api.websocket_client import UserWebSocketClient, OrderFill
+from src.api.websocket_client import UserWebSocketClient, OrderFill, MarketResolved
 from src.utils.market_detector import MarketTypeDetector
 from src.services.health_monitor import get_health_monitor, HealthMonitor
 from src.services.auto_redeemer import AutoRedeemer
@@ -592,6 +596,9 @@ class PaperTradingBot:
         self._user_ws_task: Optional[asyncio.Task] = None
         self._ws_fill_queue: asyncio.Queue = asyncio.Queue()  # For async fill notifications
 
+        # WebSocket market resolution detection (instant <100ms vs REST 200-1000ms)
+        self._pending_ws_resolution: Optional[MarketResolved] = None
+
         # HARD STOP log throttling (once per 60s to avoid log spam)
         self._last_hard_stop_log: float = 0.0
 
@@ -607,6 +614,17 @@ class PaperTradingBot:
                 lambda_decay=self.calc_lambda,
             )
             logger.info(f"[CALCULUS] Sizing mode: NORMAL (5 early → 15 late)")
+
+        # Spread Capture strategy instance
+        self._spread_capture_strategy: Optional[SpreadCaptureStrategy] = None
+        if self.accum_mode == "spread_capture":
+            self._spread_capture_strategy = SpreadCaptureStrategy(
+                entry_size=self.calc_min_shares,  # 5 shares
+                target_shares=self.accum_target_shares,  # 15 shares
+                min_profit=0.005,
+                emergency_imbalance_threshold=self.hard_max_imbalance,
+            )
+            logger.info(f"[SPREADCAP] Strategy initialized: entry_size=5, target={self.accum_target_shares}")
 
         # Telegram notifications and remote control
         self._telegram: Optional[TelegramNotifier] = None
@@ -1069,6 +1087,55 @@ class PaperTradingBot:
             session_end_utc=session_end_utc,
         )
 
+    @classmethod
+    def from_spread_capture_config(
+        cls,
+        config: dict,
+        web_callback: Optional[Callable[[dict], None]] = None,
+        session_start_utc: Optional[datetime] = None,
+        session_end_utc: Optional[datetime] = None,
+        trading_mode: str = "paper",
+    ) -> "PaperTradingBot":
+        """Create bot instance from Spread Capture web UI configuration.
+
+        Z-score based spread capture for sub-$1.00 pair opportunities.
+
+        Args:
+            config: Dictionary with spread capture configuration values
+            web_callback: Optional callback for web UI updates
+            session_start_utc: UTC start time - only trade markets ending AFTER this
+            session_end_utc: UTC end time - only trade markets ending BEFORE this
+
+        Returns:
+            PaperTradingBot instance configured for spread capture mode
+        """
+        trading_mode = config.get("mode", "paper")
+
+        return cls(
+            initial_balance=config.get("starting_balance", 500.0),
+            # Set accum_mode to spread_capture
+            accum_mode="spread_capture",
+            # Spread Capture specific parameters
+            calc_min_shares=config.get("entry_size", 5),  # Entry size per order
+            accum_target_shares=config.get("target_shares", 15),  # Total target
+            accum_max_share_price=config.get("max_share_price", 0.95),
+            hard_max_imbalance=config.get("hard_max_imbalance", 10),
+            # Max daily loss protection
+            max_daily_loss=config.get("max_daily_loss", 0.0),
+            # Output
+            csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_spread_capture.csv",
+            live_display=True,
+            # Web callback
+            web_callback=web_callback,
+            # Strategy name
+            strategy_name="spread_capture",
+            # Trading mode
+            trading_mode=trading_mode,
+            # Session time window
+            session_start_utc=session_start_utc,
+            session_end_utc=session_end_utc,
+        )
+
     async def initialize(self) -> None:
         """Initialize all components."""
         logger.info("Initializing paper trading bot...")
@@ -1103,6 +1170,11 @@ class PaperTradingBot:
             elif self.accum_mode == "fair_value_mm":
                 mode_label = "Fair Value MM"
                 # Fair Value MM uses calculus_maker button since they're similar
+                self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
+                self._telegram.on_graceful_stop_volume_weighted(_noop)
+            elif self.accum_mode == "spread_capture":
+                mode_label = "Spread Capture"
+                # Spread Capture uses calculus_maker button since they're similar
                 self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
                 self._telegram.on_graceful_stop_volume_weighted(_noop)
             else:
@@ -1160,6 +1232,10 @@ class PaperTradingBot:
         )
         await self._orderbook_manager.start()
         logger.info(f"OrderbookManager started (WS: {self._orderbook_manager.connected})")
+
+        # Register WebSocket market resolution callback for instant detection (<100ms)
+        self._orderbook_manager.ws_client.on_market_resolved(self._on_ws_market_resolved)
+        logger.info("[WS_RESOLUTION] Registered market_resolved callback for instant notifications")
 
         self._analyzer = PairAnalyzer(self._client, orderbook_manager=self._orderbook_manager)
 
@@ -1960,6 +2036,8 @@ class PaperTradingBot:
                     mode = "Calculus Maker"
                 elif self.accum_mode == "fair_value_mm":
                     mode = "Fair Value MM"
+                elif self.accum_mode == "spread_capture":
+                    mode = "Spread Capture"
                 else:
                     mode = "Standard"
                 hedged_pairs = int(min(up_qty, down_qty))
@@ -2086,6 +2164,8 @@ class PaperTradingBot:
                     mode = "Calculus Maker"
                 elif self.accum_mode == "fair_value_mm":
                     mode = "Fair Value MM"
+                elif self.accum_mode == "spread_capture":
+                    mode = "Spread Capture"
                 else:
                     mode = "Standard"
                 hedged_pairs = int(min(up_qty, down_qty))
@@ -2209,6 +2289,8 @@ class PaperTradingBot:
             mode_label = "CALCULUS MAKER"
         elif self.accum_mode == "fair_value_mm":
             mode_label = "FAIR VALUE MM"
+        elif self.accum_mode == "spread_capture":
+            mode_label = "SPREAD CAPTURE"
         else:
             mode_label = "STANDARD"
         logger.info(f"ACCUMULATION MODE [{mode_label}] - High Frequency Trading")
@@ -2459,6 +2541,22 @@ class PaperTradingBot:
             logger.warning("No current market")
             return
 
+        # ============================================================================
+        # INSTANT ROTATION ON WEBSOCKET RESOLUTION (Priority check - before trading)
+        # ============================================================================
+        # If WebSocket detected market resolution, trigger immediate rotation
+        # This provides <100ms latency vs 200-1000ms with REST polling
+        if self._pending_ws_resolution:
+            logger.info("[WS_INSTANT] Market resolution detected - triggering immediate rotation")
+            await self._handle_market_rotation(market)
+            return
+
+        # Pre-fetch next market for instant rotation (do this periodically)
+        # Only pre-fetch if within 5 minutes of market end
+        time_remaining = market.time_remaining()
+        if time_remaining < 300 and self._rotator and not self._rotator.has_prefetched_market:
+            await self._rotator.prefetch_next_market()
+
         # Handle new market - use shared strike or set from previous candle
         if self._is_new_market:
             if self._binance_client:
@@ -2520,6 +2618,18 @@ class PaperTradingBot:
         # Always update display at start of cycle to keep time_remaining in sync
         # This is critical - without it, early returns cause stale time to be shown
         self._update_live_display()
+
+        # ============================================================================
+        # SPREAD CAPTURE MODE: Use dedicated cycle method
+        # ============================================================================
+        if self.accum_mode == "spread_capture" and self._spread_capture_strategy:
+            await self._run_spread_capture_cycle(
+                market=market,
+                position=position,
+                current_up=current_up,
+                current_down=current_down,
+            )
+            return  # Spread capture handles its own logic
 
         # Check if we've hit target shares
         if current_up >= self.accum_target_shares and current_down >= self.accum_target_shares:
@@ -3904,6 +4014,197 @@ class PaperTradingBot:
         self._event_pull_callback = None
         self._event_pull_market = None
 
+    # =========================================================================
+    # SPREAD CAPTURE STRATEGY CYCLE
+    # =========================================================================
+
+    async def _run_spread_capture_cycle(
+        self,
+        market,
+        position,
+        current_up: float,
+        current_down: float,
+    ) -> None:
+        """
+        Dedicated trading cycle for Spread Capture strategy.
+
+        Uses z-score based offsets for entry and hedge pricing.
+        Entry at best_bid - entry_offset, hedge at best_bid - hedge_offset.
+        Profit ceiling enforced on hedge orders.
+        """
+        if not self._spread_capture_strategy:
+            logger.warning("[SPREADCAP] Strategy not initialized")
+            return
+
+        strategy = self._spread_capture_strategy
+        time_remaining_secs = market.time_remaining()
+
+        # Check for rotation
+        if self._rotator.should_rotate():
+            await self._handle_market_rotation(market)
+            return
+
+        # Check if we've hit target shares (let strategy handle internally)
+        if current_up >= self.accum_target_shares and current_down >= self.accum_target_shares:
+            if self._rotator.should_rotate():
+                await self._handle_market_rotation(market)
+            return
+
+        # Get orderbook data
+        opportunity = None
+        current_up_cost = position.up_cost if position else 0.0
+        current_down_cost = position.down_cost if position else 0.0
+
+        for attempt in range(self.max_retries):
+            try:
+                opportunity = await self._analyzer.analyze_asymmetric_opportunity(
+                    market=market,
+                    current_up_size=current_up,
+                    current_down_size=current_down,
+                    current_up_cost=current_up_cost,
+                    current_down_cost=current_down_cost,
+                    pair_cost_threshold=1.00,
+                )
+                break
+            except Exception as e:
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(0.5)
+
+        if not opportunity or opportunity.up_ask is None or opportunity.down_ask is None:
+            logger.debug("[SPREADCAP] No valid opportunity data")
+            return
+
+        # Extract prices
+        up_ask = opportunity.up_ask
+        down_ask = opportunity.down_ask
+        up_bid = opportunity.up_bid or (up_ask * 0.98)
+        down_bid = opportunity.down_bid or (down_ask * 0.98)
+
+        # Update display prices
+        self._last_up_price = up_ask
+        self._last_down_price = down_ask
+        self._last_spread = 1.0 - up_ask - down_ask
+        self._update_live_display()
+
+        # Get trend signal
+        z_score = 0.0
+        trend_direction = "FLAT"
+
+        if self._trend_detector:
+            trend_signal = self._trend_detector.get_trend_signal()
+            if trend_signal:
+                z_score = trend_signal.z_score
+                trend_direction = trend_signal.direction.value if trend_signal.direction else "FLAT"
+
+        # Calculate current imbalance
+        current_imbalance = int(abs(current_up - current_down))
+        current_time = time.time()
+
+        # Call strategy decide
+        action = strategy.decide(
+            up_bid=up_bid,
+            up_ask=up_ask,
+            down_bid=down_bid,
+            down_ask=down_ask,
+            z_score=z_score,
+            trend_direction=trend_direction,
+            time_remaining=time_remaining_secs,
+            current_imbalance=current_imbalance,
+            current_time=current_time,
+        )
+
+        # Check for pending fills in paper mode
+        if self.trading_mode == "paper" and hasattr(self._engine, 'check_pending_fills'):
+            try:
+                current_prices = {"UP": up_ask, "DOWN": down_ask}
+                fills = await self._engine.check_pending_fills(current_prices=current_prices)
+                for fill in fills:
+                    # Notify strategy of fill
+                    fill_side = fill.get("side", "")
+                    fill_price = fill.get("price", 0)
+                    fill_size = int(fill.get("size", 0))
+                    if fill_side and fill_price > 0:
+                        strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
+                        logger.info(
+                            f"[SPREADCAP] Fill detected: {fill_side} {fill_size} @ ${fill_price:.4f}"
+                        )
+            except Exception as e:
+                logger.debug(f"[SPREADCAP] Error checking fills: {e}")
+
+        # If strategy deferred to emergency, let calculus maker handle it
+        if strategy.state.phase == SpreadCapturePhase.EMERGENCY_DEFERRED:
+            logger.info("[SPREADCAP] Deferred to emergency - calculus maker logic will handle")
+            # Reset deferred state so we can retry next cycle if imbalance resolves
+            return
+
+        if action is None:
+            # No action needed (waiting for fill, aborted, or at target)
+            phase = strategy.state.phase.value
+            if self._opportunities_checked % 20 == 0:
+                logger.debug(
+                    f"[SPREADCAP] No action | phase={phase} | z={z_score:.2f} | "
+                    f"pos={current_up:.0f}UP/{current_down:.0f}DOWN"
+                )
+            return
+
+        # Unpack action
+        side, price, size = action
+
+        # Log the decision
+        tier = strategy.get_tier(z_score)
+        phase = strategy.state.phase.value
+        logger.info(
+            f"[SPREADCAP] {phase}: {side} {size} @ ${price:.4f} | "
+            f"z={z_score:.2f} ({tier}) | spread=${1-up_ask-down_ask:.4f}"
+        )
+
+        # Execute the order
+        token_id = market.up_token_id if side == "UP" else market.down_token_id
+        best_ask = up_ask if side == "UP" else down_ask
+        best_bid = up_bid if side == "UP" else down_bid
+
+        try:
+            result = await self._engine.execute_single_side_trade(
+                market=market,
+                side=side,
+                price=price,
+                size=size,
+                token_id=token_id,
+                best_ask=best_ask,
+                best_bid=best_bid,
+                imbalance=current_imbalance,
+            )
+
+            if result.get("success"):
+                filled_size = result.get("filled_size", 0)
+                filled_price = result.get("filled_price", price)
+
+                # Notify strategy of fill (if immediate fill)
+                if filled_size > 0:
+                    strategy.on_fill(side=side, price=filled_price, size=int(filled_size))
+                    self._trade_count += 1
+                    self._send_web_update()
+
+                    # Log the trade
+                    await self._log_trade({
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "market_slug": market.slug,
+                        "side": side,
+                        "price": filled_price,
+                        "size": filled_size,
+                        "mode": "spread_capture",
+                        "z_score": z_score,
+                        "tier": tier,
+                    })
+            else:
+                logger.warning(
+                    f"[SPREADCAP] Order failed: {side} {size} @ ${price:.4f} - "
+                    f"{result.get('error', 'Unknown error')}"
+                )
+
+        except Exception as e:
+            logger.error(f"[SPREADCAP] Order execution error: {e}")
+
     async def _setup_user_websocket(self) -> bool:
         """
         Set up user WebSocket for instant fill notifications.
@@ -4138,6 +4439,41 @@ class PaperTradingBot:
             import traceback
             traceback.print_exc()
 
+    def _on_ws_market_resolved(self, event: MarketResolved) -> None:
+        """
+        Handle WebSocket market resolution event (instant notification <100ms).
+
+        This callback is triggered when a market resolves, providing instant
+        notification vs REST API polling which takes 200-1000ms.
+
+        Args:
+            event: MarketResolved event with condition_id, winning_outcome, etc.
+        """
+        # Only process BTC 15-minute markets
+        if not hasattr(event, 'condition_id') or not event.condition_id:
+            return
+
+        # Check if this is for our current market
+        current_market = getattr(self, '_current_market', None)
+        if not current_market:
+            # Try to get from rotator
+            if hasattr(self, '_rotator') and self._rotator:
+                current_market = self._rotator.current_market
+
+        if current_market and event.condition_id == current_market.condition_id:
+            winning_outcome = getattr(event, 'winning_outcome', None) or getattr(event, 'outcome', None)
+            if winning_outcome:
+                logger.info(
+                    f"[WS_RESOLUTION] Instant notification: {winning_outcome} won "
+                    f"for {current_market.slug} (condition: {event.condition_id[:20]}...)"
+                )
+                self._pending_ws_resolution = event
+            else:
+                logger.warning(f"[WS_RESOLUTION] Received event without winning_outcome: {event}")
+        else:
+            # Log for debugging but don't process
+            logger.debug(f"[WS_RESOLUTION] Event for different market: {event.condition_id[:20]}...")
+
     async def _handle_market_rotation(self, market) -> None:
         """Handle market rotation and position resolution with resilience."""
         old_market_slug = market.slug
@@ -4161,12 +4497,25 @@ class PaperTradingBot:
         # Resolve positions for this market
         pos = self._engine.get_position(market)
         if pos and (pos.up_size > 0 or pos.down_size > 0):
-            # Determine winner from Polymarket API (actual resolution)
-            # This is the SINGLE SOURCE OF TRUTH for both accumulation and directional
+            # Determine winner - Priority order:
+            # 1. WebSocket instant notification (<100ms) - FASTEST
+            # 2. REST API (Polymarket) - RELIABLE FALLBACK
+            # 3. Binance price comparison - LAST RESORT
             winner = None
             resolution_source = None
 
-            if self._client and (market.slug or market.condition_id):
+            # PRIORITY 1: Use WebSocket resolution if available (instant <100ms)
+            if self._pending_ws_resolution:
+                ws_outcome = getattr(self._pending_ws_resolution, 'winning_outcome', None) or \
+                             getattr(self._pending_ws_resolution, 'outcome', None)
+                if ws_outcome:
+                    winner = ws_outcome.upper() if isinstance(ws_outcome, str) else str(ws_outcome)
+                    resolution_source = "WEBSOCKET_INSTANT"
+                    logger.info(f"[RESOLUTION] WebSocket instant: {winner} won (latency <100ms)")
+                self._pending_ws_resolution = None  # Clear after use
+
+            # PRIORITY 2: REST API fallback if WebSocket didn't provide winner
+            if winner is None and self._client and (market.slug or market.condition_id):
                 try:
                     # Use get_winning_side which returns "UP" or "DOWN" directly
                     # Pass slug (preferred) for reliable outcomePrices from Gamma API
@@ -4176,12 +4525,12 @@ class PaperTradingBot:
                         max_retries=3
                     )
                     if winner:
-                        resolution_source = "POLYMARKET_API"
-                        logger.info(f"[RESOLUTION] Polymarket API: {winner} won")
+                        resolution_source = "REST_API"
+                        logger.info(f"[RESOLUTION] REST API: {winner} won")
                     else:
-                        logger.warning(f"[RESOLUTION] Polymarket API returned no winner for {market.slug}")
+                        logger.warning(f"[RESOLUTION] REST API returned no winner for {market.slug}")
                 except Exception as e:
-                    logger.warning(f"[RESOLUTION] Polymarket API error: {e}")
+                    logger.warning(f"[RESOLUTION] REST API error: {e}")
 
             # Fallback to Binance ONLY if Polymarket API fails
             if winner is None:
@@ -4340,6 +4689,10 @@ class PaperTradingBot:
                     self._market_detector = MarketTypeDetector()
                     self._detected_market_type = "UNKNOWN"
                     logger.info(f"[MARKET_DETECTOR] Reset for new market {new_slug}")
+                    # Reset spread capture strategy for new market
+                    if self._spread_capture_strategy:
+                        self._spread_capture_strategy.reset()
+                        logger.info(f"[SPREADCAP] Strategy reset for new market {new_slug}")
                     # CRITICAL: Subscribe WebSocket to new market immediately
                     # (Don't wait for next trading cycle - that causes 2-5s latency gap)
                     if self._orderbook_manager and new_market:
@@ -4466,6 +4819,8 @@ class PaperTradingBot:
             mode = "Calculus Maker"
         elif self.accum_mode == "fair_value_mm":
             mode = "Fair Value MM"
+        elif self.accum_mode == "spread_capture":
+            mode = "Spread Capture"
         else:
             mode = "Standard"
 

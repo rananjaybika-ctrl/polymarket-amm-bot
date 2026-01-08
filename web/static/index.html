@@ -333,6 +333,134 @@
                 <div id="error-fair-value-mm" class="card-error hidden"></div>
             </div>
 
+            <!-- ========== SPREAD CAPTURE MODE CARD ========== -->
+            <div class="mode-card" id="card-spread-capture">
+                <div class="card-header">
+                    <h2>SPREAD CAPTURE</h2>
+                    <div class="status-badge stopped" id="badge-spread-capture">
+                        <span class="status-dot"></span>
+                        <span class="status-text">Stopped</span>
+                    </div>
+                </div>
+
+                <!-- Live Data Section -->
+                <div class="card-live-data" id="live-spread-capture">
+                    <div class="market-row">
+                        <span class="market-label">Market:</span>
+                        <span class="market-value" id="spread-capture-market">--</span>
+                        <span class="time-remaining" id="spread-capture-time">--:--</span>
+                    </div>
+                    <div class="market-prices-row">
+                        <span class="price up" id="spread-capture-up-price">UP $--</span>
+                        <span class="price down" id="spread-capture-down-price">DOWN $--</span>
+                    </div>
+                    <table class="position-table">
+                        <thead>
+                            <tr><th></th><th>Avg</th><th>Qty</th><th>Cost</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr class="up-row">
+                                <td>UP</td>
+                                <td class="avg-price up" id="spread-capture-up-avg">--</td>
+                                <td class="qty up" id="spread-capture-up-qty">--</td>
+                                <td class="cost" id="spread-capture-up-cost">--</td>
+                            </tr>
+                            <tr class="down-row">
+                                <td>DOWN</td>
+                                <td class="avg-price down" id="spread-capture-down-avg">--</td>
+                                <td class="qty down" id="spread-capture-down-qty">--</td>
+                                <td class="cost" id="spread-capture-down-cost">--</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div class="metrics-row">
+                        <div class="metric">
+                            <span class="value" id="spread-capture-pairs">--</span>
+                            <span class="label">@ <span id="spread-capture-avg-pair-cost">--</span></span>
+                        </div>
+                        <div class="metric">
+                            <span class="value pnl" id="spread-capture-locked-pnl">--</span>
+                            <span class="label">Locked</span>
+                        </div>
+                        <div class="metric">
+                            <span class="value pnl" id="spread-capture-pnl-range">--</span>
+                            <span class="label">Range</span>
+                        </div>
+                        <div class="metric">
+                            <span class="value" id="spread-capture-balance">--</span>
+                            <span class="label">Balance</span>
+                        </div>
+                        <div class="metric">
+                            <span class="value pnl" id="spread-capture-realized-pnl">--</span>
+                            <span class="label">Realized</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Configuration Section -->
+                <div class="card-config">
+                    <button type="button" class="config-toggle expanded" id="toggle-spread-capture">
+                        Config <span class="toggle-icon">▼</span>
+                    </button>
+                    <div class="config-content expanded" id="config-spread-capture">
+                        <div class="config-grid">
+                            <div class="mode-selection">
+                                <label class="radio-btn">
+                                    <input type="radio" name="spread-capture-mode" value="paper" id="spread-capture-paper" checked>
+                                    <span>Paper</span>
+                                </label>
+                                <label class="radio-btn">
+                                    <input type="radio" name="spread-capture-mode" value="live" id="spread-capture-live">
+                                    <span>Live</span>
+                                </label>
+                            </div>
+                            <div class="config-row">
+                                <label>Start</label>
+                                <input type="datetime-local" id="spread-capture-start" required>
+                            </div>
+                            <div class="config-row">
+                                <label>End</label>
+                                <input type="datetime-local" id="spread-capture-end" required>
+                            </div>
+                            <div class="config-row">
+                                <label>Balance $</label>
+                                <input type="number" id="spread-capture-balance-input" value="170" min="1">
+                            </div>
+                            <div class="config-row">
+                                <label>Entry Size</label>
+                                <input type="number" id="spread-capture-entry-size" value="5" min="5" step="1" title="Shares per entry order">
+                            </div>
+                            <div class="config-row">
+                                <label>Target Shares</label>
+                                <input type="number" id="spread-capture-target" value="15" min="5" step="5" title="Total target per market">
+                            </div>
+                            <div class="config-row">
+                                <label>Min Profit</label>
+                                <input type="number" id="spread-capture-min-profit" value="0.005" step="0.001" min="0" max="0.05" title="Minimum profit per pair (profit ceiling)">
+                            </div>
+                            <div class="config-row">
+                                <label>Max Price</label>
+                                <input type="number" id="spread-capture-max-price" value="0.95" step="0.01" min="0.50" max="0.99" title="Never buy above this price">
+                            </div>
+                            <div class="config-row">
+                                <label>Max Imbalance</label>
+                                <input type="number" id="spread-capture-max-imbalance" value="10" min="1" step="1" title="Defer to emergency above this">
+                            </div>
+                            <div class="config-row">
+                                <label>Max Loss $</label>
+                                <input type="number" id="spread-capture-max-loss" value="7" step="1" min="0" title="Stop trading if daily loss exceeds this amount (0 = disabled)">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-actions">
+                    <button class="btn btn-start" id="btn-start-spread-capture">START</button>
+                    <button class="btn btn-stop" id="btn-stop-spread-capture" disabled>STOP</button>
+                    <button class="btn btn-nuke" id="btn-nuke-spread-capture" disabled>NUKE</button>
+                </div>
+                <div id="error-spread-capture" class="card-error hidden"></div>
+            </div>
+
             <!-- ========== VOLUME WEIGHTED MODE CARD ========== -->
             <div class="mode-card" id="card-volume-weighted">
                 <div class="card-header">
