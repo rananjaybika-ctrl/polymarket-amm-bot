@@ -5105,6 +5105,14 @@ class PaperTradingBot:
                     if self._one_buy_strategy:
                         self._one_buy_strategy.reset()
                         logger.info(f"[1BUY] Strategy reset for new market {new_slug}")
+                    # CRITICAL: Subscribe WebSocket to new market immediately
+                    # (Don't wait for next trading cycle - that causes 2-5s latency gap)
+                    if self._orderbook_manager and new_market:
+                        try:
+                            await self._orderbook_manager.rotate_to_market(new_market)
+                            logger.info(f"[WEBSOCKET] Subscribed to {new_slug} tokens immediately after rotation")
+                        except Exception as ws_err:
+                            logger.warning(f"[WEBSOCKET] Failed to subscribe immediately: {ws_err}")
                     break
                 else:
                     logger.warning(f"[{self.strategy_name}] Rotation returned False (no next market?)")

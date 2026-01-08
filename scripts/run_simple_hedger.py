@@ -363,6 +363,14 @@ class SimpleHedgerBot:
                 if time_remaining < 10:
                     logger.info(f"Market {market.slug} expiring ({time_remaining:.0f}s), rotating...")
                     await self._rotator.rotate()
+                    # Subscribe WebSocket to new market immediately after rotation
+                    new_market = self._rotator.current_market
+                    if self._orderbook_manager and new_market:
+                        try:
+                            await self._orderbook_manager.rotate_to_market(new_market)
+                            logger.info(f"[WEBSOCKET] Subscribed to {new_market.slug} after rotation")
+                        except Exception as ws_err:
+                            logger.warning(f"[WEBSOCKET] Failed to subscribe: {ws_err}")
                     current_market_slug = None
                     continue
 
@@ -391,6 +399,14 @@ class SimpleHedgerBot:
                 # Check if we should rotate
                 if self._rotator.should_rotate():
                     await self._rotator.rotate()
+                    # Subscribe WebSocket to new market immediately after rotation
+                    new_market = self._rotator.current_market
+                    if self._orderbook_manager and new_market:
+                        try:
+                            await self._orderbook_manager.rotate_to_market(new_market)
+                            logger.info(f"[WEBSOCKET] Subscribed to {new_market.slug} after should_rotate")
+                        except Exception as ws_err:
+                            logger.warning(f"[WEBSOCKET] Failed to subscribe: {ws_err}")
                     current_market_slug = None
 
         except asyncio.CancelledError:
