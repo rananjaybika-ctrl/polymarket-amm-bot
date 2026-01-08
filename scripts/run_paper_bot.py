@@ -1100,6 +1100,11 @@ class PaperTradingBot:
                 mode_label = "Calculus MAKER"
                 self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
                 self._telegram.on_graceful_stop_volume_weighted(_noop)
+            elif self.accum_mode == "fair_value_mm":
+                mode_label = "Fair Value MM"
+                # Fair Value MM uses calculus_maker button since they're similar
+                self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
+                self._telegram.on_graceful_stop_volume_weighted(_noop)
             else:
                 mode_label = "Unknown Mode"
                 self._telegram.on_graceful_stop_calculus_maker(_noop)
@@ -1953,6 +1958,8 @@ class PaperTradingBot:
                     mode = "Volume Weighted"
                 elif self.accum_mode == "calculus_maker":
                     mode = "Calculus Maker"
+                elif self.accum_mode == "fair_value_mm":
+                    mode = "Fair Value MM"
                 else:
                     mode = "Standard"
                 hedged_pairs = int(min(up_qty, down_qty))
@@ -2077,6 +2084,8 @@ class PaperTradingBot:
                     mode = "Volume Weighted"
                 elif self.accum_mode == "calculus_maker":
                     mode = "Calculus Maker"
+                elif self.accum_mode == "fair_value_mm":
+                    mode = "Fair Value MM"
                 else:
                     mode = "Standard"
                 hedged_pairs = int(min(up_qty, down_qty))
@@ -2198,6 +2207,8 @@ class PaperTradingBot:
             mode_label = "VOLUME WEIGHTED (Gabagool-style)"
         elif self.accum_mode == "calculus_maker":
             mode_label = "CALCULUS MAKER"
+        elif self.accum_mode == "fair_value_mm":
+            mode_label = "FAIR VALUE MM"
         else:
             mode_label = "STANDARD"
         logger.info(f"ACCUMULATION MODE [{mode_label}] - High Frequency Trading")
@@ -4453,6 +4464,8 @@ class PaperTradingBot:
             mode = "Volume Weighted"
         elif self.accum_mode == "calculus_maker":
             mode = "Calculus Maker"
+        elif self.accum_mode == "fair_value_mm":
+            mode = "Fair Value MM"
         else:
             mode = "Standard"
 
