@@ -64,8 +64,9 @@ class TelegramNotifier:
         enabled: Whether Telegram is properly configured
     """
 
-    # Class-level flag to prevent multiple instances from polling
+    # Class-level flag and lock to prevent multiple instances from polling
     _polling_active = False
+    _polling_lock: asyncio.Lock = None  # Initialized lazily
 
     def __init__(self, config: 'Config', trading_mode: str = "paper"):
         """
@@ -655,13 +656,20 @@ class TelegramNotifier:
         if self._running:
             return
 
-        # Check if another instance is already polling to avoid 409 conflicts
-        if TelegramNotifier._polling_active:
-            logger.info("Telegram polling already active in another instance, skipping (messages will still be sent)")
-            return
+        # Initialize lock lazily (class-level lock shared across instances)
+        if TelegramNotifier._polling_lock is None:
+            TelegramNotifier._polling_lock = asyncio.Lock()
 
-        self._running = True
-        TelegramNotifier._polling_active = True
+        # Use lock to prevent race condition in check-then-set
+        async with TelegramNotifier._polling_lock:
+            # Check if another instance is already polling to avoid 409 conflicts
+            if TelegramNotifier._polling_active:
+                logger.info("Telegram polling already active in another instance, skipping (messages will still be sent)")
+                return
+
+            self._running = True
+            TelegramNotifier._polling_active = True
+
         self._poll_task = asyncio.create_task(self._poll_updates())
         logger.info("Telegram command listener started")
 

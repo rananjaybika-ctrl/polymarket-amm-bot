@@ -174,6 +174,10 @@ class MarketRotator:
         self._available_markets: List[BTCMarket] = []
         self._session_active = False
 
+        # Pre-fetched next market for instant rotation (<100ms)
+        self._prefetched_market: Optional[BTCMarket] = None
+        self._prefetch_slug: Optional[str] = None
+
     @property
     def current_market(self) -> Optional[BTCMarket]:
         """Currently active market, or None if no session."""
@@ -375,9 +379,55 @@ class MarketRotator:
 
         return None
 
+    async def prefetch_next_market(self) -> Optional[BTCMarket]:
+        """
+        Pre-fetch the next market for instant rotation (<100ms).
+
+        Call this periodically during trading to have the next market ready.
+        When rotation happens, use the pre-fetched market if available.
+
+        Returns:
+            Pre-fetched BTCMarket, or None if pre-fetch failed
+        """
+        if not self._current_market:
+            return None
+
+        # Calculate next market slug from current market
+        try:
+            current_slug = self._current_market.slug
+            parts = current_slug.split("-")
+            if len(parts) >= 4 and "15m" in current_slug:
+                current_ts = int(parts[-1])
+                next_ts = current_ts + 900  # 15 minutes later
+                next_slug = f"btc-updown-15m-{next_ts}"
+
+                # Only fetch if not already pre-fetched
+                if self._prefetch_slug != next_slug:
+                    self._prefetched_market = await self.finder.get_market_by_slug(next_slug)
+                    self._prefetch_slug = next_slug
+
+                    if self._prefetched_market:
+                        logger.debug(f"[PREFETCH] Pre-fetched next market: {next_slug}")
+                    else:
+                        logger.debug(f"[PREFETCH] Failed to pre-fetch: {next_slug}")
+
+                return self._prefetched_market
+
+        except Exception as e:
+            logger.warning(f"[PREFETCH] Error pre-fetching next market: {e}")
+
+        return None
+
+    @property
+    def has_prefetched_market(self) -> bool:
+        """Check if a market is pre-fetched and ready for instant rotation."""
+        return self._prefetched_market is not None
+
     async def rotate(self, reason: Optional[RotationReason] = None) -> bool:
         """
         Rotate to the next market.
+
+        Uses pre-fetched market if available for instant rotation (<100ms).
 
         Args:
             reason: Rotation reason (auto-detected if not provided)
@@ -398,8 +448,16 @@ class MarketRotator:
         if reason is None:
             reason = self.get_rotation_reason() or RotationReason.MANUAL_ROTATION
 
-        # Find next market
-        next_market = await self._find_next_market()
+        # Use pre-fetched market if available (instant rotation)
+        next_market = None
+        if self._prefetched_market:
+            next_market = self._prefetched_market
+            self._prefetched_market = None
+            self._prefetch_slug = None
+            logger.info(f"[ROTATION] Using pre-fetched market: {next_market.slug} (instant)")
+        else:
+            # Fallback to finding next market (slower)
+            next_market = await self._find_next_market()
 
         if not next_market:
             logger.warning("No next market available")

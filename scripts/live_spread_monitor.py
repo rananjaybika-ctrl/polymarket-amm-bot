@@ -96,6 +96,7 @@ async def monitor_spreads(duration_secs: int = 120, poll_interval_ms: int = 500)
     """
     config = Config()
     client = PolymarketClient(config)
+    await client.connect()
     finder = MarketFinder()
 
     print("=" * 80)
@@ -142,15 +143,20 @@ async def monitor_spreads(duration_secs: int = 120, poll_interval_ms: int = 500)
                     up_book = await client.get_orderbook(market.up_token_id)
                     down_book = await client.get_orderbook(market.down_token_id)
 
-                    # Get best asks
-                    up_asks = up_book.get("asks", [])
-                    down_asks = down_book.get("asks", [])
+                    # Get best asks (OrderBookSummary object has .asks attribute)
+                    up_asks = up_book.asks if hasattr(up_book, 'asks') else up_book.get("asks", [])
+                    down_asks = down_book.asks if hasattr(down_book, 'asks') else down_book.get("asks", [])
 
                     if not up_asks or not down_asks:
                         continue
 
-                    up_ask = float(up_asks[0]["price"])
-                    down_ask = float(down_asks[0]["price"])
+                    # Get best (lowest) ask price - asks may be sorted high-to-low
+                    if hasattr(up_asks[0], 'price'):
+                        up_ask = min(float(a.price) for a in up_asks)
+                        down_ask = min(float(a.price) for a in down_asks)
+                    else:
+                        up_ask = min(float(a["price"]) for a in up_asks)
+                        down_ask = min(float(a["price"]) for a in down_asks)
                     pair_cost = up_ask + down_ask
 
                     # Record sample

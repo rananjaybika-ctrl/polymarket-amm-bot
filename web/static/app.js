@@ -355,6 +355,12 @@ function formatConfigTooltip(modeName, status) {
         lines.push(`Sensitivity Late: ${config.fv_sensitivity_late || '--'}`);
         lines.push(`Reprice: ${config.fv_reprice_threshold || '--'}`);
         lines.push(`Max Shares: ${config.max_shares || '--'}`);
+    } else if (modeName === 'spread-capture') {
+        lines.push(`Entry Size: ${config.entry_size || '--'}`);
+        lines.push(`Target: ${config.target_shares || '--'}`);
+        lines.push(`Min Profit: ${config.min_profit || '--'}`);
+        lines.push(`Max Price: ${config.max_share_price || '--'}`);
+        lines.push(`Hard Max: ${config.emergency_imbalance_threshold || '--'}`);
     } else if (modeName === 'volume-weighted') {
         lines.push(`Target: ${config.accum_target_shares || '--'}`);
         lines.push(`Imbal %: ${config.vw_imbalance_pct || '--'}`);
@@ -611,7 +617,7 @@ function getFairValueMMConfig() {
 
 function getSpreadCaptureConfig() {
     return {
-        mode: document.getElementById('spread-capture-paper').checked ? 'paper' : 'live',
+        mode: document.querySelector('input[name="spread_capture_mode"]:checked').value,
         start_datetime: document.getElementById('spread-capture-start').value,
         end_datetime: document.getElementById('spread-capture-end').value,
         starting_balance: parseFloat(document.getElementById('spread-capture-balance-input').value),

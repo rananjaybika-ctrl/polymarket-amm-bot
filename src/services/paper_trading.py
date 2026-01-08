@@ -276,12 +276,14 @@ class PaperTradingEngine:
         price_diff = best_ask - limit_price
         price_diff_pct = price_diff / best_ask if best_ask > 0 else 0
 
+        # If dynamic fill is disabled, use base fill probability without distance penalty
+        # This is useful for maker strategies where patient orders are expected to fill
+        if not self.config.dynamic_fill_enabled:
+            return self.config.fill_probability
+
         # STATIC COMPONENT: Original distance-based penalty
         # Linear decay: 100% at ask → 40% at 3+ cents below
         static_prob = max(0.40, 1.0 - (price_diff * 20))
-
-        if not self.config.dynamic_fill_enabled:
-            return static_prob * self.config.fill_probability
 
         # DYNAMIC COMPONENT: Consider price movement toward our limit
         # How likely is price to reach our limit during order lifetime?

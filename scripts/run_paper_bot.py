@@ -596,6 +596,11 @@ class PaperTradingBot:
         self._user_ws_task: Optional[asyncio.Task] = None
         self._ws_fill_queue: asyncio.Queue = asyncio.Queue()  # For async fill notifications
 
+        # REST API backup for fill verification (catches missed WebSocket fills)
+        self._pending_order_ids: Dict[str, Dict[str, Any]] = {}  # order_id -> {side, size, price, strategy}
+        self._confirmed_fills: set = set()  # order_ids already confirmed
+        self._last_rest_verification: float = 0.0
+
         # WebSocket market resolution detection (instant <100ms vs REST 200-1000ms)
         self._pending_ws_resolution: Optional[MarketResolved] = None
 
@@ -1267,17 +1272,28 @@ class PaperTradingBot:
 
                 # Send Telegram alert if enabled
                 if self._telegram and self._telegram.enabled:
-                    await self._telegram.send_warning(
+                    await self._telegram.send_info(
+                        "Warning",
                         f"Existing positions detected!\n"
                         f"UP: {existing['up']:.2f}, DOWN: {existing['down']:.2f}\n"
                         f"Imbalance: {abs(existing['up'] - existing['down']):.2f}"
                     )
         else:
-            sim_config = SimulationConfig(
-                fill_probability=0.90,
-                partial_fill_rate=0.10,
-                slippage_bps=5.0,
-            )
+            # Spread capture uses patient limit orders below ask - disable dynamic fill penalty
+            if self.accum_mode == "spread_capture":
+                sim_config = SimulationConfig(
+                    fill_probability=0.98,  # Very high fill rate for maker orders
+                    partial_fill_rate=0.02,
+                    slippage_bps=1.0,
+                    dynamic_fill_enabled=False,  # Disable distance-based penalty
+                    competition_factor=0.0,  # Disable competition sniping
+                )
+            else:
+                sim_config = SimulationConfig(
+                    fill_probability=0.90,
+                    partial_fill_rate=0.10,
+                    slippage_bps=5.0,
+                )
             self._engine = PaperTradingEngine(
                 config=sim_config,
                 initial_balance=self.initial_balance,
@@ -1588,6 +1604,24 @@ class PaperTradingBot:
         # Save state after every trade event
         if event_type in ("TRADE", "RESOLUTION"):
             self._save_state_if_needed(force=True)
+
+    async def _log_trade(self, trade_data: dict) -> None:
+        """Log a spread capture trade to CSV."""
+        market = self._rotator.current_market if self._rotator else None
+        position = self._engine.get_position(market) if market else None
+
+        self._log_event_csv(
+            market_slug=trade_data.get("market_slug", "unknown"),
+            event_type="TRADE",
+            trade_side=trade_data.get("side", "UNKNOWN"),
+            trade_mode=trade_data.get("mode", "spread_capture").upper(),
+            size_requested=trade_data.get("size", 0),
+            size_filled=trade_data.get("size", 0),
+            price=trade_data.get("price", 0),
+            cost=trade_data.get("size", 0) * trade_data.get("price", 0),
+            position=position,
+            status="SUCCESS",
+        )
 
     def _build_live_display(self) -> Panel:
         """Build the rich live display panel showing current position."""
@@ -2601,19 +2635,28 @@ class PaperTradingBot:
         # ============================================================================
         hard_max = self.hard_max_imbalance  # Configurable via web UI (default 10)
         current_imbalance = abs(current_up - current_down)
-        if current_imbalance >= hard_max:
+
+        # Allow spread capture to bypass hard stop when actively hedging
+        spread_capture_hedging = (
+            self.accum_mode == "spread_capture"
+            and self._spread_capture_strategy
+            and self._spread_capture_strategy.state.phase.value in ("hedge_pending", "entry_filled")
+        )
+
+        # Track if we're in hard stop mode (will only allow rebalancing orders)
+        in_hard_stop = current_imbalance >= hard_max and not spread_capture_hedging
+        if in_hard_stop:
             # Throttle log to once per 60 seconds to avoid spam
             now = time.time()
             if now - self._last_hard_stop_log >= 60:
+                deficit_side = "DOWN" if current_up > current_down else "UP"
                 logger.critical(
                     f"🛑 HARD STOP: Imbalance {current_imbalance:.0f} >= {hard_max} "
                     f"(UP={current_up:.0f}, DOWN={current_down:.0f}). "
-                    f"NO NEW ORDERS until balanced. Manual intervention may be required."
+                    f"Only {deficit_side} rebalancing orders allowed."
                 )
                 self._last_hard_stop_log = now
-            # Update display to show we're stopped
-            self._update_live_display()
-            return  # Don't place ANY orders - wait for fills or manual intervention
+            # Don't return - continue to allow rebalancing orders below
 
         # Always update display at start of cycle to keep time_remaining in sync
         # This is critical - without it, early returns cause stale time to be shown
@@ -2898,10 +2941,10 @@ class PaperTradingBot:
             if current_up > current_down:
                 # Need more DOWN to balance - cap at target
                 room_to_target = max(0, self.accum_target_shares - current_down)
-                if room_to_target == 0:
-                    # DOWN already at target, can't buy more - STOP
+                if room_to_target < 5:
+                    # Not enough room for min order - close enough to target
                     logger.info(
-                        f"✓ BOTH AT TARGET: {current_up:.0f} UP / {current_down:.0f} DOWN. DONE."
+                        f"✓ CLOSE ENOUGH: {current_up:.0f} UP / {current_down:.0f} DOWN (room={room_to_target} < 5). DONE."
                     )
                     self._send_web_update()
                     return
@@ -2917,10 +2960,10 @@ class PaperTradingBot:
             else:
                 # Need more UP to balance - cap at target
                 room_to_target = max(0, self.accum_target_shares - current_up)
-                if room_to_target == 0:
-                    # UP already at target, can't buy more - STOP
+                if room_to_target < 5:
+                    # Not enough room for min order - close enough to target
                     logger.info(
-                        f"✓ BOTH AT TARGET: {current_up:.0f} UP / {current_down:.0f} DOWN. DONE."
+                        f"✓ CLOSE ENOUGH: {current_up:.0f} UP / {current_down:.0f} DOWN (room={room_to_target} < 5). DONE."
                     )
                     self._send_web_update()
                     return
@@ -2959,15 +3002,27 @@ class PaperTradingBot:
             rebalance_size = max(5, rebalance_size)  # Polymarket min is 5 shares
 
             if deficit_side == "UP" and current_up < self.accum_target_shares:
-                buy_up = True
-                buy_down = False
-                buy_size = min(rebalance_size, self.accum_target_shares - current_up)
-                logger.info(f"REBALANCE: Buying {buy_size} UP to fix imbalance ({share_imbalance:.0f} → ~0)")
+                room_to_target = self.accum_target_shares - current_up
+                if room_to_target < 5:
+                    # Not enough room for minimum order - close enough to balanced
+                    logger.info(f"[REBAL] Skip UP: room {room_to_target} < min 5, close enough")
+                    force_rebalance = False
+                else:
+                    buy_up = True
+                    buy_down = False
+                    buy_size = min(rebalance_size, room_to_target)
+                    logger.info(f"REBALANCE: Buying {buy_size} UP to fix imbalance ({share_imbalance:.0f} → ~0)")
             elif deficit_side == "DOWN" and current_down < self.accum_target_shares:
-                buy_up = False
-                buy_down = True
-                buy_size = min(rebalance_size, self.accum_target_shares - current_down)
-                logger.info(f"REBALANCE: Buying {buy_size} DOWN to fix imbalance ({share_imbalance:.0f} → ~0)")
+                room_to_target = self.accum_target_shares - current_down
+                if room_to_target < 5:
+                    # Not enough room for minimum order - close enough to balanced
+                    logger.info(f"[REBAL] Skip DOWN: room {room_to_target} < min 5, close enough")
+                    force_rebalance = False
+                else:
+                    buy_up = False
+                    buy_down = True
+                    buy_size = min(rebalance_size, room_to_target)
+                    logger.info(f"REBALANCE: Buying {buy_size} DOWN to fix imbalance ({share_imbalance:.0f} → ~0)")
         elif not near_target:
             # =================================================================
             # TRENDING MARKET IMPROVEMENTS (from Telegram alpha)
@@ -3149,6 +3204,16 @@ class PaperTradingBot:
                 return 0.75
             else:
                 return None  # No emergency benefit when > 7 min
+
+        # HARD STOP ENFORCEMENT: Only allow deficit side when imbalance exceeds limit
+        if in_hard_stop:
+            deficit_side = "DOWN" if current_up > current_down else "UP"
+            if deficit_side == "UP" and buy_down:
+                buy_down = False
+                logger.info(f"⛔ HARD STOP: Blocking DOWN (need UP to rebalance)")
+            elif deficit_side == "DOWN" and buy_up:
+                buy_up = False
+                logger.info(f"⛔ HARD STOP: Blocking UP (need DOWN to rebalance)")
 
         if buy_up and up_price > self.accum_max_share_price:
             emergency_ceiling = get_emergency_price_ceiling(time_remaining_secs) if is_emergency_up else None
@@ -4131,6 +4196,10 @@ class PaperTradingBot:
             except Exception as e:
                 logger.debug(f"[SPREADCAP] Error checking fills: {e}")
 
+        # REST API backup verification for live mode (catches missed WebSocket fills)
+        if self.trading_mode == "live":
+            await self._verify_fills_via_rest(strategy)
+
         # If strategy deferred to emergency, let calculus maker handle it
         if strategy.state.phase == SpreadCapturePhase.EMERGENCY_DEFERRED:
             logger.info("[SPREADCAP] Deferred to emergency - calculus maker logic will handle")
@@ -4149,6 +4218,28 @@ class PaperTradingBot:
 
         # Unpack action
         side, price, size = action
+
+        # Auto-size to meet $1.00 minimum order value on BOTH sides
+        # This prevents imbalance when one side is cheap and needs more shares
+        MIN_ORDER_VALUE = 1.0
+        MAX_SIZE_CAP = 15  # Don't auto-size beyond target (avoids hard stop)
+        other_price = down_ask if side == "UP" else up_ask
+
+        # Calculate min shares needed for each side to meet $1 minimum
+        this_min = int(MIN_ORDER_VALUE / price) + 1 if price > 0 and size * price < MIN_ORDER_VALUE else size
+        other_min = int(MIN_ORDER_VALUE / other_price) + 1 if other_price > 0 else size
+
+        # Use the larger to ensure balanced pairs, but cap at target
+        final_size = max(size, this_min, other_min)
+
+        # If market is too skewed (need more shares than target), skip
+        if final_size > MAX_SIZE_CAP:
+            logger.warning(f"[SPREADCAP] Skip - market too skewed: need {final_size} shares, max {MAX_SIZE_CAP} (UP=${up_ask:.2f}, DOWN=${down_ask:.2f})")
+            return
+
+        if final_size > size:
+            logger.info(f"[SPREADCAP] Auto-sizing {side}: {size} → {final_size} shares (balancing both sides for $1 min)")
+            size = final_size
 
         # Log the decision
         tier = strategy.get_tier(z_score)
@@ -4169,15 +4260,26 @@ class PaperTradingBot:
                 side=side,
                 price=price,
                 size=size,
-                token_id=token_id,
                 best_ask=best_ask,
-                best_bid=best_bid,
-                imbalance=current_imbalance,
             )
 
             if result.get("success"):
                 filled_size = result.get("filled_size", 0)
                 filled_price = result.get("filled_price", price)
+                order_id = result.get("order_id", "")
+
+                # Track pending order for REST verification backup
+                if order_id and self.trading_mode == "live":
+                    if filled_size < size:  # Not fully filled yet
+                        self._pending_order_ids[order_id] = {
+                            "side": side,
+                            "size": size,
+                            "price": price,
+                            "strategy": "spread_capture",
+                        }
+                    else:
+                        # Fully filled - mark as confirmed
+                        self._confirmed_fills.add(order_id)
 
                 # Notify strategy of fill (if immediate fill)
                 if filled_size > 0:
@@ -4332,6 +4434,66 @@ class PaperTradingBot:
             self._user_ws_task = None
 
         logger.debug("[USER_WS] Disconnected")
+
+    async def _verify_fills_via_rest(self, strategy) -> None:
+        """
+        REST API backup for fill verification.
+
+        Periodically checks pending orders via REST API to catch any fills
+        that might have been missed by WebSocket. Called every 30 seconds
+        in live mode.
+        """
+        import time
+        current_time = time.time()
+
+        # Only check every 30 seconds
+        if current_time - self._last_rest_verification < 30.0:
+            return
+
+        self._last_rest_verification = current_time
+
+        if self.trading_mode != "live" or not self._engine:
+            return
+
+        # Check each pending order
+        orders_to_remove = []
+        for order_id, order_info in self._pending_order_ids.items():
+            if order_id in self._confirmed_fills:
+                orders_to_remove.append(order_id)
+                continue
+
+            try:
+                # Query order status via REST
+                status = await self._engine.client.get_order(order_id)
+                if status:
+                    order_status = status.get("status", "").upper()
+                    if order_status in ["MATCHED", "FILLED"]:
+                        # Fill detected via REST - notify strategy
+                        fill_price = float(status.get("price", order_info.get("price", 0)))
+                        fill_size = int(float(status.get("size_matched", order_info.get("size", 0))))
+
+                        if fill_size > 0 and order_id not in self._confirmed_fills:
+                            logger.info(
+                                f"[REST_VERIFY] Caught missed fill: {order_info['side']} "
+                                f"{fill_size} @ ${fill_price:.4f} (order_id={order_id[:16]}...)"
+                            )
+                            strategy.on_fill(
+                                side=order_info["side"],
+                                price=fill_price,
+                                size=fill_size
+                            )
+                            self._confirmed_fills.add(order_id)
+                        orders_to_remove.append(order_id)
+
+                    elif order_status == "CANCELLED":
+                        orders_to_remove.append(order_id)
+
+            except Exception as e:
+                logger.debug(f"[REST_VERIFY] Error checking order {order_id[:16]}...: {e}")
+
+        # Clean up processed orders
+        for order_id in orders_to_remove:
+            self._pending_order_ids.pop(order_id, None)
 
     async def _instant_hedge_from_ws(self, fill_side: str, fill_size: float, pending_info: dict) -> None:
         """
@@ -4798,7 +4960,23 @@ class PaperTradingBot:
     async def _handle_telegram_sell_all(self) -> None:
         """Handle /sell_all command from Telegram."""
         logger.info("Emergency sell command received from Telegram")
-        await self.emergency_sell_all()
+        try:
+            result = await self.emergency_sell_all()
+            if self._telegram and self._telegram.enabled:
+                success = result.get("success", False)
+                if success:
+                    await self._telegram.send_message(
+                        f"Emergency sell completed\n"
+                        f"Sold: {result.get('sold_up', 0)} UP, {result.get('sold_down', 0)} DOWN"
+                    )
+                else:
+                    await self._telegram.send_message(
+                        f"Emergency sell PARTIAL: {result.get('error', 'Unknown error')}"
+                    )
+        except Exception as e:
+            logger.error(f"Emergency sell failed: {e}")
+            if self._telegram and self._telegram.enabled:
+                await self._telegram.send_message(f"Emergency sell FAILED: {e}")
 
     async def _handle_telegram_status(self) -> str:
         """Handle /status command from Telegram."""
@@ -5128,9 +5306,9 @@ async def main():
     parser.add_argument(
         '--accum-mode',
         type=str,
-        choices=['standard', 'volume_weighted', 'calculus_maker'],
+        choices=['standard', 'volume_weighted', 'calculus_maker', 'spread_capture'],
         default='standard',
-        help='Accumulation strategy mode: standard, volume_weighted (Gabagool-style), or calculus_maker (exponential decay)',
+        help='Accumulation strategy mode: standard, volume_weighted (Gabagool-style), calculus_maker (exponential decay), or spread_capture (z-score based)',
     )
 
     parser.add_argument(

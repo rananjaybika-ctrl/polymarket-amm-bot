@@ -1,14 +1,22 @@
 """
 Market Finder service for discovering BTC 15-minute Up/Down markets.
 
-This service queries the Polymarket gamma API to find active BTC 15-minute
-markets and provides methods for market discovery and rotation.
+This service queries the Polymarket CLOB API (primary) and Gamma API (fallback)
+to find active BTC 15-minute markets and provides methods for market discovery
+and rotation.
+
+HYBRID APPROACH:
+- CLOB API: Primary source (more reliable for market data)
+- Gamma API: Fallback if CLOB fails
+- Circuit breaker: 30s backoff after 3 consecutive failures
+- Cache: 30s TTL to reduce API calls
 """
 
 import asyncio
 import logging
-from typing import List, Optional, TypeVar, Callable, Any
-from datetime import datetime, timezone
+import time
+from typing import List, Optional, TypeVar, Callable, Any, Dict, Tuple
+from datetime import datetime, timezone, timedelta
 import httpx
 
 from src.models.market import BTCMarket
@@ -78,11 +86,12 @@ class MarketFinder:
     """
     Service for finding BTC 15-minute Up/Down markets on Polymarket.
 
-    Uses the gamma API (gamma-api.polymarket.com) to discover markets.
-    The gamma API provides richer event data than the CLOB API.
+    Uses CLOB API (primary) with Gamma API fallback for reliability.
+    Includes circuit breaker (30s backoff after 3 failures) and caching (30s TTL).
 
     Attributes:
-        gamma_api_url: Base URL for the gamma API
+        CLOB_API_URL: Base URL for the CLOB API (primary)
+        GAMMA_API_URL: Base URL for the Gamma API (fallback)
 
     Example:
         finder = MarketFinder()
@@ -90,8 +99,12 @@ class MarketFinder:
         active = await finder.get_active_market()
     """
 
+    CLOB_API_URL = "https://clob.polymarket.com"
     GAMMA_API_URL = "https://gamma-api.polymarket.com"
     MARKET_INTERVAL_SECONDS = 900  # 15 minutes
+    CACHE_TTL = 30  # seconds
+    CIRCUIT_BREAKER_THRESHOLD = 3  # failures before opening circuit
+    CIRCUIT_BREAKER_RESET = 30  # seconds before resetting circuit
 
     def __init__(self, timeout: float = 30.0, max_retries: int = 3):
         """
@@ -104,6 +117,17 @@ class MarketFinder:
         self.timeout = timeout
         self.max_retries = max_retries
         self._client: Optional[httpx.AsyncClient] = None
+
+        # Circuit breaker state
+        self._clob_failures: int = 0
+        self._clob_circuit_open: bool = False
+        self._clob_circuit_reset_time: float = 0.0
+        self._gamma_failures: int = 0
+        self._gamma_circuit_open: bool = False
+        self._gamma_circuit_reset_time: float = 0.0
+
+        # Market cache: slug -> (BTCMarket, timestamp)
+        self._market_cache: Dict[str, Tuple[BTCMarket, float]] = {}
 
     async def _get_client(self) -> httpx.AsyncClient:
         """
@@ -422,9 +446,258 @@ class MarketFinder:
 
         return None
 
+    def _check_circuit_breaker(self, api: str) -> bool:
+        """Check if circuit breaker is open for an API.
+
+        Args:
+            api: "clob" or "gamma"
+
+        Returns:
+            True if circuit is open (should skip this API), False otherwise
+        """
+        now = time.time()
+
+        if api == "clob":
+            if self._clob_circuit_open:
+                if now >= self._clob_circuit_reset_time:
+                    # Reset circuit breaker
+                    self._clob_circuit_open = False
+                    self._clob_failures = 0
+                    logger.info("[CIRCUIT] CLOB circuit breaker reset")
+                    return False
+                return True
+        else:  # gamma
+            if self._gamma_circuit_open:
+                if now >= self._gamma_circuit_reset_time:
+                    self._gamma_circuit_open = False
+                    self._gamma_failures = 0
+                    logger.info("[CIRCUIT] Gamma circuit breaker reset")
+                    return False
+                return True
+        return False
+
+    def _record_failure(self, api: str) -> None:
+        """Record a failure and potentially open circuit breaker.
+
+        Args:
+            api: "clob" or "gamma"
+        """
+        now = time.time()
+
+        if api == "clob":
+            self._clob_failures += 1
+            if self._clob_failures >= self.CIRCUIT_BREAKER_THRESHOLD:
+                self._clob_circuit_open = True
+                self._clob_circuit_reset_time = now + self.CIRCUIT_BREAKER_RESET
+                logger.warning(
+                    f"[CIRCUIT] CLOB circuit breaker OPEN after {self._clob_failures} failures. "
+                    f"Reset in {self.CIRCUIT_BREAKER_RESET}s"
+                )
+        else:  # gamma
+            self._gamma_failures += 1
+            if self._gamma_failures >= self.CIRCUIT_BREAKER_THRESHOLD:
+                self._gamma_circuit_open = True
+                self._gamma_circuit_reset_time = now + self.CIRCUIT_BREAKER_RESET
+                logger.warning(
+                    f"[CIRCUIT] Gamma circuit breaker OPEN after {self._gamma_failures} failures. "
+                    f"Reset in {self.CIRCUIT_BREAKER_RESET}s"
+                )
+
+    def _record_success(self, api: str) -> None:
+        """Record a success and reset failure counter.
+
+        Args:
+            api: "clob" or "gamma"
+        """
+        if api == "clob":
+            self._clob_failures = 0
+        else:
+            self._gamma_failures = 0
+
+    def _get_from_cache(self, slug: str) -> Optional[BTCMarket]:
+        """Get market from cache if not expired.
+
+        Args:
+            slug: Market slug
+
+        Returns:
+            BTCMarket if in cache and not expired, None otherwise
+        """
+        if slug in self._market_cache:
+            market, timestamp = self._market_cache[slug]
+            if time.time() - timestamp < self.CACHE_TTL:
+                logger.debug(f"[CACHE] Hit for {slug}")
+                return market
+            else:
+                # Expired, remove from cache
+                del self._market_cache[slug]
+        return None
+
+    def _add_to_cache(self, slug: str, market: BTCMarket) -> None:
+        """Add market to cache.
+
+        Args:
+            slug: Market slug
+            market: BTCMarket to cache
+        """
+        self._market_cache[slug] = (market, time.time())
+        logger.debug(f"[CACHE] Added {slug} (TTL={self.CACHE_TTL}s)")
+
+    async def _get_market_from_clob(self, slug: str) -> Optional[BTCMarket]:
+        """
+        Fetch market from CLOB API (primary source).
+
+        Args:
+            slug: Market slug
+
+        Returns:
+            BTCMarket if found, None otherwise
+        """
+        if self._check_circuit_breaker("clob"):
+            return None
+
+        client = await self._get_client()
+
+        try:
+            # CLOB API: query markets endpoint
+            # Note: CLOB doesn't support slug query directly, so we need to search
+            # by the timestamp extracted from the slug
+            url = f"{self.CLOB_API_URL}/markets"
+            response = await client.get(url, timeout=10.0)
+            response.raise_for_status()
+            data = response.json()
+
+            markets = data.get("data", []) if isinstance(data, dict) else data
+
+            # Search for matching market by slug
+            for market_data in markets:
+                market_slug = market_data.get("market_slug", "") or market_data.get("slug", "")
+                if slug in market_slug or market_slug in slug:
+                    # Found matching market - construct BTCMarket
+                    market = self._clob_data_to_btc_market(market_data, slug)
+                    if market:
+                        self._record_success("clob")
+                        logger.debug(f"[CLOB] Found market: {slug}")
+                        return market
+
+            # Not found in CLOB
+            return None
+
+        except Exception as e:
+            self._record_failure("clob")
+            logger.warning(f"[CLOB] Failed to fetch {slug}: {e}")
+            return None
+
+    def _clob_data_to_btc_market(self, data: dict, slug: str) -> Optional[BTCMarket]:
+        """Convert CLOB API response to BTCMarket.
+
+        Args:
+            data: CLOB market data
+            slug: Expected slug
+
+        Returns:
+            BTCMarket if conversion successful, None otherwise
+        """
+        try:
+            # Extract token IDs from tokens array
+            tokens = data.get("tokens", [])
+            if len(tokens) < 2:
+                return None
+
+            up_token = None
+            down_token = None
+            for token in tokens:
+                outcome = (token.get("outcome") or "").upper()
+                token_id = token.get("token_id", "")
+                if outcome in ["YES", "UP"]:
+                    up_token = token_id
+                elif outcome in ["NO", "DOWN"]:
+                    down_token = token_id
+
+            if not up_token or not down_token:
+                # Fallback: assume first is UP, second is DOWN
+                up_token = tokens[0].get("token_id", "")
+                down_token = tokens[1].get("token_id", "")
+
+            # Parse timestamps from slug (more reliable than API dates)
+            start_time = None
+            end_time = None
+            if "15m" in slug:
+                try:
+                    parts = slug.split("-")
+                    if len(parts) >= 4:
+                        start_timestamp = int(parts[-1])
+                        start_time = datetime.fromtimestamp(start_timestamp, tz=timezone.utc)
+                        end_time = datetime.fromtimestamp(start_timestamp + 900, tz=timezone.utc)
+                except (ValueError, IndexError):
+                    pass
+
+            # Fallback to API dates if slug parsing failed
+            if not start_time or not end_time:
+                end_date_str = data.get("end_date_iso") or data.get("end_date")
+                if end_date_str:
+                    end_time = BTCMarket._parse_timestamp(str(end_date_str))
+                    start_time = end_time - timedelta(seconds=900)
+                else:
+                    return None
+
+            return BTCMarket(
+                condition_id=data.get("condition_id", ""),
+                question=data.get("question", f"BTC Up or Down - {slug}"),
+                slug=slug,
+                up_token_id=up_token,
+                down_token_id=down_token,
+                start_time=start_time,
+                end_time=end_time,
+                accepting_orders=data.get("accepting_orders", False),
+                best_bid=float(data.get("best_bid", 0) or 0),
+                best_ask=float(data.get("best_ask", 1) or 1),
+                liquidity=float(data.get("liquidity", 0) or 0),
+            )
+        except Exception as e:
+            logger.warning(f"[CLOB] Failed to convert market data: {e}")
+            return None
+
+    async def _get_market_from_gamma(self, slug: str) -> Optional[BTCMarket]:
+        """
+        Fetch market from Gamma API (fallback source).
+
+        Args:
+            slug: Market slug
+
+        Returns:
+            BTCMarket if found, None otherwise
+        """
+        if self._check_circuit_breaker("gamma"):
+            return None
+
+        client = await self._get_client()
+
+        try:
+            url = f"{self.GAMMA_API_URL}/events?slug={slug}"
+            response = await client.get(url, timeout=10.0)
+            response.raise_for_status()
+            events = response.json()
+
+            if events:
+                market = BTCMarket.from_gamma_api(events[0])
+                self._record_success("gamma")
+                logger.debug(f"[GAMMA] Found market: {slug}")
+                return market
+
+            return None
+
+        except Exception as e:
+            self._record_failure("gamma")
+            logger.warning(f"[GAMMA] Failed to fetch {slug}: {e}")
+            return None
+
     async def get_market_by_slug(self, slug: str) -> Optional[BTCMarket]:
         """
         Get a specific market by its slug.
+
+        Uses CLOB API as primary source, Gamma API as fallback.
+        Results are cached for 30 seconds.
 
         Args:
             slug: Market slug (e.g., 'btc-updown-15m-1766167200')
@@ -432,23 +705,26 @@ class MarketFinder:
         Returns:
             BTCMarket if found, None otherwise
         """
-        client = await self._get_client()
+        # Check cache first
+        cached = self._get_from_cache(slug)
+        if cached:
+            return cached
 
-        try:
-            # Query for specific slug
-            url = f"{self.GAMMA_API_URL}/events?slug={slug}"
-            response = await client.get(url)
-            response.raise_for_status()
-            events = response.json()
+        # PRIORITY 1: Try CLOB API (more reliable)
+        market = await self._get_market_from_clob(slug)
+        if market:
+            self._add_to_cache(slug, market)
+            return market
 
-            if events:
-                return BTCMarket.from_gamma_api(events[0])
+        # PRIORITY 2: Fallback to Gamma API
+        logger.debug(f"[FALLBACK] CLOB failed for {slug}, trying Gamma")
+        market = await self._get_market_from_gamma(slug)
+        if market:
+            self._add_to_cache(slug, market)
+            return market
 
-            return None
-
-        except Exception as e:
-            logger.warning(f"Failed to fetch market {slug}: {e}")
-            return None
+        logger.warning(f"[MARKET_FINDER] Both CLOB and Gamma failed for {slug}")
+        return None
 
     async def get_markets_in_window(
         self,
