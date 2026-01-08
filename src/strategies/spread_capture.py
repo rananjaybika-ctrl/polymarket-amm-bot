@@ -668,7 +668,13 @@ class SpreadCaptureStrategy:
             )
 
         s.entry_placed_at = current_time
-        return (s.entry_side, s.entry_price, s.entry_size)
+        # Only order remaining unfilled shares (not full entry_size)
+        remaining_size = s.entry_size - s.entry_fill_size
+        if remaining_size <= 0:
+            # All filled - shouldn't happen, but just in case
+            s.phase = SpreadCapturePhase.ENTRY_FILLED
+            return None
+        return (s.entry_side, s.entry_price, remaining_size)
 
     def _handle_entry_filled(
         self,
@@ -784,7 +790,13 @@ class SpreadCaptureStrategy:
         s.hedge_price = new_price
         s.hedge_placed_at = current_time
 
-        return (s.hedge_side, new_price, s.hedge_size)
+        # Only order remaining unfilled shares
+        remaining_size = s.hedge_size - s.hedge_fill_size
+        if remaining_size <= 0:
+            # All filled - shouldn't happen, but transition to complete
+            s.phase = SpreadCapturePhase.COMPLETE
+            return None
+        return (s.hedge_side, new_price, remaining_size)
 
     def _handle_hedge_at_ceiling(
         self,
@@ -805,10 +817,16 @@ class SpreadCaptureStrategy:
         elapsed = current_time - s.hedge_placed_at
         if elapsed > 30.0:
             s.hedge_placed_at = current_time
+            # Only order remaining unfilled shares
+            remaining_size = s.hedge_size - s.hedge_fill_size
+            if remaining_size <= 0:
+                s.phase = SpreadCapturePhase.COMPLETE
+                return None
             logger.debug(
-                f"[SPREADCAP] Hedge at ceiling refresh: {s.hedge_side} @ ${s.hedge_price:.4f}"
+                f"[SPREADCAP] Hedge at ceiling refresh: {s.hedge_side} @ ${s.hedge_price:.4f} "
+                f"remaining={remaining_size}/{s.hedge_size}"
             )
-            return (s.hedge_side, s.hedge_price, s.hedge_size)
+            return (s.hedge_side, s.hedge_price, remaining_size)
 
         return None
 

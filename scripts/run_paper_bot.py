@@ -4255,12 +4255,15 @@ class PaperTradingBot:
         best_bid = up_bid if side == "UP" else down_bid
 
         try:
+            # Use pending orders for spread capture - allows tick-based fill simulation
+            # so orders can fill over multiple ticks rather than instant pass/fail
             result = await self._engine.execute_single_side_trade(
                 market=market,
                 side=side,
                 price=price,
                 size=size,
                 best_ask=best_ask,
+                use_pending_orders=True,  # Enable for spread capture retry logic
             )
 
             if result.get("success"):

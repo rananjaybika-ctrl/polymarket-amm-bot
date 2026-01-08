@@ -602,8 +602,9 @@ class PaperTradingEngine:
         trade_id = self._generate_trade_id()
         side_upper = side.upper()
 
-        # DISABLED: Pending order mode was buggy - force instant fills
-        use_pending_orders = False
+        # Re-enabled pending order mode for spread capture strategy
+        # Spread capture relies on tick-based fill checks for retry logic
+        # use_pending_orders = False  # Previously disabled
 
         # Enforce Polymarket order constraints: min 5 shares AND min $1 value
         order_value = size * price
