@@ -227,42 +227,6 @@ class AccumulationBotConfig(BaseModel):
     vw_bootstrap_pct: float = 0.33       # Bootstrap phase: buy both sides until 33% of target
 
 
-class DirectionalBotConfig(BaseModel):
-    """Configuration for Directional strategy from web UI."""
-    mode: str  # "paper" or "live"
-    market: str  # "btc-15m"
-    start_datetime: str  # ISO format (local time from browser)
-    end_datetime: str
-    starting_balance: float = 100.0
-    initial_bias: str = "BULLISH"  # "BULLISH" or "BEARISH"
-
-    # Flip detection parameters
-    flip_cooldown_seconds: float = 180.0
-    sigma_threshold: float = 2.0          # 2 sigma for flip detection
-    sustained_seconds: float = 45.0
-    window_seconds: int = 60
-    max_flips_per_market: int = 2
-    min_flip_time_remaining_secs: int = 420  # Don't flip with <7 min remaining
-
-    # Position sizing
-    max_position_pct: float = 0.17        # 17% of balance per side (final safety limit)
-    target_shares: int = 15               # Target shares per side (first line of defense)
-    trade_size_pct: float = 0.3333        # Each trade = 33.33% of max shares
-    trade_size: int = 5                   # Fallback if not calculated
-    hedge_increment: int = 5
-    max_share_price: float = 0.98
-
-    # Pricing thresholds
-    attractive_price_early: float = 0.75
-    attractive_price_late: float = 0.90
-    dip_threshold_pct: float = 0.10
-
-    # Hedging
-    pair_cost_target: float = 0.95
-    emergency_threshold_secs: int = 300
-    emergency_max_price: float = 0.65
-
-
 class CalculusMakerBotConfig(BaseModel):
     """Configuration for Calculus MAKER strategy from web UI.
 
@@ -333,29 +297,6 @@ class FairValueMMBotConfig(BaseModel):
     max_daily_loss: float = 0.0
 
 
-class SimpleHedgerBotConfig(BaseModel):
-    """Configuration for Simple Hedger strategy from web UI.
-
-    Simple hedging strategy:
-    1. Wait 3s, buy expensive side
-    2. Hedge at target pair cost
-    3. On flip (+20c), double down and rehedge
-    """
-    mode: str  # "paper" or "live"
-    market: str = "btc-15m"
-    start_datetime: str
-    end_datetime: str
-    starting_balance: float = 200.0
-
-    # Simple Hedger parameters
-    size: int = 10                        # Shares per trade (10 ensures $1 min after flip)
-    target_pair_cost: float = 0.97        # Target pair cost for normal hedge
-    emergency_pair_cost: float = 0.98     # Target pair cost after flip
-    flip_threshold: float = 0.20          # +20c triggers flip
-    wait_seconds: float = 3.0             # Wait to see direction
-    order_timeout: float = 30.0           # Seconds before cancel/retry
-
-
 # Legacy config for backward compatibility
 class BotConfig(BaseModel):
     """Configuration from web UI (legacy - use AccumulationBotConfig)."""
@@ -409,10 +350,8 @@ class StrategyState:
 # Multi-strategy state - supports running multiple accumulation modes simultaneously
 strategies = {
     "calculus_maker": StrategyState("calculus_maker"),  # Calculus MAKER (exponential decay + quadratic size)
-    "fair_value_mm": StrategyState("fair_value_mm"),    # Fair Value MM (Binance-priced like real MMs)
-    "simple_hedger": StrategyState("simple_hedger"),    # Simple Hedger (flip strategy)
+    "fair_value_mm": StrategyState("fair_value_mm"),    # Fair Value MM (Binance-based pricing)
     "volume_weighted": StrategyState("volume_weighted"),  # Volume Weighted (Gabagool-style) mode
-    "directional": StrategyState("directional"),
     # Legacy - keep for backward compat but not shown in UI
     "standard": StrategyState("standard"),
     "accumulation": None,  # Will point to "standard" for backward compat
@@ -501,16 +440,7 @@ async def handle_auto_restart(strategy_name: str):
         logger.info(f"[AUTO-RESTART] Restarting {strategy_name} with {remaining/60:.1f} minutes remaining")
 
         try:
-            if strategy_name == "directional":
-                from pydantic import BaseModel
-                # Create config object
-                dir_config = DirectionalBotConfig(**config)
-                strategy.status["running"] = True
-                strategy.status["error"] = None
-                strategy.status["restarted_at"] = now.isoformat()
-                await broadcast_status()
-                strategy.task = asyncio.create_task(run_directional_bot(dir_config, strategy))
-            elif strategy_name == "calculus_maker":
+            if strategy_name == "calculus_maker":
                 # Calculus MAKER strategy - use its own runner, NOT accumulation_bot
                 calc_config = CalculusMakerBotConfig(**config)
                 strategy.status["running"] = True
@@ -644,18 +574,14 @@ async def get_status(username: str = Depends(verify_credentials)):
     return {
         "calculus_maker": strategies["calculus_maker"].status,
         "fair_value_mm": strategies["fair_value_mm"].status,
-        "simple_hedger": strategies["simple_hedger"].status,
         "volume_weighted": strategies["volume_weighted"].status,
-        "directional": strategies["directional"].status,
         # Legacy format for backward compatibility
         "standard": strategies["standard"].status,
         "accumulation": strategies["standard"].status,  # Alias to standard
         "running": (
             strategies["calculus_maker"].status["running"] or
             strategies["fair_value_mm"].status["running"] or
-            strategies["simple_hedger"].status["running"] or
             strategies["volume_weighted"].status["running"] or
-            strategies["directional"].status["running"] or
             strategies["standard"].status["running"]
         ),
         "kill_switch_active": is_kill_switch_active(),
@@ -1059,88 +985,6 @@ async def start_volume_weighted(config: AccumulationBotConfig, username: str = D
     return await start_accumulation(config)
 
 
-@app.post("/api/start/directional")
-async def start_directional(config: DirectionalBotConfig, username: str = Depends(verify_credentials)):
-    """Start the Directional trading strategy. Requires authentication."""
-    # Clear kill switch when user explicitly starts - they want to run
-    clear_kill_switch()
-
-    strategy = strategies["directional"]
-
-    # Check if actually running (task exists and not done) vs just stale status
-    actually_running = (
-        strategy.status["running"] and
-        strategy.task is not None and
-        not strategy.task.done()
-    )
-
-    if actually_running:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Directional strategy is already running"}
-        )
-
-    # Reset stale status if task is done but status wasn't updated
-    if strategy.status["running"] and (strategy.task is None or strategy.task.done()):
-        strategy.status["running"] = False
-        strategy.reset_trading_data()  # Clear stale position data
-        strategy.task = None
-
-    # Validate datetime
-    try:
-        start_dt = datetime.fromisoformat(config.start_datetime)
-        end_dt = datetime.fromisoformat(config.end_datetime)
-        if end_dt <= start_dt:
-            return JSONResponse(status_code=400, content={"error": "End time must be after start time"})
-    except ValueError as e:
-        return JSONResponse(status_code=400, content={"error": f"Invalid datetime: {e}"})
-
-    # Validate bias
-    if config.initial_bias not in ["BULLISH", "BEARISH"]:
-        return JSONResponse(status_code=400, content={"error": "Initial bias must be BULLISH or BEARISH"})
-
-    # Validate balance for live mode
-    if config.mode == "live":
-        try:
-            from src.config import Config
-            from src.api.polymarket_client import PolymarketClient
-
-            pm_config = Config()
-            pm_config.validate()
-            client = PolymarketClient(pm_config)
-            await client.connect()
-            actual_balance = await client.get_balance()
-            await client.disconnect()
-
-            if config.starting_balance > actual_balance:
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "error": f"Starting balance ${config.starting_balance:.2f} exceeds "
-                                 f"Polymarket balance ${actual_balance:.2f}"
-                    }
-                )
-            logger.info(f"[LIVE] Balance check passed: ${actual_balance:.2f} available")
-        except Exception as e:
-            return JSONResponse(status_code=400, content={"error": f"Failed to check Polymarket balance: {e}"})
-
-    # Update strategy status
-    strategy.status = {
-        "running": True,
-        "strategy": "directional",
-        "error": None,
-        "config": config.dict(),
-        "start_time": datetime.now(timezone.utc).isoformat(),
-        "balance": config.starting_balance,
-    }
-
-    # Start bot in background
-    strategy.task = asyncio.create_task(run_directional_bot(config, strategy))
-
-    await broadcast_status()
-    return {"status": "started", "strategy": "directional", "config": config.dict()}
-
-
 @app.post("/api/start/calculus_maker")
 async def start_calculus_maker(config: CalculusMakerBotConfig, username: str = Depends(verify_credentials)):
     """Start the Calculus MAKER trading strategy. Requires authentication."""
@@ -1311,90 +1155,6 @@ async def start_fair_value_mm(config: FairValueMMBotConfig, username: str = Depe
 
     await broadcast_status()
     return {"status": "started", "strategy": "fair_value_mm", "config": config.dict()}
-
-
-@app.post("/api/start/simple_hedger")
-async def start_simple_hedger(config: SimpleHedgerBotConfig, username: str = Depends(verify_credentials)):
-    """Start the Simple Hedger trading strategy. Requires authentication."""
-    # Clear kill switch when user explicitly starts - they want to run
-    clear_kill_switch()
-
-    strategy = strategies["simple_hedger"]
-
-    # Check if actually running
-    actually_running = (
-        strategy.status["running"] and
-        strategy.task is not None and
-        not strategy.task.done()
-    )
-
-    if actually_running:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Simple Hedger strategy is already running"}
-        )
-
-    # Reset stale status
-    if strategy.status["running"] and (strategy.task is None or strategy.task.done()):
-        strategy.status["running"] = False
-        strategy.reset_trading_data()
-        strategy.task = None
-
-    # Validate datetime
-    try:
-        start_dt = datetime.fromisoformat(config.start_datetime)
-        end_dt = datetime.fromisoformat(config.end_datetime)
-        if end_dt <= start_dt:
-            return JSONResponse(status_code=400, content={"error": "End time must be after start time"})
-    except ValueError as e:
-        return JSONResponse(status_code=400, content={"error": f"Invalid datetime: {e}"})
-
-    # Validate Simple Hedger parameters
-    if config.size < 5:
-        return JSONResponse(status_code=400, content={"error": "Size must be at least 5 (Polymarket minimum)"})
-    if config.target_pair_cost >= 1.0:
-        return JSONResponse(status_code=400, content={"error": "Target pair cost must be < 1.0"})
-
-    # Validate balance for live mode
-    if config.mode == "live":
-        try:
-            from src.config import Config
-            from src.api.polymarket_client import PolymarketClient
-
-            pm_config = Config()
-            pm_config.validate()
-            client = PolymarketClient(pm_config)
-            await client.connect()
-            actual_balance = await client.get_balance()
-            await client.disconnect()
-
-            if config.starting_balance > actual_balance:
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "error": f"Starting balance ${config.starting_balance:.2f} exceeds "
-                                 f"Polymarket balance ${actual_balance:.2f}"
-                    }
-                )
-            logger.info(f"[LIVE] Balance check passed: ${actual_balance:.2f} available")
-        except Exception as e:
-            return JSONResponse(status_code=400, content={"error": f"Failed to check Polymarket balance: {e}"})
-
-    # Update strategy status
-    strategy.status = {
-        "running": True,
-        "strategy": "simple_hedger",
-        "error": None,
-        "config": config.dict(),
-        "start_time": datetime.now(timezone.utc).isoformat(),
-        "balance": config.starting_balance,
-    }
-
-    # Start bot in background
-    strategy.task = asyncio.create_task(run_simple_hedger_bot(config, strategy))
-
-    await broadcast_status()
-    return {"status": "started", "strategy": "simple_hedger", "config": config.dict()}
 
 
 @app.post("/api/stop/{strategy_name}")
@@ -1672,89 +1432,6 @@ async def run_accumulation_bot(config: AccumulationBotConfig, strategy: Strategy
         logger.info(f"[{accum_mode}] Cleared restart config - no auto-restart will occur")
 
 
-async def run_directional_bot(config: DirectionalBotConfig, strategy: StrategyState):
-    """Run the Directional trading bot asynchronously with resilience."""
-    # Store config for auto-restart
-    restart_configs["directional"] = config.dict()
-
-    try:
-        from scripts.run_paper_bot import PaperTradingBot
-
-        # CRITICAL: Normalize times to UTC at the API boundary
-        # Frontend sends local time (IST) - convert to UTC for consistent handling
-        start_dt_utc = normalize_datetime_to_utc(config.start_datetime)
-        end_dt_utc = normalize_datetime_to_utc(config.end_datetime)
-
-        logger.info(f"[directional] Session time window (UTC): {start_dt_utc.isoformat()} to {end_dt_utc.isoformat()}")
-
-        # Wait until start time (compare in UTC)
-        now_utc = datetime.now(timezone.utc)
-        if start_dt_utc > now_utc:
-            wait_seconds = (start_dt_utc - now_utc).total_seconds()
-            strategy.status["waiting_until"] = start_dt_utc.isoformat()
-            await broadcast_status()
-            await asyncio.sleep(wait_seconds)
-
-        strategy.status.pop("waiting_until", None)
-        strategy.status["trading_started"] = datetime.now(timezone.utc).isoformat()
-        strategy.status["end_datetime"] = end_dt_utc.isoformat()
-        await broadcast_status()
-
-        duration_minutes = (end_dt_utc - start_dt_utc).total_seconds() / 60.0
-        web_callback = create_web_callback_for_strategy("directional")
-
-        # Create Directional bot with session time window
-        bot = PaperTradingBot.from_directional_config(
-            config.dict(),
-            web_callback=web_callback,
-            session_start_utc=start_dt_utc,
-            session_end_utc=end_dt_utc,
-            trading_mode=config.mode,
-        )
-        strategy.instance = bot
-
-        logger.info("[directional] Initializing bot...")
-        await bot.initialize()
-
-        logger.info(f"[directional] Starting trading loop for {duration_minutes:.1f} minutes")
-        await bot.run(duration_minutes=duration_minutes)
-
-        strategy.status["running"] = False
-        strategy.status["completed"] = True
-        strategy.reset_trading_data()  # Clear stale position data
-        strategy.instance = None
-        # Clear restart config on normal completion (including graceful stop via Telegram)
-        if "directional" in restart_configs:
-            del restart_configs["directional"]
-            logger.info("[directional] Cleared restart config - session completed normally")
-        logger.info("[directional] Trading session completed normally")
-        await broadcast_status()
-
-    except asyncio.CancelledError:
-        strategy.status["running"] = False
-        strategy.status["error"] = "Stopped by user"
-        strategy.reset_trading_data()  # Clear stale position data
-        strategy.instance = None
-        # Clear restart config on user cancellation
-        if "directional" in restart_configs:
-            del restart_configs["directional"]
-            logger.info("[directional] Cleared restart config - stopped by user")
-        logger.info("[directional] Stopped by user")
-        await broadcast_status()
-        raise
-    except Exception as e:
-        strategy.status["running"] = False
-        strategy.status["error"] = str(e)
-        strategy.reset_trading_data()  # Clear stale position data
-        strategy.instance = None
-        logger.error(f"[directional] Error: {e}")
-        logger.error(f"[directional] Traceback: {traceback.format_exc()}")
-        await broadcast_status()
-        # FIXED: Clear restart_configs on crash to prevent rogue auto-restart
-        restart_configs.pop("directional", None)
-        logger.info("[directional] Cleared restart config - no auto-restart will occur")
-
-
 async def run_calculus_bot(config: CalculusMakerBotConfig, strategy: StrategyState):
     """Run the Calculus MAKER trading bot asynchronously with resilience.
 
@@ -1925,89 +1602,6 @@ async def run_fair_value_mm_bot(config: FairValueMMBotConfig, strategy: Strategy
         logger.info("[fair_value_mm] Cleared restart config - no auto-restart will occur")
 
 
-async def run_simple_hedger_bot(config: SimpleHedgerBotConfig, strategy: StrategyState):
-    """Run the Simple Hedger trading bot asynchronously.
-
-    Uses the Simple Hedger strategy with flip logic.
-    """
-    # Store config for auto-restart
-    restart_configs["simple_hedger"] = config.dict()
-
-    try:
-        from scripts.run_simple_hedger import SimpleHedgerBot
-
-        # CRITICAL: Normalize times to UTC at the API boundary
-        start_dt_utc = normalize_datetime_to_utc(config.start_datetime)
-        end_dt_utc = normalize_datetime_to_utc(config.end_datetime)
-
-        logger.info(f"[simple_hedger] Session time window (UTC): {start_dt_utc.isoformat()} to {end_dt_utc.isoformat()}")
-
-        # Wait until start time (compare in UTC)
-        now_utc = datetime.now(timezone.utc)
-        if start_dt_utc > now_utc:
-            wait_seconds = (start_dt_utc - now_utc).total_seconds()
-            strategy.status["waiting_until"] = start_dt_utc.isoformat()
-            await broadcast_status()
-            await asyncio.sleep(wait_seconds)
-
-        strategy.status.pop("waiting_until", None)
-        strategy.status["trading_started"] = datetime.now(timezone.utc).isoformat()
-        strategy.status["end_datetime"] = end_dt_utc.isoformat()
-        await broadcast_status()
-
-        duration_minutes = (end_dt_utc - start_dt_utc).total_seconds() / 60.0
-
-        # Create web callback for frontend updates
-        web_callback = create_web_callback_for_strategy("simple_hedger")
-
-        # Create Simple Hedger bot with session time window
-        bot = SimpleHedgerBot(
-            live_mode=(config.mode == "live"),
-            initial_balance=config.starting_balance,
-            session_start_utc=start_dt_utc,
-            session_end_utc=end_dt_utc,
-            web_callback=web_callback,
-        )
-        strategy.instance = bot
-
-        logger.info("[simple_hedger] Initializing bot...")
-        await bot.initialize()
-
-        logger.info(f"[simple_hedger] Starting trading loop for {duration_minutes:.1f} minutes")
-        await bot.run(duration_minutes=duration_minutes)
-
-        strategy.status["running"] = False
-        strategy.status["completed"] = True
-        strategy.reset_trading_data()
-        strategy.instance = None
-        # Clear restart config on normal completion
-        if "simple_hedger" in restart_configs:
-            del restart_configs["simple_hedger"]
-            logger.info("[simple_hedger] Cleared restart config - session completed normally")
-        logger.info("[simple_hedger] Trading session completed normally")
-        await broadcast_status()
-
-    except asyncio.CancelledError:
-        strategy.status["running"] = False
-        strategy.status["error"] = "Stopped by user"
-        strategy.reset_trading_data()
-        strategy.instance = None
-        if "simple_hedger" in restart_configs:
-            del restart_configs["simple_hedger"]
-            logger.info("[simple_hedger] Cleared restart config - stopped by user")
-        logger.info("[simple_hedger] Stopped by user")
-        await broadcast_status()
-        raise
-    except Exception as e:
-        strategy.status["running"] = False
-        strategy.status["error"] = str(e)
-        strategy.reset_trading_data()
-        strategy.instance = None
-        logger.error(f"[simple_hedger] Error: {e}")
-        logger.error(f"[simple_hedger] Traceback: {traceback.format_exc()}")
-        await broadcast_status()
-
-
 def create_web_callback_for_strategy(strategy_name: str):
     """Create a callback function for a specific strategy to send trading updates."""
     def callback(data: dict):
@@ -2042,9 +1636,8 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.send_json({
             "type": "status",
             "calculus_maker": strategies["calculus_maker"].status,
-            "simple_hedger": strategies["simple_hedger"].status,
+            "fair_value_mm": strategies["fair_value_mm"].status,
             "volume_weighted": strategies["volume_weighted"].status,
-            "directional": strategies["directional"].status,
             "standard": strategies["standard"].status,
             "accumulation": strategies["standard"].status,  # Legacy alias
         })
@@ -2064,9 +1657,8 @@ async def broadcast_status():
     status_msg = {
         "type": "status",
         "calculus_maker": strategies["calculus_maker"].status,
-        "simple_hedger": strategies["simple_hedger"].status,
+        "fair_value_mm": strategies["fair_value_mm"].status,
         "volume_weighted": strategies["volume_weighted"].status,
-        "directional": strategies["directional"].status,
         "standard": strategies["standard"].status,
         "accumulation": strategies["standard"].status,  # Legacy alias
     }

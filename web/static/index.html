@@ -273,10 +273,6 @@
                                 <input type="number" id="fair-value-mm-balance-input" value="170" min="1">
                             </div>
                             <div class="config-field">
-                                <label>Target Shares</label>
-                                <input type="number" id="fair-value-mm-target" value="15" min="5" step="5" title="Target shares per side (multiples of 5)">
-                            </div>
-                            <div class="config-field">
                                 <label>Edge $</label>
                                 <input type="number" id="fair-value-mm-edge" value="0.02" step="0.01" min="0.01" max="0.10" title="Edge below fair value (e.g., 0.02 = 2 cents)">
                             </div>
@@ -293,12 +289,32 @@
                                 <input type="number" id="fair-value-mm-reprice" value="0.03" step="0.01" min="0.01" max="0.10" title="Reprice if fair value changes more than this (3 cents)">
                             </div>
                             <div class="config-field">
-                                <label>Max Pair $</label>
-                                <input type="number" id="fair-value-mm-max-pair" value="0.98" step="0.005" title="Maximum pair cost to accept">
+                                <label>Max Shares</label>
+                                <input type="number" id="fair-value-mm-max-shares" value="50" min="5" step="5" title="Maximum order size per trade">
                             </div>
                             <div class="config-field">
-                                <label>Hard Max</label>
-                                <input type="number" id="fair-value-mm-hard-max" value="10" step="1" min="1" title="HARD LIMIT: Stop ALL trading if imbalance >= this (shares)">
+                                <label>Min Shares</label>
+                                <input type="number" id="fair-value-mm-min-shares" value="5" min="5" step="5" title="Minimum order size (Polymarket min = 5)">
+                            </div>
+                            <div class="config-field">
+                                <label>m_min</label>
+                                <input type="number" id="fair-value-mm-m-min" value="0.01" step="0.001" min="0" max="0.1" title="Late market threshold (accept 1% edge)">
+                            </div>
+                            <div class="config-field">
+                                <label>m_max</label>
+                                <input type="number" id="fair-value-mm-m-max" value="0.04" step="0.005" min="0" max="0.2" title="Early market threshold (require 4% edge)">
+                            </div>
+                            <div class="config-field">
+                                <label>Lambda</label>
+                                <input type="number" id="fair-value-mm-lambda" value="0.005" step="0.001" min="0.001" max="0.05" title="Decay constant for mispricing threshold">
+                            </div>
+                            <div class="config-field">
+                                <label>Max Pair $</label>
+                                <input type="number" id="fair-value-mm-max-pair" value="0.995" step="0.005" title="Maximum pair cost to accept">
+                            </div>
+                            <div class="config-field">
+                                <label>Imbal %</label>
+                                <input type="number" id="fair-value-mm-imbalance" value="0.20" step="0.05" title="Max imbalance as % of position">
                             </div>
                             <div class="config-field">
                                 <label>Max Loss $</label>
@@ -315,143 +331,6 @@
                     <button class="btn btn-nuke" id="btn-nuke-fair-value-mm" disabled>NUKE</button>
                 </div>
                 <div id="error-fair-value-mm" class="card-error hidden"></div>
-            </div>
-
-            <!-- ========== SIMPLE HEDGER MODE CARD ========== -->
-            <div class="mode-card" id="card-simple-hedger">
-                <div class="card-header">
-                    <h2>SIMPLE HEDGER</h2>
-                    <div class="status-badge stopped" id="badge-simple-hedger">
-                        <span class="status-dot"></span>
-                        <span class="status-text">Stopped</span>
-                    </div>
-                </div>
-
-                <!-- Live Data Section -->
-                <div class="card-live-data" id="live-simple-hedger">
-                    <div class="market-row">
-                        <span class="market-label">Market:</span>
-                        <span class="market-value" id="simple-hedger-market">--</span>
-                        <span class="time-remaining" id="simple-hedger-time">--:--</span>
-                    </div>
-                    <div class="market-prices-row">
-                        <span class="price up" id="simple-hedger-up-price">UP $--</span>
-                        <span class="price down" id="simple-hedger-down-price">DOWN $--</span>
-                    </div>
-                    <table class="position-table">
-                        <thead>
-                            <tr>
-                                <th></th>
-                                <th>avg price</th>
-                                <th>qty</th>
-                                <th>cost</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr class="up-row">
-                                <td class="side-label">up</td>
-                                <td class="avg-price up" id="simple-hedger-up-avg">--</td>
-                                <td class="qty up" id="simple-hedger-up-qty">--</td>
-                                <td class="cost" id="simple-hedger-up-cost">--</td>
-                            </tr>
-                            <tr class="down-row">
-                                <td class="side-label">down</td>
-                                <td class="avg-price down" id="simple-hedger-down-avg">--</td>
-                                <td class="qty down" id="simple-hedger-down-qty">--</td>
-                                <td class="cost" id="simple-hedger-down-cost">--</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                    <div class="metrics-row">
-                        <div class="metric pairs">
-                            <span class="value" id="simple-hedger-pairs">--</span>
-                            <span class="label">@ <span id="simple-hedger-avg-pair-cost">--</span></span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Locked PNL</span>
-                            <span class="value pnl" id="simple-hedger-locked-pnl">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Range PNL</span>
-                            <span class="value pnl" id="simple-hedger-pnl-range">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Balance</span>
-                            <span class="value" id="simple-hedger-balance">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Session P&L</span>
-                            <span class="value pnl" id="simple-hedger-realized-pnl">--</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Collapsible Config -->
-                <div class="card-config">
-                    <button type="button" class="config-toggle expanded" id="toggle-simple-hedger">
-                        <span class="toggle-icon">&#9660;</span> Config
-                    </button>
-                    <div class="config-content expanded" id="config-simple-hedger">
-                        <div class="config-row">
-                            <div class="toggle-group mode-toggle">
-                                <label class="toggle-option">
-                                    <input type="radio" name="simple_hedger_mode" value="paper" checked>
-                                    <span>Paper</span>
-                                </label>
-                                <label class="toggle-option live-option">
-                                    <input type="radio" name="simple_hedger_mode" value="live">
-                                    <span>LIVE</span>
-                                </label>
-                            </div>
-                        </div>
-                        <div class="config-grid">
-                            <div class="config-field">
-                                <label>Start</label>
-                                <input type="datetime-local" id="simple-hedger-start" required>
-                            </div>
-                            <div class="config-field">
-                                <label>End</label>
-                                <input type="datetime-local" id="simple-hedger-end" required>
-                            </div>
-                            <div class="config-field">
-                                <label>Balance</label>
-                                <input type="number" id="simple-hedger-balance-input" value="200" min="1">
-                            </div>
-                            <div class="config-field">
-                                <label>Size</label>
-                                <input type="number" id="simple-hedger-size" value="10" min="5" step="5" title="Shares per trade (10 recommended)">
-                            </div>
-                            <div class="config-field">
-                                <label>Target Pair $</label>
-                                <input type="number" id="simple-hedger-target-pair" value="0.97" step="0.01" title="Target pair cost for normal hedge">
-                            </div>
-                            <div class="config-field">
-                                <label>Emergency $</label>
-                                <input type="number" id="simple-hedger-emergency-pair" value="0.98" step="0.01" title="Target pair cost after flip">
-                            </div>
-                            <div class="config-field">
-                                <label>Flip +$</label>
-                                <input type="number" id="simple-hedger-flip-threshold" value="0.20" step="0.05" title="Price move that triggers flip">
-                            </div>
-                            <div class="config-field">
-                                <label>Wait (s)</label>
-                                <input type="number" id="simple-hedger-wait" value="3" step="1" min="1" title="Seconds to wait before first trade">
-                            </div>
-                            <div class="config-field">
-                                <label>Timeout (s)</label>
-                                <input type="number" id="simple-hedger-timeout" value="30" step="5" min="5" title="Order timeout before retry">
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Action Buttons -->
-                <div class="card-actions">
-                    <button class="btn btn-start" id="btn-start-simple-hedger">START</button>
-                    <button class="btn btn-stop" id="btn-stop-simple-hedger" disabled>STOP</button>
-                    <button class="btn btn-nuke" id="btn-nuke-simple-hedger" disabled>NUKE</button>
-                </div>
-                <div id="error-simple-hedger" class="card-error hidden"></div>
             </div>
 
             <!-- ========== VOLUME WEIGHTED MODE CARD ========== -->
@@ -593,160 +472,6 @@
                     <button class="btn btn-nuke" id="btn-nuke-volume-weighted" disabled>NUKE</button>
                 </div>
                 <div id="error-volume-weighted" class="card-error hidden"></div>
-            </div>
-
-            <!-- ========== DIRECTIONAL MODE CARD ========== -->
-            <div class="mode-card" id="card-directional">
-                <div class="card-header">
-                    <h2>DIRECTIONAL <span class="bias-triangle bullish" id="directional-triangle">&#9650;</span></h2>
-                    <div class="status-badge stopped" id="badge-directional">
-                        <span class="status-dot"></span>
-                        <span class="status-text">Stopped</span>
-                    </div>
-                </div>
-
-                <!-- Live Data Section -->
-                <div class="card-live-data" id="live-directional">
-                    <div class="market-row">
-                        <span class="market-label">Market:</span>
-                        <span class="market-value" id="directional-market">--</span>
-                        <span class="time-remaining" id="directional-time">--:--</span>
-                        <span class="flip-count" id="directional-flips">(0 flips)</span>
-                    </div>
-                    <div class="market-prices-row">
-                        <span class="price up" id="directional-up-price">UP $--</span>
-                        <span class="price down" id="directional-down-price">DOWN $--</span>
-                    </div>
-                    <table class="position-table">
-                        <thead>
-                            <tr>
-                                <th></th>
-                                <th>avg price</th>
-                                <th>qty</th>
-                                <th>cost</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr class="up-row">
-                                <td class="side-label">up</td>
-                                <td class="avg-price up" id="directional-up-avg">--</td>
-                                <td class="qty up" id="directional-up-qty">--</td>
-                                <td class="cost" id="directional-up-cost">--</td>
-                            </tr>
-                            <tr class="down-row">
-                                <td class="side-label">down</td>
-                                <td class="avg-price down" id="directional-down-avg">--</td>
-                                <td class="qty down" id="directional-down-qty">--</td>
-                                <td class="cost" id="directional-down-cost">--</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                    <div class="metrics-row">
-                        <div class="metric pairs">
-                            <span class="value" id="directional-pairs">--</span>
-                            <span class="label">@ <span id="directional-avg-pair-cost">--</span></span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Locked PNL</span>
-                            <span class="value pnl" id="directional-locked-pnl">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Range PNL</span>
-                            <span class="value pnl" id="directional-pnl-range">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Balance</span>
-                            <span class="value" id="directional-balance">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Session P&L</span>
-                            <span class="value pnl" id="directional-realized-pnl">--</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Collapsible Config -->
-                <div class="card-config">
-                    <button type="button" class="config-toggle expanded" id="toggle-directional">
-                        <span class="toggle-icon">&#9660;</span> Config
-                    </button>
-                    <div class="config-content expanded" id="config-directional">
-                        <div class="config-row">
-                            <div class="toggle-group mode-toggle">
-                                <label class="toggle-option">
-                                    <input type="radio" name="directional_mode" value="paper" checked>
-                                    <span>Paper</span>
-                                </label>
-                                <label class="toggle-option live-option">
-                                    <input type="radio" name="directional_mode" value="live">
-                                    <span>LIVE</span>
-                                </label>
-                            </div>
-                        </div>
-                        <div class="config-row">
-                            <div class="toggle-group bias-toggle">
-                                <label class="toggle-option">
-                                    <input type="radio" name="directional_bias" value="BULLISH" checked>
-                                    <span class="bullish">BULLISH</span>
-                                </label>
-                                <label class="toggle-option">
-                                    <input type="radio" name="directional_bias" value="BEARISH">
-                                    <span class="bearish">BEARISH</span>
-                                </label>
-                            </div>
-                        </div>
-                        <div class="config-grid">
-                            <div class="config-field">
-                                <label>Start</label>
-                                <input type="datetime-local" id="directional-start" required>
-                            </div>
-                            <div class="config-field">
-                                <label>End</label>
-                                <input type="datetime-local" id="directional-end" required>
-                            </div>
-                            <div class="config-field">
-                                <label>Balance</label>
-                                <input type="number" id="directional-balance-input" value="100" min="1">
-                            </div>
-                            <div class="config-field">
-                                <label>Trade Size</label>
-                                <input type="number" id="directional-trade-size" value="5" min="1">
-                            </div>
-                            <div class="config-field">
-                                <label>Target Shares</label>
-                                <input type="number" id="directional-target" value="15" min="1">
-                            </div>
-                            <div class="config-field">
-                                <label>Max Pos %</label>
-                                <input type="number" id="directional-max-pos-pct" value="15" min="1" max="100">
-                            </div>
-                            <div class="config-field">
-                                <label>Flip CD (s)</label>
-                                <input type="number" id="directional-flip-cd" value="180" min="0">
-                            </div>
-                            <div class="config-field">
-                                <label>Sigma</label>
-                                <input type="number" id="directional-sigma" value="2.0" step="0.1">
-                            </div>
-                            <div class="config-field">
-                                <label>Max Flips</label>
-                                <input type="number" id="directional-max-flips" value="2" min="0">
-                            </div>
-                            <div class="config-field">
-                                <label>Dip %</label>
-                                <input type="number" id="directional-dip" value="0.10" step="0.01">
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Action Buttons -->
-                <div class="card-actions">
-                    <button class="btn btn-start" id="btn-start-directional">START</button>
-                    <button class="btn btn-stop" id="btn-stop-directional" disabled>STOP</button>
-                    <button class="btn btn-nuke" id="btn-nuke-directional" disabled>NUKE</button>
-                </div>
-                <div id="error-directional" class="card-error hidden"></div>
             </div>
 
         </div>
