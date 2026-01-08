@@ -4,7 +4,7 @@
 
 set -e
 
-AWS_IP="18.203.188.18"
+AWS_IP="54.170.244.221"
 AWS_KEY="$HOME/Downloads/polymarket-key.pem"
 LOCAL_PATH="/Users/rananjaybika/polymarket-amm-bot/"
 REMOTE_PATH="ubuntu@$AWS_IP:~/polymarket-amm-bot/"
