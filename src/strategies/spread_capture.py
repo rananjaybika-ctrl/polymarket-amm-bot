@@ -42,6 +42,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.config import FeeConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -128,6 +130,7 @@ class SpreadCaptureState:
     entry_fill_price: float = 0.0
     entry_fill_size: int = 0
     entry_fill_time: float = 0.0
+    entry_order_type: str = "maker"  # "maker" or "taker" - for fee/rebate calculation
 
     # Hedge order tracking
     hedge_side: str = ""                    # Opposite of entry_side
@@ -141,6 +144,7 @@ class SpreadCaptureState:
     hedge_fill_price: float = 0.0
     hedge_fill_size: int = 0
     hedge_fill_time: float = 0.0
+    hedge_order_type: str = "maker"  # "maker" or "taker" - for fee/rebate calculation
 
     # Profit tracking
     target_spread: float = 0.0              # Expected spread capture
@@ -322,48 +326,83 @@ class SpreadCaptureStrategy:
     def calculate_max_hedge_price(
         self,
         entry_fill_price: float,
+        hedge_is_taker: bool = False,
     ) -> float:
         """
         Calculate maximum hedge price to maintain profitability.
 
         This is the PROFIT CEILING - hedge price must never exceed this.
+        Now accounts for maker rebates and taker fees:
+        - Maker-maker: Can accept higher pair cost due to ~2% total rebates
+        - Maker-taker: Must be stricter due to ~1.56% taker fee
 
         Args:
-            entry_fill_price: What we paid for entry
+            entry_fill_price: What we paid for entry (assumed maker)
+            hedge_is_taker: True if hedge will be taker order (emergency)
 
         Returns:
             Maximum acceptable hedge price
         """
-        return round(1.00 - entry_fill_price - self.min_profit, 4)
+        if hedge_is_taker:
+            # Use FeeConfig's taker-aware calculation
+            return FeeConfig.get_max_taker_hedge_price(
+                entry_price=entry_fill_price,
+                min_profit=self.min_profit,
+            )
+        else:
+            # Maker-maker: Account for rebates on actual prices
+            # profit = 1.00 - pair_cost + (pair_cost × rebate_rate)
+            #        = 1.00 - pair_cost × (1 - rebate_rate)
+            #        = 1.00 - pair_cost × 0.99
+            #
+            # For profit >= min_profit:
+            #   pair_cost <= (1.00 - min_profit) / 0.99
+            #
+            # With min_profit = 0.005: max pair_cost ≈ $1.005
+            # So max_hedge = max_pair_cost - entry_fill_price
+            effective_rate = 1.0 - FeeConfig.MAKER_REBATE_RATE  # 0.99
+            max_pair_cost = (1.00 - self.min_profit) / effective_rate
+            return round(max_pair_cost - entry_fill_price, 4)
 
     def calculate_wait_time(
         self,
         z_score: float,
         attempt: int,
-        is_entry: bool = True
+        is_entry: bool = True,
+        price_room: Optional[float] = None
     ) -> float:
         """
         Calculate wait time before next retry.
 
-        Higher z-score = less patience (market moving in our favor)
-        More attempts = more patience (exponential backoff)
+        Price-dependent: Deep price (far from ceiling) waits longer to fill.
+        Near ceiling waits shorter since can't improve much.
 
         Args:
             z_score: Current z-score
             attempt: Current retry attempt (0 = first try)
             is_entry: True for entry phase, False for hedge phase
+            price_room: Distance from current price to max price (if available)
 
         Returns:
             Wait time in seconds
         """
-        abs_z = abs(z_score)
-
-        if abs_z >= Z_STRONG_THRESHOLD:
-            base_wait = 5.0
-        elif abs_z >= Z_SLIGHT_THRESHOLD:
-            base_wait = 10.0
+        # Price-dependent wait time (preferred when price_room available)
+        if price_room is not None:
+            if price_room < 0.01:       # Near ceiling - can't improve much
+                base_wait = 5.0
+            elif price_room < 0.02:
+                base_wait = 10.0
+            else:                       # Deep price - give time to fill
+                base_wait = 15.0
         else:
-            base_wait = 10.0
+            # Fallback to z-score based (backwards compatibility)
+            abs_z = abs(z_score)
+            if abs_z >= Z_STRONG_THRESHOLD:
+                base_wait = 5.0
+            elif abs_z >= Z_SLIGHT_THRESHOLD:
+                base_wait = 10.0
+            else:
+                base_wait = 10.0
 
         # Hedge gets more patience
         if not is_entry:
@@ -372,7 +411,8 @@ class SpreadCaptureStrategy:
         # Exponential backoff
         wait = base_wait * (self.retry_escalation ** attempt)
 
-        return min(wait, MAX_WAIT_TIME)
+        # Cap at 45s (not 60s) - better to miss than overpay
+        return min(wait, 45.0)
 
     # =========================================================================
     # MAIN DECISION METHOD
@@ -425,6 +465,19 @@ class SpreadCaptureStrategy:
         # =================================================================
         # PRE-CHECK: Emergency imbalance deferral
         # =================================================================
+        # Exit emergency deferral if imbalance resolved
+        if s.phase == SpreadCapturePhase.EMERGENCY_DEFERRED:
+            if current_imbalance < self.emergency_imbalance_threshold:
+                s.phase = SpreadCapturePhase.IDLE
+                s.deferred_to_emergency = False
+                logger.info(
+                    f"[SPREADCAP] Exiting emergency deferral: imbalance {current_imbalance} "
+                    f"< {self.emergency_imbalance_threshold} - returning to IDLE"
+                )
+            else:
+                return None  # Still in emergency, let emergency logic handle it
+
+        # Enter emergency deferral if imbalance too high
         if current_imbalance >= self.emergency_imbalance_threshold:
             if s.phase not in (SpreadCapturePhase.EMERGENCY_DEFERRED,
                                SpreadCapturePhase.COMPLETE):
@@ -519,8 +572,8 @@ class SpreadCaptureStrategy:
             # Follow the trend - enter on favored side
             s.entry_side = trend_direction.upper()
         else:
-            # Neutral - enter cheaper side
-            s.entry_side = "UP" if up_ask < down_ask else "DOWN"
+            # Neutral - enter EXPENSIVE side first (harder to fill, avoid leg risk)
+            s.entry_side = "UP" if up_ask > down_ask else "DOWN"
 
         s.hedge_side = "DOWN" if s.entry_side == "UP" else "UP"
 
@@ -570,7 +623,9 @@ class SpreadCaptureStrategy:
         3. If max retries exceeded, abort
         """
         s = self.state
-        wait_time = self.calculate_wait_time(z_score, s.entry_retry_count, is_entry=True)
+        # Calculate price room for price-dependent wait time
+        price_room = self.max_share_price - s.entry_price if s.entry_price > 0 else None
+        wait_time = self.calculate_wait_time(z_score, s.entry_retry_count, is_entry=True, price_room=price_room)
         elapsed = current_time - s.entry_placed_at
 
         if elapsed < wait_time:
@@ -579,10 +634,19 @@ class SpreadCaptureStrategy:
         # Timeout - check retry count
         s.entry_retry_count += 1
         if s.entry_retry_count > self.max_entry_retries:
-            s.phase = SpreadCapturePhase.ABORTED
-            s.abort_reason = f"Entry failed after {self.max_entry_retries} retries"
-            logger.warning(f"[SPREADCAP] ABORT: {s.abort_reason}")
-            return None
+            # If we have partial fills, hedge what we got instead of aborting
+            if s.entry_fill_size > 0:
+                s.phase = SpreadCapturePhase.ENTRY_FILLED
+                logger.info(
+                    f"[SPREADCAP] Max retries exceeded but have partial fills: "
+                    f"{s.entry_fill_size}/{s.entry_size} @ ${s.entry_fill_price:.4f} - proceeding to hedge"
+                )
+                return None  # Next tick will handle ENTRY_FILLED -> place hedge
+            else:
+                s.phase = SpreadCapturePhase.ABORTED
+                s.abort_reason = f"Entry failed after {self.max_entry_retries} retries (no fills)"
+                logger.warning(f"[SPREADCAP] ABORT: {s.abort_reason}")
+                return None
 
         # LIVE Z RECALCULATION: Price may need to adjust
         is_favorable = self.is_z_favorable(s.entry_side, trend_direction, z_score)
@@ -667,7 +731,10 @@ class SpreadCaptureStrategy:
         Key behavior on non-fill: RE-QUEUE at better price (not market take).
         """
         s = self.state
-        wait_time = self.calculate_wait_time(z_score, s.hedge_retry_count, is_entry=False)
+        # Calculate price room for price-dependent wait time
+        max_hedge_price = self.calculate_max_hedge_price(s.entry_fill_price) if s.entry_fill_price > 0 else 0.99
+        price_room = max_hedge_price - s.hedge_price if s.hedge_price > 0 else None
+        wait_time = self.calculate_wait_time(z_score, s.hedge_retry_count, is_entry=False, price_room=price_room)
         elapsed = current_time - s.hedge_placed_at
 
         if elapsed < wait_time:
@@ -762,58 +829,104 @@ class SpreadCaptureStrategy:
         side_upper = side.upper()
 
         if s.phase == SpreadCapturePhase.ENTRY_PENDING and side_upper == s.entry_side:
-            s.entry_fill_price = price
-            s.entry_fill_size = size
+            # Accumulate partial fills with weighted average price
+            old_cost = s.entry_fill_price * s.entry_fill_size
+            new_cost = price * size
+            s.entry_fill_size += size  # Accumulate, not overwrite
+            s.entry_fill_price = round((old_cost + new_cost) / s.entry_fill_size, 4)
             s.entry_fill_time = time.time()
             s.total_entry_fills += size
-            s.phase = SpreadCapturePhase.ENTRY_FILLED
-            logger.info(
-                f"[SPREADCAP] Entry filled: {side_upper} {size} @ ${price:.4f} | "
-                f"total={s.total_entry_fills}/{self.target_shares}"
-            )
+
+            # Only transition to ENTRY_FILLED when full size filled
+            if s.entry_fill_size >= s.entry_size:
+                s.phase = SpreadCapturePhase.ENTRY_FILLED
+                logger.info(
+                    f"[SPREADCAP] Entry FULLY filled: {side_upper} {s.entry_fill_size} @ ${s.entry_fill_price:.4f} | "
+                    f"total={s.total_entry_fills}/{self.target_shares}"
+                )
+            else:
+                logger.info(
+                    f"[SPREADCAP] Entry PARTIAL fill: {side_upper} +{size} @ ${price:.4f} | "
+                    f"filled={s.entry_fill_size}/{s.entry_size} avg=${s.entry_fill_price:.4f}"
+                )
 
         elif s.phase in (SpreadCapturePhase.HEDGE_PENDING,
                          SpreadCapturePhase.HEDGE_REPRICING,
                          SpreadCapturePhase.HEDGE_AT_CEILING) and side_upper == s.hedge_side:
-            s.hedge_fill_price = price
-            s.hedge_fill_size = size
+            # Accumulate partial fills with weighted average price
+            old_cost = s.hedge_fill_price * s.hedge_fill_size
+            new_cost = price * size
+            s.hedge_fill_size += size  # Accumulate, not overwrite
+            s.hedge_fill_price = round((old_cost + new_cost) / s.hedge_fill_size, 4)
             s.hedge_fill_time = time.time()
             s.total_hedge_fills += size
-            s.actual_pair_cost = round(s.entry_fill_price + s.hedge_fill_price, 4)
-            s.cycles_completed += 1
 
-            profit = round(1.00 - s.actual_pair_cost, 4)
-            logger.info(
-                f"[SPREADCAP] Hedge filled: {side_upper} {size} @ ${price:.4f} | "
-                f"Pair cost: ${s.actual_pair_cost:.4f} | Profit: ${profit:.4f} | "
-                f"Cycle {s.cycles_completed}"
-            )
+            # Only complete cycle when full hedge size filled
+            if s.hedge_fill_size >= s.hedge_size:
+                s.actual_pair_cost = round(s.entry_fill_price + s.hedge_fill_price, 4)
+                s.cycles_completed += 1
 
-            # Record completed cycle
-            self._completed_cycles.append({
-                "cycle": s.cycles_completed,
-                "entry_side": s.entry_side,
-                "entry_price": s.entry_fill_price,
-                "entry_size": s.entry_fill_size,
-                "hedge_side": s.hedge_side,
-                "hedge_price": s.hedge_fill_price,
-                "hedge_size": s.hedge_fill_size,
-                "pair_cost": s.actual_pair_cost,
-                "profit": profit,
-                "entry_retries": s.entry_retry_count,
-                "hedge_retries": s.hedge_retry_count,
-            })
-
-            # Check if we should continue or complete
-            if s.total_entry_fills >= self.target_shares:
-                s.phase = SpreadCapturePhase.COMPLETE
-                logger.info(
-                    f"[SPREADCAP] COMPLETE: {s.cycles_completed} cycles, "
-                    f"{s.total_entry_fills} shares filled"
+                # Calculate profit including fees/rebates
+                base_profit = round(1.00 - s.actual_pair_cost, 4)
+                net_profit = FeeConfig.calculate_net_profit(
+                    entry_price=s.entry_fill_price,
+                    hedge_price=s.hedge_fill_price,
+                    size=s.entry_fill_size,
+                    entry_is_maker=(s.entry_order_type == "maker"),
+                    hedge_is_maker=(s.hedge_order_type == "maker"),
                 )
+                net_profit = round(net_profit, 4)
+
+                logger.info(
+                    f"[SPREADCAP] Hedge FULLY filled: {side_upper} {s.hedge_fill_size} @ ${s.hedge_fill_price:.4f} | "
+                    f"Pair cost: ${s.actual_pair_cost:.4f} | "
+                    f"Base profit: ${base_profit:.4f} | Net profit: ${net_profit:.4f} | "
+                    f"Cycle {s.cycles_completed}"
+                )
+
+                # Record completed cycle (include both base and net profit)
+                self._completed_cycles.append({
+                    "cycle": s.cycles_completed,
+                    "entry_side": s.entry_side,
+                    "entry_price": s.entry_fill_price,
+                    "entry_size": s.entry_fill_size,
+                    "entry_order_type": s.entry_order_type,
+                    "hedge_side": s.hedge_side,
+                    "hedge_price": s.hedge_fill_price,
+                    "hedge_size": s.hedge_fill_size,
+                    "hedge_order_type": s.hedge_order_type,
+                    "pair_cost": s.actual_pair_cost,
+                    "base_profit": base_profit,
+                    "net_profit": net_profit,
+                    "entry_retries": s.entry_retry_count,
+                    "hedge_retries": s.hedge_retry_count,
+                })
+                # Check if we should continue or complete
+                if s.total_entry_fills >= self.target_shares:
+                    s.phase = SpreadCapturePhase.COMPLETE
+                    logger.info(
+                        f"[SPREADCAP] COMPLETE: {s.cycles_completed} cycles, "
+                        f"{s.total_entry_fills} shares filled"
+                    )
+                else:
+                    # Reset for next cycle
+                    self._reset_for_next_cycle()
             else:
-                # Reset for next cycle
-                self._reset_for_next_cycle()
+                logger.info(
+                    f"[SPREADCAP] Hedge PARTIAL fill: {side_upper} +{size} @ ${price:.4f} | "
+                    f"filled={s.hedge_fill_size}/{s.hedge_size} avg=${s.hedge_fill_price:.4f}"
+                )
+
+        # Handle fills on ABORTED orders - still need to hedge!
+        elif s.phase == SpreadCapturePhase.ABORTED and side_upper == s.entry_side:
+            logger.warning(
+                f"[SPREADCAP] Aborted order filled! Must hedge: {side_upper} {size} @ ${price:.4f}"
+            )
+            s.entry_fill_price = price
+            s.entry_fill_size = size
+            s.entry_fill_time = time.time()
+            s.total_entry_fills += size
+            s.phase = SpreadCapturePhase.ENTRY_FILLED  # Force transition to hedge
 
     def _reset_for_next_cycle(self) -> None:
         """Reset state for next entry+hedge cycle while preserving totals."""
@@ -835,6 +948,7 @@ class SpreadCaptureStrategy:
         s.entry_fill_price = 0.0
         s.entry_fill_size = 0
         s.entry_fill_time = 0.0
+        s.entry_order_type = "maker"
 
         # Reset hedge state
         s.hedge_side = ""
@@ -846,6 +960,7 @@ class SpreadCaptureStrategy:
         s.hedge_fill_price = 0.0
         s.hedge_fill_size = 0
         s.hedge_fill_time = 0.0
+        s.hedge_order_type = "maker"
 
         # Reset cycle state
         s.target_spread = 0.0

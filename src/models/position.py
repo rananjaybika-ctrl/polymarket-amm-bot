@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
+from src.config import FeeConfig
 from src.models.market import BTCMarket
 
 
@@ -156,12 +157,32 @@ class Position:
     @property
     def locked_profit(self) -> float:
         """
-        Gabagool's locked profit calculation.
+        Gabagool's locked profit calculation, now including maker rebates.
 
-        locked_profit = hedged_pairs × (1.00 - pair_cost)
+        locked_profit = hedged_pairs × (1.00 - pair_cost + estimated_rebates)
 
         This is the GUARANTEED profit if both sides are held to resolution,
-        regardless of which side wins.
+        regardless of which side wins. Now includes estimated maker rebates
+        assuming both sides were filled as maker orders (~1% rebate each).
+        """
+        hedged_pairs = min(self.up_balance, self.down_balance)
+        if hedged_pairs <= 0:
+            return 0.0
+        avg_pair_cost = self.up_avg_price + self.down_avg_price
+
+        # Estimate maker rebates (assume both sides are maker orders)
+        up_rebate = FeeConfig.get_maker_rebate(self.up_avg_price) * self.up_avg_price
+        down_rebate = FeeConfig.get_maker_rebate(self.down_avg_price) * self.down_avg_price
+        total_rebate_per_pair = up_rebate + down_rebate
+
+        return hedged_pairs * (1.0 - avg_pair_cost + total_rebate_per_pair)
+
+    @property
+    def locked_profit_base(self) -> float:
+        """
+        Base locked profit WITHOUT rebates (for comparison/debugging).
+
+        locked_profit = hedged_pairs × (1.00 - pair_cost)
         """
         hedged_pairs = min(self.up_balance, self.down_balance)
         if hedged_pairs <= 0:

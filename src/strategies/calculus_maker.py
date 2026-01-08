@@ -34,6 +34,8 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+from src.config import FeeConfig
+
 
 # =============================================================================
 # PRIMARY PARAMETERS (Polymarket Constraints)
@@ -46,9 +48,16 @@ DEFAULT_MAX_SHARES = 50     # Default maximum shares per order
 DEFAULT_MIN_SHARES = 5      # Default minimum shares per order
 
 # Mispricing threshold parameters
-M_MIN = 0.005               # Late market threshold (accept 0.5% edge → pair_cost < $0.995)
+# With maker rebates (~1% per side, ~2% total), we can accept tighter spreads.
+# Pre-rebate: M_MIN = 0.005 meant we needed 0.5% raw edge
+# Post-rebate: M_MIN = 0.00 means break-even on spread, profit from rebates
+# We use 0.00 as minimum since maker rebates (~2%) provide the profit buffer.
+M_MIN = 0.00                # Late market: accept break-even on spread (rebates = profit)
 M_MAX = 0.025               # Early market threshold (require 2.5% edge → pair_cost < $0.975)
 LAMBDA = 0.004              # Decay constant (higher = faster decay to M_MIN)
+
+# For reference, with ~1% maker rebate per side:
+# pair_cost = $1.00 + 2% rebate = ~$0.02 profit per pair
 
 
 # =============================================================================
@@ -158,7 +167,7 @@ def get_calculus_price(
     time_remaining: float,
     is_emergency: bool = False,
     best_ask: Optional[float] = None
-) -> float:
+) -> Optional[float]:
     """
     Calculate patient bid price using dynamic Calculus MAKER offset.
 
@@ -173,7 +182,7 @@ def get_calculus_price(
         best_ask: Current best ask price (required if is_emergency=True)
 
     Returns:
-        Patient bid price (clamped to minimum 0.01)
+        Patient bid price, or None if price would be <= 0 (don't place order)
 
     Examples:
         >>> get_calculus_price(0.50, 900)   # 15 min, bid at 0.50
@@ -196,7 +205,11 @@ def get_calculus_price(
     threshold = get_mispricing_threshold(time_remaining)
     price = best_bid - threshold
 
-    return max(0.01, price)
+    # Don't place order if price would be invalid (market near resolution with cheap side)
+    if price <= 0:
+        return None
+
+    return price
 
 
 def should_buy_calculus(pair_cost: float, time_remaining: float) -> bool:
@@ -555,7 +568,9 @@ class CalculusMakerStrategy:
         lambda_decay: float = None,
     ):
         self.max_shares = max_shares
-        self.min_shares = max(min_shares, MIN_ORDER_SIZE)
+        # Ensure min_shares is a valid multiple of SIZE_INCREMENT
+        raw_min = max(min_shares, MIN_ORDER_SIZE)
+        self.min_shares = max(MIN_ORDER_SIZE, SIZE_INCREMENT * round(raw_min / SIZE_INCREMENT))
         self.max_pair_cost = max_pair_cost
 
         # Instance-level threshold params (avoids global mutation)

@@ -273,6 +273,174 @@ class Config:
         )
 
 
+class FeeConfig:
+    """
+    Fee and rebate configuration for Polymarket 15-minute crypto markets.
+
+    From Polymarket docs (docs.polymarket.com/developers/market-makers/maker-rebates-program):
+    - Taker fee: Up to 1.56% at 50% price, scales down at extremes
+    - Maker rebate: Proportional share of taker fees collected
+
+    NOTE: Rebate rates may change. Until Jan 9, 2026, 100% of fees → makers.
+    After that date, percentage is at Polymarket's discretion.
+
+    Usage:
+        fee = FeeConfig.get_taker_fee(0.50)  # ~1.56%
+        rebate = FeeConfig.get_maker_rebate(0.50)  # ~0.5%
+    """
+
+    # Taker fee configuration (from Polymarket docs)
+    TAKER_FEE_BPS = 1000  # Base 10% (1000 basis points)
+    MAX_TAKER_FEE_RATE = 0.0156  # 1.56% cap at 50% probability
+
+    # Maker rebate configuration
+    # NOTE: This is an ESTIMATE. Actual rebates depend on:
+    # 1. Total market maker volume (proportional share)
+    # 2. Polymarket's rebate percentage (100% until Jan 9, 2026)
+    MAKER_REBATE_RATE = 0.01  # ~1% estimated rebate
+    REBATE_SHARE = 1.0  # 100% of fees → rebates (may change)
+
+    @classmethod
+    def get_taker_fee(cls, price: float) -> float:
+        """
+        Calculate taker fee for a given price.
+
+        Formula from Polymarket: fee = 1000 bps × 4 × price × (1 - price)
+        Maximum effective rate is 1.56% at 50% probability.
+
+        Args:
+            price: The fill price (0.01 to 0.99)
+
+        Returns:
+            Fee rate as decimal (e.g., 0.0156 for 1.56%)
+        """
+        # fee = 1000 bps × 4 × price × (1 - price)
+        raw_fee = (cls.TAKER_FEE_BPS / 10000) * 4 * price * (1 - price)
+        return min(raw_fee, cls.MAX_TAKER_FEE_RATE)
+
+    @classmethod
+    def get_taker_fee_amount(cls, price: float, size: float) -> float:
+        """
+        Calculate taker fee amount in USD.
+
+        Args:
+            price: The fill price
+            size: Number of shares
+
+        Returns:
+            Fee amount in USD
+        """
+        fee_rate = cls.get_taker_fee(price)
+        return price * size * fee_rate
+
+    @classmethod
+    def get_maker_rebate(cls, price: float) -> float:
+        """
+        Estimate maker rebate rate for a given price.
+
+        NOTE: This is approximate. Actual rebate depends on:
+        - Your share of total maker volume in the market
+        - Current rebate percentage (may be < 100% after Jan 9, 2026)
+
+        Args:
+            price: The fill price
+
+        Returns:
+            Estimated rebate rate as decimal (e.g., 0.01 for 1%)
+        """
+        return cls.MAKER_REBATE_RATE
+
+    @classmethod
+    def get_maker_rebate_amount(cls, price: float, size: float) -> float:
+        """
+        Estimate maker rebate amount in USD.
+
+        Args:
+            price: The fill price
+            size: Number of shares
+
+        Returns:
+            Estimated rebate amount in USD
+        """
+        rebate_rate = cls.get_maker_rebate(price)
+        return price * size * rebate_rate
+
+    @classmethod
+    def calculate_net_profit(
+        cls,
+        entry_price: float,
+        hedge_price: float,
+        size: float,
+        entry_is_maker: bool = True,
+        hedge_is_maker: bool = True,
+    ) -> float:
+        """
+        Calculate net profit including fees and rebates.
+
+        Args:
+            entry_price: Price paid for entry side
+            hedge_price: Price paid for hedge side
+            size: Number of shares per side
+            entry_is_maker: Whether entry order was maker
+            hedge_is_maker: Whether hedge order was maker
+
+        Returns:
+            Net profit per share after fees/rebates
+        """
+        # Base profit from spread
+        pair_cost = entry_price + hedge_price
+        base_profit = 1.00 - pair_cost
+
+        # Apply entry fee/rebate
+        if entry_is_maker:
+            base_profit += cls.get_maker_rebate(entry_price) * entry_price
+        else:
+            base_profit -= cls.get_taker_fee(entry_price) * entry_price
+
+        # Apply hedge fee/rebate
+        if hedge_is_maker:
+            base_profit += cls.get_maker_rebate(hedge_price) * hedge_price
+        else:
+            base_profit -= cls.get_taker_fee(hedge_price) * hedge_price
+
+        return base_profit
+
+    @classmethod
+    def get_max_taker_hedge_price(
+        cls,
+        entry_price: float,
+        min_profit: float = 0.005,
+    ) -> float:
+        """
+        Calculate maximum hedge price that's still profitable as taker.
+
+        When entry is maker and hedge must be taker (emergency), account for:
+        - Entry rebate (~1%)
+        - Hedge taker fee (~1.56%)
+
+        Args:
+            entry_price: Price paid for entry (as maker)
+            min_profit: Minimum required profit per share
+
+        Returns:
+            Maximum hedge price that maintains profitability
+        """
+        # Start with base max hedge
+        base_max = 1.00 - entry_price - min_profit
+
+        # Add entry rebate
+        entry_rebate = cls.get_maker_rebate(entry_price) * entry_price
+
+        # Subtract expected taker fee (at estimated hedge price)
+        # Use iterative approach since fee depends on price
+        estimated_hedge = base_max
+        for _ in range(3):  # Converge in few iterations
+            taker_fee = cls.get_taker_fee(estimated_hedge) * estimated_hedge
+            estimated_hedge = base_max + entry_rebate - taker_fee
+
+        return round(estimated_hedge, 4)
+
+
 # Convenience function to load config
 def load_config(env_path: Optional[str] = None) -> Config:
     """
