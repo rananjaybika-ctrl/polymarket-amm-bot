@@ -4154,12 +4154,14 @@ class PaperTradingBot:
         # Get trend signal
         z_score = 0.0
         trend_direction = "FLAT"
+        velocity_bps = None
 
         if self._trend_detector:
             trend_signal = self._trend_detector.get_trend_signal()
             if trend_signal:
                 z_score = trend_signal.z_score
                 trend_direction = trend_signal.direction.value if trend_signal.direction else "FLAT"
+                velocity_bps = trend_signal.velocity_bps
 
         # Calculate current imbalance
         current_imbalance = int(abs(current_up - current_down))
@@ -4176,6 +4178,7 @@ class PaperTradingBot:
             time_remaining=time_remaining_secs,
             current_imbalance=current_imbalance,
             current_time=current_time,
+            velocity_bps=velocity_bps,
         )
 
         # Check for pending fills in paper mode
@@ -4255,15 +4258,15 @@ class PaperTradingBot:
         best_bid = up_bid if side == "UP" else down_bid
 
         try:
-            # Use pending orders for spread capture - allows tick-based fill simulation
-            # so orders can fill over multiple ticks rather than instant pass/fail
+            # Disable pending orders for now - use instant fill simulation
+            # Partial fills add complexity; keep it simple for paper testing
             result = await self._engine.execute_single_side_trade(
                 market=market,
                 side=side,
                 price=price,
                 size=size,
                 best_ask=best_ask,
-                use_pending_orders=True,  # Enable for spread capture retry logic
+                use_pending_orders=False,  # Disabled: instant fill or reject
             )
 
             if result.get("success"):

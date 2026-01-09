@@ -948,7 +948,7 @@ class PaperTradingEngine:
         market: BTCMarket,
         trend_detector: 'TrendDetector',
         max_age_secs: float = 10.0,
-        velocity_threshold_bps: float = 15.0,
+        velocity_threshold_bps: float = 2.0,
     ) -> Dict[str, bool]:
         """
         Cancel pending orders when Binance moves against them (quote pulling).
@@ -965,7 +965,8 @@ class PaperTradingEngine:
             market: Current market being traded
             trend_detector: TrendDetector instance with Binance feed
             max_age_secs: Maximum order age before considering stale (default 10s)
-            velocity_threshold_bps: Price velocity to trigger pull (default 15 bps/sec)
+            velocity_threshold_bps: Price velocity to trigger pull (default 2 bps/sec)
+                                    Note: 2 bps = ~$90 move in 10s on $91k BTC
 
         Returns:
             Dict mapping side ("UP"/"DOWN") to whether quote was pulled

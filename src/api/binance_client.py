@@ -22,7 +22,9 @@ logger = logging.getLogger(__name__)
 
 # Type for z-score threshold callbacks
 # callback(z_score: float, direction: str, trend_state: str)
+# Can be sync or async - we handle both
 ZScoreCallback = Callable[[float, str, str], None]
+AsyncZScoreCallback = Callable[[float, str, str], 'asyncio.coroutine']
 
 
 @dataclass
@@ -432,6 +434,49 @@ class BinanceClient:
         # Raw z can be huge when per-tick volatility is tiny but total move is large
         return min(raw_z, 5.0)
 
+    def calculate_volatility_ratio(
+        self,
+        short_window: int = 10,
+        long_window: int = 60,
+    ) -> float:
+        """
+        Calculate volatility ratio: short-term vol / long-term vol.
+
+        This measures whether the market is MORE or LESS volatile than usual
+        RIGHT NOW, unlike z-score which measures total move from strike.
+
+        Interpretation:
+            ratio > 1.5: Market is spiking (more volatile than usual)
+            ratio < 0.5: Market is calm (less volatile than usual)
+            ratio ≈ 1.0: Normal volatility
+
+        Args:
+            short_window: Short-term window in seconds (default 10s)
+            long_window: Long-term window in seconds (default 60s)
+
+        Returns:
+            Volatility ratio, or 1.0 if insufficient data
+        """
+        short_changes = self.get_price_changes(short_window)
+        long_changes = self.get_price_changes(long_window)
+
+        if len(short_changes) < 5 or len(long_changes) < 20:
+            return 1.0  # Not enough data, assume normal
+
+        try:
+            short_vol = statistics.stdev(short_changes)
+            long_vol = statistics.stdev(long_changes)
+        except statistics.StatisticsError:
+            return 1.0
+
+        if long_vol <= 0:
+            return 1.0
+
+        ratio = short_vol / long_vol
+
+        # Cap to reasonable range
+        return min(max(ratio, 0.1), 5.0)
+
     # =========================================================================
     # EVENT-DRIVEN QUOTE PULLING
     # =========================================================================
@@ -544,7 +589,11 @@ class BinanceClient:
 
             for callback in self._z_threshold_callbacks:
                 try:
-                    callback(z_score, direction, new_state)
+                    # Handle both sync and async callbacks
+                    result = callback(z_score, direction, new_state)
+                    if asyncio.iscoroutine(result):
+                        # Schedule async callback without blocking
+                        asyncio.create_task(result)
                 except Exception as e:
                     logger.error(f"Z-threshold callback error: {e}")
 

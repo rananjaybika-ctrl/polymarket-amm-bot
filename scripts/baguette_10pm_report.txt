@@ -1,0 +1,43 @@
+MARKET: Bitcoin Up or Down - January 7, 10:00PM-10:15PM ET
+RESOLUTION: YES
+TRADES: 6
+TIME RANGE: 2026-01-08 08:38:09 to 2026-01-08 08:40:57
+PRICE RANGE: 3.00 - 12.00
+
+--- Position at resolution ---
+Remaining YES shares: 0.00
+Remaining NO shares:  31.88
+Final value: $ 0.00
+Total spent (net exposure): $ 4.29
+FINAL PNL: $ -4.29
+
+--- Buy/Sell totals ---
+YES buys:  0.00 sh / $ 0.00
+YES sells: 0.00 sh / $ 0.00
+NO buys:   87.88 sh / $ 6.53
+NO sells:  56.00 sh / $ 2.24
+
+--- Cumulative buys ---
+YES cumulative: 0.00 sh / $ 0.00
+NO cumulative:  87.88 sh / $ 6.53
+
+--- Exposure peaks (trade index: earliest → latest) ---
+YES dollar peak: $ 0.00 at trade #1
+NO dollar peak:  $ 5.45 at trade #2
+YES share peak:  0.00 sh at trade #1
+NO share peak:   51.88 sh at trade #2
+
+--- Final exposure ---
+YES exposure: $ 0.00 | 0.00 sh
+NO exposure:  $ 4.29 | 31.88 sh
+NET exposure: $ 4.29 | 31.88 sh
+
+--- Trades (Sorted by Timestamp) ---
+Idx | Time                | Type | Side | Price(c) |   Shares   |    Cost($)
+----+---------------------+------+-----+----------+------------+------------
+  1 | 2026-01-08 08:38:09 | Buy  | Down |    12.00 |      25.93 | $      3.11
+  2 | 2026-01-08 08:38:47 | Buy  | Down |     9.00 |      25.96 | $      2.34
+  3 | 2026-01-08 08:39:27 | Sell | Down |     4.00 |      26.00 | $      1.04
+  4 | 2026-01-08 08:39:29 | Sell | Down |     4.00 |      26.00 | $      1.04
+  5 | 2026-01-08 08:40:11 | Buy  | Down |     3.00 |      35.99 | $      1.08
+  6 | 2026-01-08 08:40:57 | Sell | Down |     4.00 |       4.00 | $      0.16

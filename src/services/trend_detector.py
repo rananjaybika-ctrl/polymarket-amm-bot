@@ -89,7 +89,9 @@ class TrendDetector:
     PCT_STRONG_THRESHOLD = 0.5 # <0.5% = strong
 
     # Quote pulling parameters
-    PULL_VELOCITY_BPS = 10.0   # Pull if velocity > 10 bps/sec
+    # NOTE: 2 bps = ~$90 move in 10s on $91k BTC (realistic threshold)
+    # Old value of 10-15 bps required $900-1400 moves (never triggered)
+    PULL_VELOCITY_BPS = 2.0   # Pull if velocity > 2 bps/sec
 
     def __init__(
         self,
