@@ -47,6 +47,11 @@ MARKET_DURATION = 900       # 15-minute markets in seconds
 DEFAULT_MAX_SHARES = 50     # Default maximum shares per order
 DEFAULT_MIN_SHARES = 5      # Default minimum shares per order
 
+# Velocity-based order management parameters
+VELOCITY_PULL_THRESHOLD = 0.05   # bps/sec - pull entry if adverse velocity exceeds this
+MAX_HEDGE_WAIT_SECS = 120.0      # Max time to "let it ride" before forcing hedge
+MIN_TIME_TO_FORCE_HEDGE = 60.0   # Force hedge if less than this time remaining
+
 # Mispricing threshold parameters
 # With maker rebates (~1% per side, ~2% total), we can accept tighter spreads.
 # Pre-rebate: M_MIN = 0.005 meant we needed 0.5% raw edge
@@ -700,6 +705,80 @@ class CalculusMakerStrategy:
             },
             "curve": values
         }
+
+    # =========================================================================
+    # VELOCITY-BASED ORDER MANAGEMENT
+    # =========================================================================
+
+    def should_pull_entry(self, velocity_bps: float, entry_side: str) -> bool:
+        """
+        Check if entry order should be pulled due to adverse velocity.
+
+        Pull entry if velocity is moving AGAINST our entry side:
+        - UP entry: adverse if velocity < 0 (BTC falling, UP getting expensive)
+        - DOWN entry: adverse if velocity > 0 (BTC rising, DOWN getting expensive)
+
+        Args:
+            velocity_bps: Current velocity in basis points per second
+            entry_side: "UP" or "DOWN" - which side we entered
+
+        Returns:
+            True if entry should be pulled
+        """
+        if entry_side.upper() == "UP":
+            return velocity_bps < -VELOCITY_PULL_THRESHOLD
+        else:  # DOWN
+            return velocity_bps > VELOCITY_PULL_THRESHOLD
+
+    def should_hedge_now(
+        self,
+        velocity_bps: float,
+        hedge_side: str,
+        time_since_entry_fill: float,
+        time_remaining: float,
+    ) -> tuple[bool, str]:
+        """
+        Check if we should hedge now or "let it ride".
+
+        "Let it ride" logic:
+        - After entry fills, DON'T hedge immediately
+        - Wait while velocity is FAVORABLE (hedge getting cheaper)
+        - Hedge when velocity REVERSES (hedge getting expensive)
+        - Force hedge on timeout or near market expiry
+
+        Args:
+            velocity_bps: Current velocity in basis points per second
+            hedge_side: "UP" or "DOWN" - which side we need to hedge
+            time_since_entry_fill: Seconds since entry was filled
+            time_remaining: Seconds until market resolution
+
+        Returns:
+            (should_hedge, reason) tuple
+        """
+        # Safety: Force hedge near market expiry
+        if time_remaining < MIN_TIME_TO_FORCE_HEDGE:
+            return True, f"Force hedge: time_remaining={time_remaining:.0f}s < {MIN_TIME_TO_FORCE_HEDGE}s"
+
+        # Safety: Force hedge after max wait time
+        if time_since_entry_fill > MAX_HEDGE_WAIT_SECS:
+            return True, f"Force hedge: waited {time_since_entry_fill:.0f}s > {MAX_HEDGE_WAIT_SECS}s"
+
+        # "Let it ride" logic based on velocity direction
+        # Hedge when velocity REVERSES (no longer favorable)
+        if hedge_side.upper() == "DOWN":
+            # DOWN hedge: wait while velocity negative (BTC falling, DOWN cheap)
+            # Hedge when velocity turns positive (reversal - DOWN getting expensive)
+            if velocity_bps > VELOCITY_PULL_THRESHOLD:
+                return True, f"Hedge now: velocity reversal vel={velocity_bps:.3f}bps (DOWN getting expensive)"
+            else:
+                return False, f"Let it ride: vel={velocity_bps:.3f}bps (DOWN still cheap)"
+        else:  # hedge_side == "UP"
+            # UP hedge: wait while velocity positive (BTC rising, UP cheap)
+            # Hedge when velocity turns negative (reversal - UP getting expensive)
+            if velocity_bps < -VELOCITY_PULL_THRESHOLD:
+                return True, f"Hedge now: velocity reversal vel={velocity_bps:.3f}bps (UP getting expensive)"
+            else:
+                return False, f"Let it ride: vel={velocity_bps:.3f}bps (UP still cheap)"
 
     def __repr__(self) -> str:
         return (

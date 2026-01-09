@@ -1079,25 +1079,25 @@ class LiveTradingEngine:
 
         return cancelled
 
-    async def event_driven_pull(self, direction: str, market_slug: str, z_score: float) -> bool:
+    async def event_driven_pull(self, direction: str, market_slug: str, velocity_bps: float) -> bool:
         """
         Immediately cancel pending order on opposite side of trend direction.
 
-        Called from BinanceClient WebSocket callback when z-score crosses threshold.
+        Called from BinanceClient WebSocket callback when velocity exceeds threshold.
         This is the fastest reaction path - ~100-200ms from Binance price move.
 
         Args:
-            direction: "UP" or "DOWN" - which way BTC is trending
+            direction: "UP" or "DOWN" - which way BTC is moving
             market_slug: Current market being traded
-            z_score: Current z-score that triggered the alert
+            velocity_bps: Current velocity that triggered the alert (bps/sec)
 
         Returns:
             True if an order was cancelled, False otherwise
 
         Example:
             # In BinanceClient callback:
-            def on_z_alert(z, direction, state):
-                asyncio.create_task(engine.event_driven_pull(direction, market_slug, z))
+            def on_velocity_alert(velocity, direction):
+                asyncio.create_task(engine.event_driven_pull(direction, market_slug, velocity))
         """
         # Cancel order on OPPOSITE side of trend
         # If BTC trending UP, DOWN shares are losing -> cancel DOWN orders
@@ -1119,7 +1119,7 @@ class LiveTradingEngine:
 
             logger.warning(
                 f"[EVENT_PULL] Cancelled {side_to_pull} @ ${price:.4f} | "
-                f"z={z_score:.2f}, dir={direction} | ~100ms reaction"
+                f"vel={velocity_bps:.3f}bps, dir={direction} | ~100ms reaction"
             )
             return True
 

@@ -6,7 +6,7 @@ Contains modular trading strategies for BTC 15-minute markets.
 Strategies:
 - calculus_maker: Dynamic mispricing detection with exponential decay pricing
 - simple_hedger: Minimal hedging strategy with flip logic
-- spread_capture: Z-score based spread capture with tiered entry/hedge offsets
+- spread_capture: Velocity-based spread capture with fixed entry/hedge offsets
 """
 
 from .calculus_maker import (

@@ -378,7 +378,7 @@ def should_enter_at_open(
     - They WAIT (223-889s) when prices are TRENDING (lopsided)
 
     This gate only applies for the first 60s before TrendDetector has
-    enough Binance price history to calculate meaningful z-scores.
+    enough Binance price history to calculate meaningful velocity.
 
     Args:
         up_price: Current UP share price
@@ -1103,7 +1103,7 @@ class PaperTradingBot:
     ) -> "PaperTradingBot":
         """Create bot instance from Spread Capture web UI configuration.
 
-        Z-score based spread capture for sub-$1.00 pair opportunities.
+        Velocity-based spread capture for sub-$1.00 pair opportunities.
 
         Args:
             config: Dictionary with spread capture configuration values
@@ -1353,12 +1353,10 @@ class PaperTradingBot:
         if self._binance_client.is_connected:
             self._trend_detector = TrendDetector(
                 binance_client=self._binance_client,
-                z_score_mild=1.0,
-                z_score_strong=2.0,
-                z_score_extreme=3.0,
                 velocity_window_secs=10,
+                velocity_pull_threshold=0.05,  # 0.05 bps/sec
             )
-            logger.info("[TREND] TrendDetector initialized - quote pulling and trend-aware trading enabled")
+            logger.info("[TREND] TrendDetector initialized - velocity-based quote pulling enabled")
 
         logger.info(f"Bot initialized with ${self.initial_balance:.2f} balance")
 
@@ -3046,7 +3044,7 @@ class PaperTradingBot:
                     if dynamic_target < self.accum_target_shares:
                         logger.info(
                             f"[TREND] Reducing target: {self.accum_target_shares} → {dynamic_target} "
-                            f"(state={trend_signal.state.value}, z={trend_signal.z_score:.2f})"
+                            f"(state={trend_signal.state.value}, vel={trend_signal.velocity_bps:.3f}bps)"
                         )
 
             # Check if already at dynamic target (early stop in trends)
@@ -3066,10 +3064,10 @@ class PaperTradingBot:
                     if priority_side:
                         if priority_side == "UP" and buy_up and buy_down:
                             # Prioritize UP - buy it first, then DOWN
-                            logger.debug(f"[TREND_PRIORITY] UP first (trending UP, z={trend_signal.z_score:.2f})")
+                            logger.debug(f"[TREND_PRIORITY] UP first (trending UP, vel={trend_signal.velocity_bps:.3f}bps)")
                         elif priority_side == "DOWN" and buy_up and buy_down:
                             # Prioritize DOWN - buy it first, then UP
-                            logger.debug(f"[TREND_PRIORITY] DOWN first (trending DOWN, z={trend_signal.z_score:.2f})")
+                            logger.debug(f"[TREND_PRIORITY] DOWN first (trending DOWN, vel={trend_signal.velocity_bps:.3f}bps)")
 
                 # PROSPECTIVE PAIR COST WITH MARKET CHECK (trending market protection)
                 # Block buys if hedge at current market would be unprofitable
@@ -3695,18 +3693,18 @@ class PaperTradingBot:
             best_ask = trade["best_ask"]
             best_bid = trade["best_bid"]
 
-            # POST-PULL STABILIZATION: Wait for z < 1.0 (NEUTRAL) before re-entering
+            # POST-PULL STABILIZATION: Wait for velocity < MILD threshold before re-entering
             cooldown_key = f"{market.slug}_{side}"
             if cooldown_key in self._pull_cooldown:
-                # Check if z-score has returned to NEUTRAL
+                # Check if velocity has returned to NEUTRAL
                 if trend_signal and trend_signal.state != TrendState.NEUTRAL:
-                    logger.debug(f"[STABILIZE] {side} waiting for NEUTRAL, z={trend_signal.z_score:.2f}")
+                    logger.debug(f"[STABILIZE] {side} waiting for NEUTRAL, vel={trend_signal.velocity_bps:.3f}bps")
                     continue  # Skip this side until stabilized
                 else:
                     # Stabilized - clear cooldown and proceed
                     del self._pull_cooldown[cooldown_key]
-                    z_str = f"z={trend_signal.z_score:.2f}" if trend_signal else "no signal"
-                    logger.info(f"[STABILIZE] {side} stabilized ({z_str}), resuming orders")
+                    vel_str = f"vel={trend_signal.velocity_bps:.3f}bps" if trend_signal else "no signal"
+                    logger.info(f"[STABILIZE] {side} stabilized ({vel_str}), resuming orders")
 
             if self._engine.balance < price * size:
                 logger.debug(f"Skip {side}: insufficient balance for ${price * size:.2f}")
@@ -4018,8 +4016,8 @@ class PaperTradingBot:
         """
         Set up event-driven quote pulling for a market.
 
-        Registers a callback with BinanceClient that fires when z-score crosses
-        the STRONG threshold (2.0). This enables ~100-200ms reaction time to
+        Registers a callback with BinanceClient that fires when velocity crosses
+        the STRONG threshold (0.05 bps/sec). This enables ~100-200ms reaction time to
         Binance price moves, compared to 1-2 second polling.
 
         Only active in LIVE mode with LiveTradingEngine.
@@ -4037,19 +4035,16 @@ class PaperTradingBot:
 
         # Clear any existing callback
         if self._event_pull_callback:
-            self._binance_client.remove_z_threshold_callback(self._event_pull_callback)
+            self._binance_client.remove_velocity_callback(self._event_pull_callback)
             self._event_pull_callback = None
-
-        # Reset z-state for new market
-        self._binance_client.reset_z_state()
 
         # Store market slug for closure
         self._event_pull_market = market_slug
         engine = self._engine
 
-        def on_z_threshold(z_score: float, direction: str, trend_state: str) -> None:
+        def on_velocity_threshold(velocity_bps: float, direction: str, trend_state: str) -> None:
             """
-            Callback fired when z-score crosses STRONG threshold.
+            Callback fired when velocity crosses STRONG threshold.
 
             Schedules async cancel on the event loop. This runs within ~100ms
             of the Binance price tick that crossed the threshold.
@@ -4060,21 +4055,21 @@ class PaperTradingBot:
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(
-                    engine.event_driven_pull(direction, market_slug, z_score)
+                    engine.event_driven_pull(direction, market_slug, velocity_bps)
                 )
             except RuntimeError:
                 # No running loop (shouldn't happen but safety)
                 logger.debug("[EVENT_PULL] No running loop for callback")
 
         # Register the callback
-        self._event_pull_callback = on_z_threshold
-        self._binance_client.on_z_threshold_crossed(on_z_threshold)
+        self._event_pull_callback = on_velocity_threshold
+        self._binance_client.on_velocity_threshold_crossed(on_velocity_threshold)
         logger.info(f"[EVENT_PULL] Enabled for {market_slug} (100-200ms reaction)")
 
     def _teardown_event_driven_pull(self) -> None:
         """Remove event-driven quote pull callback."""
         if self._event_pull_callback and self._binance_client:
-            self._binance_client.remove_z_threshold_callback(self._event_pull_callback)
+            self._binance_client.remove_velocity_callback(self._event_pull_callback)
             logger.debug(f"[EVENT_PULL] Disabled for {self._event_pull_market}")
         self._event_pull_callback = None
         self._event_pull_market = None
@@ -4093,7 +4088,7 @@ class PaperTradingBot:
         """
         Dedicated trading cycle for Spread Capture strategy.
 
-        Uses z-score based offsets for entry and hedge pricing.
+        Uses velocity-based order management for entry and hedge pricing.
         Entry at best_bid - entry_offset, hedge at best_bid - hedge_offset.
         Profit ceiling enforced on hedge orders.
         """
@@ -4151,16 +4146,12 @@ class PaperTradingBot:
         self._last_spread = 1.0 - up_ask - down_ask
         self._update_live_display()
 
-        # Get trend signal
-        z_score = 0.0
-        trend_direction = "FLAT"
-        velocity_bps = None
+        # Get trend signal for velocity
+        velocity_bps = 0.0
 
         if self._trend_detector:
             trend_signal = self._trend_detector.get_trend_signal()
             if trend_signal:
-                z_score = trend_signal.z_score
-                trend_direction = trend_signal.direction.value if trend_signal.direction else "FLAT"
                 velocity_bps = trend_signal.velocity_bps
 
         # Calculate current imbalance
@@ -4173,8 +4164,6 @@ class PaperTradingBot:
             up_ask=up_ask,
             down_bid=down_bid,
             down_ask=down_ask,
-            z_score=z_score,
-            trend_direction=trend_direction,
             time_remaining=time_remaining_secs,
             current_imbalance=current_imbalance,
             current_time=current_time,
@@ -4214,7 +4203,7 @@ class PaperTradingBot:
             phase = strategy.state.phase.value
             if self._opportunities_checked % 20 == 0:
                 logger.debug(
-                    f"[SPREADCAP] No action | phase={phase} | z={z_score:.2f} | "
+                    f"[SPREADCAP] No action | phase={phase} | vel={velocity_bps:.3f}bps | "
                     f"pos={current_up:.0f}UP/{current_down:.0f}DOWN"
                 )
             return
@@ -4245,11 +4234,10 @@ class PaperTradingBot:
             size = final_size
 
         # Log the decision
-        tier = strategy.get_tier(z_score)
         phase = strategy.state.phase.value
         logger.info(
             f"[SPREADCAP] {phase}: {side} {size} @ ${price:.4f} | "
-            f"z={z_score:.2f} ({tier}) | spread=${1-up_ask-down_ask:.4f}"
+            f"vel={velocity_bps:.3f}bps | spread=${1-up_ask-down_ask:.4f}"
         )
 
         # Execute the order
@@ -4301,8 +4289,7 @@ class PaperTradingBot:
                         "price": filled_price,
                         "size": filled_size,
                         "mode": "spread_capture",
-                        "z_score": z_score,
-                        "tier": tier,
+                        "velocity_bps": velocity_bps,
                     })
             else:
                 logger.warning(
@@ -5314,7 +5301,7 @@ async def main():
         type=str,
         choices=['standard', 'volume_weighted', 'calculus_maker', 'spread_capture'],
         default='standard',
-        help='Accumulation strategy mode: standard, volume_weighted (Gabagool-style), calculus_maker (exponential decay), or spread_capture (z-score based)',
+        help='Accumulation strategy mode: standard, volume_weighted (Gabagool-style), calculus_maker (exponential decay), or spread_capture (velocity based)',
     )
 
     parser.add_argument(

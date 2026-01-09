@@ -2,13 +2,12 @@
 Unit tests for SpreadCaptureStrategy
 
 Tests cover:
-- Z-score tier classification
-- Entry offset calculations
-- Hedge offset calculations
+- Fixed entry/hedge offset calculations
 - Profit ceiling (max hedge price) calculations
 - Wait time calculations
 - State machine phase transitions
 - Fill handling
+- Velocity-based quote pulling
 """
 
 import pytest
@@ -17,194 +16,111 @@ from src.strategies.spread_capture import (
     SpreadCaptureStrategy,
     SpreadCaptureState,
     SpreadCapturePhase,
-    Z_STRONG_THRESHOLD,
-    Z_SLIGHT_THRESHOLD,
+    DEFAULT_ENTRY_OFFSET,
+    DEFAULT_HEDGE_OFFSET,
+    VELOCITY_PULL_THRESHOLD,
 )
 
 
-class TestTierClassification:
-    """Test z-score tier classification."""
-
-    def test_strong_tier(self):
-        """z >= 2.0 should be strong tier."""
-        strategy = SpreadCaptureStrategy()
-        assert strategy.get_tier(2.0) == "strong"
-        assert strategy.get_tier(2.5) == "strong"
-        assert strategy.get_tier(5.0) == "strong"
-
-    def test_slight_tier(self):
-        """1.0 <= z < 2.0 should be slight tier."""
-        strategy = SpreadCaptureStrategy()
-        assert strategy.get_tier(1.0) == "slight"
-        assert strategy.get_tier(1.5) == "slight"
-        assert strategy.get_tier(1.99) == "slight"
-
-    def test_neutral_tier(self):
-        """z < 1.0 should be neutral tier."""
-        strategy = SpreadCaptureStrategy()
-        assert strategy.get_tier(0.0) == "neutral"
-        assert strategy.get_tier(0.5) == "neutral"
-        assert strategy.get_tier(0.99) == "neutral"
-
-
-class TestZFavorability:
-    """Test z-score favorability determination."""
-
-    def test_favorable_up_trend(self):
-        """UP entry in UP trend is favorable."""
-        strategy = SpreadCaptureStrategy()
-        assert strategy.is_z_favorable("UP", "UP", 2.0) is True
-        assert strategy.is_z_favorable("UP", "UP", 1.5) is True
-
-    def test_favorable_down_trend(self):
-        """DOWN entry in DOWN trend is favorable."""
-        strategy = SpreadCaptureStrategy()
-        assert strategy.is_z_favorable("DOWN", "DOWN", 2.0) is True
-        assert strategy.is_z_favorable("DOWN", "DOWN", 1.5) is True
-
-    def test_unfavorable_opposite_trend(self):
-        """Entry opposite to trend is unfavorable."""
-        strategy = SpreadCaptureStrategy()
-        assert strategy.is_z_favorable("UP", "DOWN", 2.0) is False
-        assert strategy.is_z_favorable("DOWN", "UP", 2.0) is False
-
-    def test_neutral_z_not_favorable(self):
-        """z < 1.0 is never favorable (neutral zone)."""
-        strategy = SpreadCaptureStrategy()
-        assert strategy.is_z_favorable("UP", "UP", 0.5) is False
-        assert strategy.is_z_favorable("DOWN", "DOWN", 0.9) is False
-
-
 class TestEntryOffset:
-    """Test entry offset calculations."""
+    """Test entry offset calculations (now fixed)."""
 
-    def test_strong_favorable_offset(self):
-        """Strong z + favorable = 0.00 offset (at best bid)."""
+    def test_entry_offset_is_fixed(self):
+        """Entry offset is fixed at DEFAULT_ENTRY_OFFSET."""
         strategy = SpreadCaptureStrategy()
-        offset = strategy.calculate_entry_offset(2.5, is_z_favorable=True)
-        assert offset == 0.0
-
-    def test_strong_unfavorable_offset(self):
-        """Strong z + unfavorable = 0.01 offset."""
-        strategy = SpreadCaptureStrategy()
-        offset = strategy.calculate_entry_offset(2.5, is_z_favorable=False)
+        offset = strategy.calculate_entry_offset()
+        assert offset == DEFAULT_ENTRY_OFFSET
         assert offset == 0.01
 
-    def test_slight_favorable_offset(self):
-        """Slight z (1.5) + favorable = ~0.005 offset (interpolated)."""
-        strategy = SpreadCaptureStrategy()
-        offset = strategy.calculate_entry_offset(1.5, is_z_favorable=True)
-        assert 0.0 < offset < 0.01
-
-    def test_slight_unfavorable_offset(self):
-        """Slight z + unfavorable adds 0.01 extra patience."""
-        strategy = SpreadCaptureStrategy()
-        offset_fav = strategy.calculate_entry_offset(1.5, is_z_favorable=True)
-        offset_unfav = strategy.calculate_entry_offset(1.5, is_z_favorable=False)
-        assert offset_unfav == offset_fav + 0.01
-
-    def test_neutral_offset(self):
-        """Neutral z = 0.01 offset."""
-        strategy = SpreadCaptureStrategy()
-        offset = strategy.calculate_entry_offset(0.5, is_z_favorable=False)
-        assert offset == 0.01
+    def test_entry_offset_custom(self):
+        """Custom entry offset can be set via constructor."""
+        strategy = SpreadCaptureStrategy(entry_offset=0.02)
+        offset = strategy.calculate_entry_offset()
+        assert offset == 0.02
 
 
 class TestHedgeOffset:
-    """Test hedge offset calculations."""
+    """Test hedge offset calculations (now fixed)."""
 
-    def test_strong_hedge_offset(self):
-        """Strong z = 0.03 hedge offset (targeting ~0.06 spread)."""
+    def test_hedge_offset_is_fixed(self):
+        """Hedge offset is fixed at DEFAULT_HEDGE_OFFSET."""
         strategy = SpreadCaptureStrategy()
-        offset = strategy.calculate_hedge_offset(2.5)
-        assert offset == 0.03
-
-    def test_slight_hedge_offset(self):
-        """Slight z (1.5) = interpolated offset between 0.02 and 0.03."""
-        strategy = SpreadCaptureStrategy()
-        offset = strategy.calculate_hedge_offset(1.5)
-        assert 0.02 < offset < 0.03
-
-    def test_neutral_hedge_offset(self):
-        """Neutral z = 0.01 hedge offset."""
-        strategy = SpreadCaptureStrategy()
-        offset = strategy.calculate_hedge_offset(0.5)
-        assert offset == 0.01
-
-    def test_edge_of_slight(self):
-        """z = 1.0 should be exactly 0.02."""
-        strategy = SpreadCaptureStrategy()
-        offset = strategy.calculate_hedge_offset(1.0)
+        offset = strategy.calculate_hedge_offset()
+        assert offset == DEFAULT_HEDGE_OFFSET
         assert offset == 0.02
 
-    def test_edge_of_strong(self):
-        """z = 2.0 should be exactly 0.03."""
-        strategy = SpreadCaptureStrategy()
-        offset = strategy.calculate_hedge_offset(2.0)
+    def test_hedge_offset_custom(self):
+        """Custom hedge offset can be set via constructor."""
+        strategy = SpreadCaptureStrategy(hedge_offset=0.03)
+        offset = strategy.calculate_hedge_offset()
         assert offset == 0.03
 
 
 class TestMaxHedgePrice:
-    """Test profit ceiling (max hedge price) calculations."""
+    """Test profit ceiling (max hedge price) calculations.
+
+    Note: Calculations account for ~1% maker rebates on both sides.
+    Formula: max_pair_cost = (1.00 - min_profit) / 0.99
+    max_hedge = max_pair_cost - entry_price
+    """
 
     def test_profit_ceiling_preserves_min_profit(self):
-        """Max hedge price should leave min_profit margin."""
+        """Max hedge price should leave min_profit margin after rebates."""
         strategy = SpreadCaptureStrategy(min_profit=0.005)
-        # Entry at 0.55 means max hedge = 1.00 - 0.55 - 0.005 = 0.445
         max_hedge = strategy.calculate_max_hedge_price(0.55)
-        assert max_hedge == 0.445
+        # With rebates: max_pair_cost = 0.995/0.99 ≈ 1.00505
+        # max_hedge = 1.00505 - 0.55 ≈ 0.4551
+        assert 0.45 < max_hedge < 0.46
 
     def test_profit_ceiling_high_entry(self):
         """High entry price leaves less room for hedge."""
         strategy = SpreadCaptureStrategy(min_profit=0.005)
-        # Entry at 0.80 means max hedge = 1.00 - 0.80 - 0.005 = 0.195
         max_hedge = strategy.calculate_max_hedge_price(0.80)
-        assert max_hedge == 0.195
+        # max_hedge = 1.00505 - 0.80 ≈ 0.2051
+        assert 0.20 < max_hedge < 0.21
 
     def test_profit_ceiling_custom_min_profit(self):
         """Custom min_profit should be respected."""
         strategy = SpreadCaptureStrategy(min_profit=0.01)
-        # Entry at 0.50 means max hedge = 1.00 - 0.50 - 0.01 = 0.49
         max_hedge = strategy.calculate_max_hedge_price(0.50)
-        assert max_hedge == 0.49
+        # With rebates: max_pair_cost = 0.99/0.99 = 1.00
+        # max_hedge = 1.00 - 0.50 = 0.50
+        assert max_hedge == 0.50
 
 
 class TestWaitTime:
     """Test wait time calculations."""
 
-    def test_strong_entry_wait(self):
-        """Strong z = shorter wait (5s base)."""
+    def test_base_entry_wait(self):
+        """Entry wait time starts at configured base."""
         strategy = SpreadCaptureStrategy()
-        wait = strategy.calculate_wait_time(2.5, attempt=0, is_entry=True)
-        assert wait == 5.0
+        wait = strategy.calculate_wait_time(attempt=0, is_entry=True)
+        assert wait == 8.0  # DEFAULT_ENTRY_WAIT
 
-    def test_slight_entry_wait(self):
-        """Slight z = longer wait (10s base)."""
+    def test_base_hedge_wait(self):
+        """Hedge wait time depends on price room."""
         strategy = SpreadCaptureStrategy()
-        wait = strategy.calculate_wait_time(1.5, attempt=0, is_entry=True)
-        assert wait == 10.0
-
-    def test_hedge_gets_more_patience(self):
-        """Hedge wait = 1.5x entry wait."""
-        strategy = SpreadCaptureStrategy()
-        entry_wait = strategy.calculate_wait_time(2.0, attempt=0, is_entry=True)
-        hedge_wait = strategy.calculate_wait_time(2.0, attempt=0, is_entry=False)
-        assert hedge_wait == entry_wait * 1.5
+        # Hedge wait with $0.10 price room
+        hedge_wait = strategy.calculate_wait_time(
+            attempt=0, is_entry=False, price_room=0.10
+        )
+        assert 25.0 <= hedge_wait <= 35.0  # ~30s for $0.10 room
 
     def test_exponential_backoff(self):
-        """Each retry multiplies wait time by escalation factor."""
-        strategy = SpreadCaptureStrategy(retry_escalation=1.5)
-        wait0 = strategy.calculate_wait_time(2.0, attempt=0, is_entry=True)
-        wait1 = strategy.calculate_wait_time(2.0, attempt=1, is_entry=True)
-        wait2 = strategy.calculate_wait_time(2.0, attempt=2, is_entry=True)
-        assert wait1 == wait0 * 1.5
-        assert wait2 == wait0 * (1.5 ** 2)
+        """Wait time increases with retry attempts."""
+        strategy = SpreadCaptureStrategy()
+        wait0 = strategy.calculate_wait_time(attempt=0, is_entry=True)
+        wait1 = strategy.calculate_wait_time(attempt=1, is_entry=True)
+        wait2 = strategy.calculate_wait_time(attempt=2, is_entry=True)
+        # Uses 1.3x backoff
+        assert wait1 > wait0
+        assert wait2 > wait1
 
     def test_max_wait_cap(self):
-        """Wait time should not exceed 60s."""
+        """Wait time should not exceed MAX_WAIT_TIME."""
         strategy = SpreadCaptureStrategy()
-        wait = strategy.calculate_wait_time(1.0, attempt=10, is_entry=True)
-        assert wait <= 60.0
+        wait = strategy.calculate_wait_time(attempt=10, is_entry=True)
+        assert wait <= 60.0  # MAX_WAIT_TIME
 
 
 class TestStateTransitions:
@@ -221,8 +137,6 @@ class TestStateTransitions:
         action = strategy.decide(
             up_bid=0.55, up_ask=0.56,
             down_bid=0.44, down_ask=0.45,
-            z_score=2.0,
-            trend_direction="UP",
             time_remaining=600,
             current_imbalance=0,
             current_time=time.time()
@@ -237,8 +151,6 @@ class TestStateTransitions:
         strategy.decide(
             up_bid=0.55, up_ask=0.56,
             down_bid=0.44, down_ask=0.45,
-            z_score=2.0,
-            trend_direction="UP",
             time_remaining=600,
             current_imbalance=0,
             current_time=time.time()
@@ -254,8 +166,6 @@ class TestStateTransitions:
         strategy.decide(
             up_bid=0.55, up_ask=0.56,
             down_bid=0.44, down_ask=0.45,
-            z_score=2.0,
-            trend_direction="UP",
             time_remaining=600,
             current_imbalance=0,
             current_time=time.time()
@@ -273,8 +183,6 @@ class TestEmergencyDeferral:
         action = strategy.decide(
             up_bid=0.55, up_ask=0.56,
             down_bid=0.44, down_ask=0.45,
-            z_score=2.0,
-            trend_direction="UP",
             time_remaining=600,
             current_imbalance=15,  # Exceeds threshold
             current_time=time.time()
@@ -288,8 +196,6 @@ class TestEmergencyDeferral:
         action = strategy.decide(
             up_bid=0.55, up_ask=0.56,
             down_bid=0.44, down_ask=0.45,
-            z_score=2.0,
-            trend_direction="UP",
             time_remaining=600,
             current_imbalance=5,  # Below threshold
             current_time=time.time()
@@ -299,16 +205,14 @@ class TestEmergencyDeferral:
 
 
 class TestEntrySideSelection:
-    """Test entry side selection logic."""
+    """Test entry side selection logic - always enters EXPENSIVE side first."""
 
-    def test_favors_trend_direction_strong_z(self):
-        """Strong z should follow trend direction for entry."""
+    def test_enters_expensive_side_up(self):
+        """When UP is more expensive, enter UP first."""
         strategy = SpreadCaptureStrategy()
         strategy.decide(
-            up_bid=0.55, up_ask=0.56,
+            up_bid=0.55, up_ask=0.56,  # UP is more expensive (0.56 > 0.45)
             down_bid=0.44, down_ask=0.45,
-            z_score=2.5,
-            trend_direction="UP",
             time_remaining=600,
             current_imbalance=0,
             current_time=time.time()
@@ -316,14 +220,12 @@ class TestEntrySideSelection:
         assert strategy.state.entry_side == "UP"
         assert strategy.state.hedge_side == "DOWN"
 
-    def test_follows_down_trend(self):
-        """Strong DOWN trend should enter DOWN first."""
+    def test_enters_expensive_side_down(self):
+        """When DOWN is more expensive, enter DOWN first."""
         strategy = SpreadCaptureStrategy()
         strategy.decide(
-            up_bid=0.55, up_ask=0.56,
-            down_bid=0.44, down_ask=0.45,
-            z_score=2.5,
-            trend_direction="DOWN",
+            up_bid=0.40, up_ask=0.42,
+            down_bid=0.56, down_ask=0.58,  # DOWN is more expensive (0.58 > 0.42)
             time_remaining=600,
             current_imbalance=0,
             current_time=time.time()
@@ -331,19 +233,29 @@ class TestEntrySideSelection:
         assert strategy.state.entry_side == "DOWN"
         assert strategy.state.hedge_side == "UP"
 
-    def test_neutral_z_enters_cheaper_side(self):
-        """Neutral z should enter cheaper side."""
+
+class TestVelocityPulling:
+    """Test velocity-based quote pulling logic."""
+
+    def test_velocity_pull_threshold_constant(self):
+        """Velocity pull threshold should be 0.05 bps/sec."""
+        assert VELOCITY_PULL_THRESHOLD == 0.05
+
+    def test_should_pull_up_entry_adverse(self):
+        """UP entry should be pulled when velocity is strongly negative."""
         strategy = SpreadCaptureStrategy()
-        strategy.decide(
-            up_bid=0.40, up_ask=0.42,  # UP is cheaper
-            down_bid=0.56, down_ask=0.58,
-            z_score=0.5,  # Neutral
-            trend_direction="FLAT",
-            time_remaining=600,
-            current_imbalance=0,
-            current_time=time.time()
-        )
-        assert strategy.state.entry_side == "UP"  # Cheaper side
+        # UP entry: adverse if velocity < -0.05 (BTC falling, UP getting expensive)
+        assert strategy.should_pull_entry(velocity_bps=-0.10, entry_side="UP") is True
+        assert strategy.should_pull_entry(velocity_bps=-0.05, entry_side="UP") is False
+        assert strategy.should_pull_entry(velocity_bps=0.05, entry_side="UP") is False
+
+    def test_should_pull_down_entry_adverse(self):
+        """DOWN entry should be pulled when velocity is strongly positive."""
+        strategy = SpreadCaptureStrategy()
+        # DOWN entry: adverse if velocity > 0.05 (BTC rising, DOWN getting expensive)
+        assert strategy.should_pull_entry(velocity_bps=0.10, entry_side="DOWN") is True
+        assert strategy.should_pull_entry(velocity_bps=0.05, entry_side="DOWN") is False
+        assert strategy.should_pull_entry(velocity_bps=-0.05, entry_side="DOWN") is False
 
 
 class TestCompleteCycle:
@@ -357,8 +269,6 @@ class TestCompleteCycle:
         action1 = strategy.decide(
             up_bid=0.55, up_ask=0.56,
             down_bid=0.44, down_ask=0.45,
-            z_score=2.0,
-            trend_direction="UP",
             time_remaining=600,
             current_imbalance=0,
             current_time=time.time()
@@ -374,8 +284,6 @@ class TestCompleteCycle:
         action2 = strategy.decide(
             up_bid=0.55, up_ask=0.56,
             down_bid=0.44, down_ask=0.45,
-            z_score=2.0,
-            trend_direction="UP",
             time_remaining=600,
             current_imbalance=0,
             current_time=time.time()

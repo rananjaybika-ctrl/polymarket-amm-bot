@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-100ms Monitoring Script for Z-Score/Velocity vs Orderbook Correlation
+100ms Monitoring Script for Velocity vs Orderbook Correlation
 
 Collects data to understand:
-1. Does z-score lead or lag orderbook price changes?
-2. Does velocity catch sudden moves that z-score misses?
+1. How does velocity lead or lag orderbook price changes?
+2. Does velocity catch sudden BTC moves?
 3. How does Binance price correlate with Polymarket orderbook (Chainlink lag)?
 
 Usage:
@@ -12,7 +12,7 @@ Usage:
     # Monitors for 15 minutes (1 market cycle)
 
 Output:
-    research/zscore_velocity_YYYYMMDD_HHMMSS.csv
+    research/velocity_orderbook_YYYYMMDD_HHMMSS.csv
 """
 
 import argparse
@@ -36,8 +36,8 @@ from src.services.trend_detector import TrendDetector
 from src.models.market import BTCMarket
 
 
-class ZScoreVelocityMonitor:
-    """Monitor z-score, velocity, and orderbook at 100ms intervals."""
+class VelocityOrderbookMonitor:
+    """Monitor velocity and orderbook at 100ms intervals."""
 
     def __init__(
         self,
@@ -180,8 +180,7 @@ class ZScoreVelocityMonitor:
             "strike_price": self.strike_price,
             "price_vs_strike_pct": self.binance_client.price_vs_strike_pct if self.binance_client else 0.0,
 
-            # Z-score and velocity
-            "z_score": trend_signal.z_score if trend_signal else 0.0,
+            # Velocity-based metrics
             "velocity_bps": trend_signal.velocity_bps if trend_signal else 0.0,
             "trend_direction": trend_signal.direction.value if trend_signal else "FLAT",
             "trend_state": trend_signal.state.value if trend_signal else "NEUTRAL",
@@ -224,7 +223,7 @@ class ZScoreVelocityMonitor:
 
         # Create output file
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.csv_path = self.output_dir / f"zscore_velocity_{timestamp}.csv"
+        self.csv_path = self.output_dir / f"velocity_orderbook_{timestamp}.csv"
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Calculate end time
@@ -251,8 +250,8 @@ class ZScoreVelocityMonitor:
                     remaining = int((end_time - time.time()) / 60)
                     print(
                         f"Samples: {sample_count} | "
-                        f"z={sample['z_score']:.2f} | "
-                        f"vel={sample['velocity_bps']:.1f}bps | "
+                        f"vel={sample['velocity_bps']:.3f}bps | "
+                        f"state={sample['trend_state']} | "
                         f"spread={sample['spread']:.4f} | "
                         f"{remaining}min left"
                     )
@@ -294,7 +293,6 @@ class ZScoreVelocityMonitor:
         if not self.samples:
             return
 
-        z_scores = [s["z_score"] for s in self.samples]
         velocities = [s["velocity_bps"] for s in self.samples]
         spreads = [s["spread"] for s in self.samples]
 
@@ -304,8 +302,7 @@ class ZScoreVelocityMonitor:
         print(f"Total samples: {len(self.samples)}")
         print(f"Duration: {len(self.samples) * self.sample_interval_ms / 1000 / 60:.1f} minutes")
         print()
-        print(f"Z-Score:  min={min(z_scores):.2f}  max={max(z_scores):.2f}  avg={sum(z_scores)/len(z_scores):.2f}")
-        print(f"Velocity: min={min(velocities):.1f}  max={max(velocities):.1f}  avg={sum(velocities)/len(velocities):.1f} bps")
+        print(f"Velocity: min={min(velocities):.3f}  max={max(velocities):.3f}  avg={sum(velocities)/len(velocities):.3f} bps")
         print(f"Spread:   min={min(spreads):.4f}  max={max(spreads):.4f}  avg={sum(spreads)/len(spreads):.4f}")
         print()
 
@@ -313,11 +310,12 @@ class ZScoreVelocityMonitor:
         profitable = len([s for s in self.samples if s["spread"] > 0])
         print(f"Profitable spread (>0): {profitable}/{len(self.samples)} ({100*profitable/len(self.samples):.1f}%)")
 
-        # Z-score distribution
-        z_strong = len([s for s in self.samples if s["z_score"] >= 2.0])
-        z_mild = len([s for s in self.samples if 1.0 <= s["z_score"] < 2.0])
-        z_neutral = len([s for s in self.samples if s["z_score"] < 1.0])
-        print(f"Z-score distribution: Strong={z_strong}, Mild={z_mild}, Neutral={z_neutral}")
+        # Velocity distribution (based on trend state)
+        vel_extreme = len([s for s in self.samples if abs(s["velocity_bps"]) >= 0.10])
+        vel_strong = len([s for s in self.samples if 0.05 <= abs(s["velocity_bps"]) < 0.10])
+        vel_mild = len([s for s in self.samples if 0.02 <= abs(s["velocity_bps"]) < 0.05])
+        vel_neutral = len([s for s in self.samples if abs(s["velocity_bps"]) < 0.02])
+        print(f"Velocity distribution: Extreme={vel_extreme}, Strong={vel_strong}, Mild={vel_mild}, Neutral={vel_neutral}")
         print("="*60)
 
     async def cleanup(self):
@@ -328,7 +326,7 @@ class ZScoreVelocityMonitor:
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Monitor z-score/velocity vs orderbook")
+    parser = argparse.ArgumentParser(description="Monitor velocity vs orderbook correlation")
     parser.add_argument("--duration", type=float, default=15, help="Duration in minutes (default: 15)")
     parser.add_argument("--interval", type=int, default=100, help="Sample interval in ms (default: 100)")
     parser.add_argument("--output-dir", type=str, default="research", help="Output directory (default: research)")
@@ -338,7 +336,7 @@ async def main():
     config = Config()
     output_dir = Path(__file__).parent.parent / args.output_dir
 
-    monitor = ZScoreVelocityMonitor(
+    monitor = VelocityOrderbookMonitor(
         config=config,
         output_dir=output_dir,
         sample_interval_ms=args.interval,

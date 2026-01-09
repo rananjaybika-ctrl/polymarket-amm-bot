@@ -1,13 +1,13 @@
 """
 Spread Capture Strategy
 
-Z-score based spread capture for Polymarket BTC 15-minute markets.
-Dynamically adjusts entry/hedge offsets based on trend strength.
+Velocity-based spread capture for Polymarket BTC 15-minute markets.
+Uses fixed entry/hedge offsets with velocity-based quote pulling.
 
 Key Features:
-- Z-score tier-based pricing (strong z>2, slight 1-2, neutral <1)
-- Live z-score recalculation (offsets adjust as z changes)
-- Entry at best_bid - offset, hedge at best_bid - hedge_offset
+- Fixed entry offset (0.01 from best_bid)
+- Fixed hedge offset (0.02 from best_bid)
+- Velocity-based quote pulling (0.05 bps/sec threshold)
 - Profit ceiling enforcement on hedge orders
 - State machine for order lifecycle
 - Defers to emergency logic when imbalance exceeds threshold
@@ -21,8 +21,6 @@ Usage:
     action = strategy.decide(
         up_bid=0.55, up_ask=0.56,
         down_bid=0.44, down_ask=0.45,
-        z_score=2.5,
-        trend_direction="UP",
         time_remaining=600,
         current_imbalance=5,
         current_time=time.time()
@@ -51,30 +49,16 @@ logger = logging.getLogger(__name__)
 # CONSTANTS
 # =============================================================================
 
-# Z-score tier boundaries
-Z_STRONG_THRESHOLD = 2.0    # Strong trend
-Z_SLIGHT_THRESHOLD = 1.0    # Slight trend
-# z < 1.0 = Neutral
+# Fixed offsets (from best_bid) - simplified from z-score tiers
+DEFAULT_ENTRY_OFFSET = 0.01    # Best bid - 0.01
+DEFAULT_HEDGE_OFFSET = 0.02    # Best bid - 0.02 (target ~$0.03 spread)
 
-# Default offsets per tier (from best_bid)
-DEFAULT_ENTRY_OFFSETS = {
-    "strong": 0.00,    # At best bid (aggressive)
-    "slight": 0.01,    # Best bid - 0.01
-    "neutral": 0.01,   # Best bid - 0.01
-}
+# Wait times (seconds)
+DEFAULT_ENTRY_WAIT = 8.0       # Time before repricing entry
+DEFAULT_HEDGE_WAIT = 5.0       # Time before repricing hedge
 
-DEFAULT_HEDGE_OFFSETS = {
-    "strong": 0.03,    # Best bid - 0.03 (0.06 spread target)
-    "slight": 0.02,    # Best bid - 0.02
-    "neutral": 0.01,   # Best bid - 0.01
-}
-
-# Wait times per tier (seconds)
-DEFAULT_WAIT_TIMES = {
-    "strong": 5.0,
-    "slight": 10.0,
-    "neutral": 10.0,
-}
+# Velocity threshold for quote pulling (bps/sec)
+VELOCITY_PULL_THRESHOLD = 0.05  # ~$5 BTC move in 10s
 
 # Retry configuration
 DEFAULT_MAX_ENTRY_RETRIES = 3
@@ -123,9 +107,6 @@ class SpreadCaptureState:
     entry_size: int = 0
     entry_placed_at: float = 0.0            # timestamp
     entry_retry_count: int = 0
-    entry_z_score_at_place: float = 0.0
-    entry_tier_at_place: str = ""           # "strong", "slight", "neutral"
-
     # Entry fill info
     entry_fill_price: float = 0.0
     entry_fill_size: int = 0
@@ -138,7 +119,6 @@ class SpreadCaptureState:
     hedge_size: int = 0
     hedge_placed_at: float = 0.0
     hedge_retry_count: int = 0
-    hedge_z_score_at_place: float = 0.0
 
     # Hedge fill info
     hedge_fill_price: float = 0.0
@@ -168,13 +148,15 @@ class SpreadCaptureStrategy:
     """
     Spread Capture Strategy for Polymarket BTC 15-minute markets.
 
-    Core concept: Enter on favored side first based on z-score, then hedge
-    at a wider spread. Live z-score recalculation adjusts offsets continuously.
+    Core concept: Enter expensive side first, then hedge at target spread.
+    Uses velocity-based quote pulling for adverse move protection.
 
-    Z-Score Tiers:
-        z >= 2.0 (strong): Entry at best_bid, hedge offset 0.03
-        1.0 <= z < 2.0 (slight): Entry offset 0.01, hedge offset 0.02
-        z < 1.0 (neutral): Entry offset 0.01, hedge offset 0.01
+    Fixed Offsets:
+        Entry: best_bid - 0.01
+        Hedge: best_bid - 0.02 (target ~$0.03 spread)
+
+    Velocity Pulling:
+        Pull entry if velocity > 0.05 bps/sec adverse
 
     Attributes:
         entry_size: Shares per entry order (default 5)
@@ -221,92 +203,23 @@ class SpreadCaptureStrategy:
     # FORMULA METHODS
     # =========================================================================
 
-    def get_tier(self, z_score: float) -> str:
-        """Get tier name from z-score magnitude."""
-        abs_z = abs(z_score)
-        if abs_z >= Z_STRONG_THRESHOLD:
-            return "strong"
-        elif abs_z >= Z_SLIGHT_THRESHOLD:
-            return "slight"
-        return "neutral"
-
-    def calculate_entry_offset(
-        self,
-        z_score: float,
-        is_z_favorable: bool = False
-    ) -> float:
+    def calculate_entry_offset(self) -> float:
         """
-        Calculate entry offset from best_bid based on z-score.
-
-        When z is favorable, we can be more aggressive (lower offset).
-        When z is unfavorable, we add extra patience.
-
-        Args:
-            z_score: Current absolute z-score
-            is_z_favorable: True if trend aligns with entry side
+        Calculate entry offset from best_bid.
 
         Returns:
-            Offset to subtract from best_bid (0.00 = at best_bid)
-
-        Formula:
-            z >= 2.0: offset = 0.00 (at best_bid)
-            1.0 <= z < 2.0: offset = 0.01 * (2.0 - z) linear interpolation
-            z < 1.0: offset = 0.01
-
-            If z is UNFAVORABLE, add extra 0.01 patience
+            Fixed offset of 0.01 (entry at best_bid - 0.01)
         """
-        abs_z = abs(z_score)
+        return DEFAULT_ENTRY_OFFSET
 
-        if abs_z >= Z_STRONG_THRESHOLD:
-            base_offset = 0.00
-        elif abs_z >= Z_SLIGHT_THRESHOLD:
-            # Linear interpolation: 0.00 at z=2, 0.01 at z=1
-            t = (Z_STRONG_THRESHOLD - abs_z) / (Z_STRONG_THRESHOLD - Z_SLIGHT_THRESHOLD)
-            base_offset = 0.01 * t
-        else:
-            base_offset = 0.01
-
-        # If z is unfavorable, add extra patience
-        if not is_z_favorable and abs_z >= Z_SLIGHT_THRESHOLD:
-            base_offset += 0.01
-
-        return round(base_offset, 4)
-
-    def calculate_hedge_offset(
-        self,
-        z_score: float,
-    ) -> float:
+    def calculate_hedge_offset(self) -> float:
         """
-        Calculate hedge offset from best_bid based on volatility (z-score magnitude).
-
-        High volatility = wider initial spread target (more opportunity)
-        Low volatility = tighter spread target (realistic expectations)
-
-        Note: Uses z-score magnitude as volatility signal, NOT direction.
-
-        Args:
-            z_score: Current z-score (magnitude used)
+        Calculate hedge offset from best_bid.
 
         Returns:
-            Offset from best_bid for hedge order
-
-        Formula:
-            z >= 2.0: offset = 0.03 (high vol - target wider spread)
-            1.0 <= z < 2.0: offset = 0.02 + 0.01*(z-1) linear interpolation
-            z < 1.0: offset = 0.01 (low vol - tight spread realistic)
+            Fixed offset of 0.02 (hedge at best_bid - 0.02)
         """
-        abs_z = abs(z_score)
-
-        if abs_z >= Z_STRONG_THRESHOLD:
-            base_offset = 0.03
-        elif abs_z >= Z_SLIGHT_THRESHOLD:
-            # Linear interpolation: 0.02 at z=1, 0.03 at z=2
-            t = (abs_z - Z_SLIGHT_THRESHOLD) / (Z_STRONG_THRESHOLD - Z_SLIGHT_THRESHOLD)
-            base_offset = 0.02 + 0.01 * t
-        else:
-            base_offset = 0.01
-
-        return round(base_offset, 4)
+        return DEFAULT_HEDGE_OFFSET
 
     def calculate_max_hedge_price(
         self,
@@ -351,7 +264,6 @@ class SpreadCaptureStrategy:
 
     def calculate_wait_time(
         self,
-        z_score: float,
         attempt: int,
         is_entry: bool = True,
         price_room: Optional[float] = None,
@@ -361,20 +273,12 @@ class SpreadCaptureStrategy:
         """
         Calculate wait time before next retry.
 
-        ENTRY: Exponential backoff (abort if market not favorable)
-        HEDGE: Hybrid price-room + velocity (no backoff, just reprice)
+        ENTRY: Fixed base wait with exponential backoff
+        HEDGE: Price-room based with velocity adjustment (no backoff)
 
         SPEED MODE: 10x faster wait times for aggressive latency-sensitive trading
-        - Normal: Entry 5-30s, Hedge 3-45s
-        - Speed:  Entry 0.5-3s, Hedge 0.3-5s
-
-        Logic for hedge:
-        - Base wait proportional to price_room (good deals deserve patience)
-        - Velocity adjustment: adverse movement = fill faster, favorable = more patience
-        - NO exponential backoff for hedge (we want to fill, not abort)
 
         Args:
-            z_score: Current z-score
             attempt: Current retry attempt (0 = first try)
             is_entry: True for entry phase, False for hedge phase
             price_room: Distance from current price to max price (ceiling)
@@ -390,41 +294,29 @@ class SpreadCaptureStrategy:
         # HEDGE PHASE: Price-room based with velocity adjustment (no backoff!)
         if not is_entry and price_room is not None:
             # Base wait proportional to price room
-            # Normal: $0.10 room = 30s wait, $0.05 room = 15s, $0.01 room = 3s
-            # Speed:  $0.10 room = 3s wait, $0.05 room = 1.5s, $0.01 room = 0.3s
             base_wait = max(0.3 if self.speed_mode else 3.0, price_room * 300 * speed_mult)
 
             # Velocity adjustment (if available)
             if velocity_bps is not None and hedge_side:
                 # Determine if velocity is adverse for our hedge side
-                # If hedge is DOWN and velocity > 0 (BTC rising) → DOWN getting expensive → adverse
-                # If hedge is UP and velocity < 0 (BTC falling) → UP getting expensive → adverse
                 if hedge_side.upper() == "DOWN":
-                    # For DOWN hedge: positive velocity is adverse (price rising = UP winning)
-                    if velocity_bps > 5:      # Adverse: BTC rising, DOWN expensive
-                        base_wait *= 0.5      # Fill faster before it gets worse
-                    elif velocity_bps < -5:   # Favorable: BTC falling, DOWN cheaper
-                        base_wait *= 1.5      # Wait for potentially better fill
+                    if velocity_bps > 0.05:   # Adverse: BTC rising
+                        base_wait *= 0.5
+                    elif velocity_bps < -0.05:  # Favorable: BTC falling
+                        base_wait *= 1.5
                 else:  # hedge_side == "UP"
-                    # For UP hedge: negative velocity is adverse (price falling = DOWN winning)
-                    if velocity_bps < -5:     # Adverse: BTC falling, UP expensive
-                        base_wait *= 0.5      # Fill faster before it gets worse
-                    elif velocity_bps > 5:    # Favorable: BTC rising, UP cheaper
-                        base_wait *= 1.5      # Wait for potentially better fill
+                    if velocity_bps < -0.05:  # Adverse: BTC falling
+                        base_wait *= 0.5
+                    elif velocity_bps > 0.05:  # Favorable: BTC rising
+                        base_wait *= 1.5
 
             # Cap: Normal 3-45s, Speed 0.3-5s
             max_wait = 5.0 if self.speed_mode else 45.0
             min_wait = 0.3 if self.speed_mode else 3.0
             return min(max(min_wait, base_wait), max_wait)
 
-        # ENTRY PHASE: Standard z-score based with exponential backoff
-        abs_z = abs(z_score)
-        if abs_z >= Z_STRONG_THRESHOLD:
-            base_wait = 0.5 if self.speed_mode else 5.0   # Volatile: quick retries
-        elif abs_z >= Z_SLIGHT_THRESHOLD:
-            base_wait = 0.8 if self.speed_mode else 8.0   # Moderate
-        else:
-            base_wait = 1.0 if self.speed_mode else 10.0  # Calm
+        # ENTRY PHASE: Fixed base wait with exponential backoff
+        base_wait = 0.8 if self.speed_mode else DEFAULT_ENTRY_WAIT
 
         # Exponential backoff for entry (want to abort if market not favorable)
         wait = base_wait * (1.3 ** attempt)
@@ -443,8 +335,6 @@ class SpreadCaptureStrategy:
         up_ask: float,
         down_bid: float,
         down_ask: float,
-        z_score: float,
-        trend_direction: str,
         time_remaining: float,
         current_imbalance: int,
         current_time: float,
@@ -458,11 +348,10 @@ class SpreadCaptureStrategy:
             up_ask: Current UP best ask
             down_bid: Current DOWN best bid
             down_ask: Current DOWN best ask
-            z_score: Current z-score magnitude (always positive)
-            trend_direction: "UP", "DOWN", or "FLAT"
             time_remaining: Seconds until market resolution
             current_imbalance: abs(up_shares - down_shares)
             current_time: Current timestamp (time.time())
+            velocity_bps: Current velocity in bps/sec (for hedge timing)
 
         Returns:
             (side, price, size) to place order, or None if no action
@@ -514,8 +403,7 @@ class SpreadCaptureStrategy:
         # =================================================================
         if s.phase == SpreadCapturePhase.IDLE:
             return self._handle_idle(
-                up_bid, up_ask, down_bid, down_ask,
-                z_score, trend_direction, current_time
+                up_bid, up_ask, down_bid, down_ask, current_time
             )
 
         # =================================================================
@@ -523,8 +411,7 @@ class SpreadCaptureStrategy:
         # =================================================================
         if s.phase == SpreadCapturePhase.ENTRY_PENDING:
             return self._handle_entry_pending(
-                up_bid, up_ask, down_bid, down_ask,
-                z_score, trend_direction, current_time
+                up_bid, up_ask, down_bid, down_ask, current_time
             )
 
         # =================================================================
@@ -532,8 +419,7 @@ class SpreadCaptureStrategy:
         # =================================================================
         if s.phase == SpreadCapturePhase.ENTRY_FILLED:
             return self._handle_entry_filled(
-                up_bid, up_ask, down_bid, down_ask,
-                z_score, current_time
+                up_bid, up_ask, down_bid, down_ask, current_time
             )
 
         # =================================================================
@@ -542,7 +428,7 @@ class SpreadCaptureStrategy:
         if s.phase == SpreadCapturePhase.HEDGE_PENDING:
             return self._handle_hedge_pending(
                 up_bid, up_ask, down_bid, down_ask,
-                z_score, current_time, velocity_bps
+                current_time, velocity_bps
             )
 
         # =================================================================
@@ -550,8 +436,7 @@ class SpreadCaptureStrategy:
         # =================================================================
         if s.phase == SpreadCapturePhase.HEDGE_REPRICING:
             return self._handle_hedge_repricing(
-                up_bid, up_ask, down_bid, down_ask,
-                z_score, current_time
+                up_bid, up_ask, down_bid, down_ask, current_time
             )
 
         # =================================================================
@@ -559,8 +444,7 @@ class SpreadCaptureStrategy:
         # =================================================================
         if s.phase == SpreadCapturePhase.HEDGE_AT_CEILING:
             return self._handle_hedge_at_ceiling(
-                up_bid, up_ask, down_bid, down_ask,
-                z_score, current_time
+                up_bid, up_ask, down_bid, down_ask, current_time
             )
 
         return None
@@ -573,7 +457,6 @@ class SpreadCaptureStrategy:
         self,
         up_bid: float, up_ask: float,
         down_bid: float, down_ask: float,
-        z_score: float, trend_direction: str,
         current_time: float
     ) -> Optional[Tuple[str, float, int]]:
         """
@@ -592,8 +475,8 @@ class SpreadCaptureStrategy:
 
         s.hedge_side = "DOWN" if s.entry_side == "UP" else "UP"
 
-        # Calculate entry price (is_z_favorable disabled pending research)
-        offset = self.calculate_entry_offset(z_score, is_z_favorable=False)
+        # Calculate entry price (fixed offset)
+        offset = self.calculate_entry_offset()
 
         best_bid = up_bid if s.entry_side == "UP" else down_bid
         entry_price = max(0.01, round(best_bid - offset, 4))
@@ -609,14 +492,12 @@ class SpreadCaptureStrategy:
         s.entry_price = entry_price
         s.entry_size = self.entry_size
         s.entry_placed_at = current_time
-        s.entry_z_score_at_place = z_score
-        s.entry_tier_at_place = self.get_tier(z_score)
         s.entry_retry_count = 0
         s.phase = SpreadCapturePhase.ENTRY_PENDING
 
         logger.info(
             f"[SPREADCAP] Entry: {s.entry_side} {s.entry_size} @ ${entry_price:.4f} | "
-            f"z={z_score:.2f} tier={s.entry_tier_at_place} offset=${offset:.4f}"
+            f"offset=${offset:.4f}"
         )
 
         return (s.entry_side, entry_price, s.entry_size)
@@ -625,21 +506,20 @@ class SpreadCaptureStrategy:
         self,
         up_bid: float, up_ask: float,
         down_bid: float, down_ask: float,
-        z_score: float, trend_direction: str,
         current_time: float
     ) -> Optional[Tuple[str, float, int]]:
         """
         ENTRY_PENDING: Wait for fill, check for timeout/reprice.
 
         Key behaviors:
-        1. Wait for configured time based on z-tier
-        2. If timeout and z changed, recalculate price (LIVE z recalculation)
+        1. Wait for configured time
+        2. If timeout, reprice at current best_bid - offset
         3. If max retries exceeded, abort
         """
         s = self.state
         # Calculate price room for price-dependent wait time
         price_room = self.max_share_price - s.entry_price if s.entry_price > 0 else None
-        wait_time = self.calculate_wait_time(z_score, s.entry_retry_count, is_entry=True, price_room=price_room)
+        wait_time = self.calculate_wait_time(s.entry_retry_count, is_entry=True, price_room=price_room)
         elapsed = current_time - s.entry_placed_at
 
         if elapsed < wait_time:
@@ -662,8 +542,8 @@ class SpreadCaptureStrategy:
                 logger.warning(f"[SPREADCAP] ABORT: {s.abort_reason}")
                 return None
 
-        # LIVE Z RECALCULATION: Price may need to adjust
-        new_offset = self.calculate_entry_offset(z_score, is_z_favorable=False)
+        # Reprice at current best_bid - offset
+        new_offset = self.calculate_entry_offset()
         best_bid = up_bid if s.entry_side == "UP" else down_bid
         new_price = max(0.01, round(best_bid - new_offset, 4))
 
@@ -671,10 +551,9 @@ class SpreadCaptureStrategy:
         if abs(new_price - s.entry_price) > 0.005:
             logger.info(
                 f"[SPREADCAP] Entry reprice: ${s.entry_price:.4f} -> ${new_price:.4f} | "
-                f"z={z_score:.2f} (was {s.entry_z_score_at_place:.2f}) retry={s.entry_retry_count}"
+                f"retry={s.entry_retry_count}"
             )
             s.entry_price = new_price
-            s.entry_z_score_at_place = z_score
         else:
             logger.info(
                 f"[SPREADCAP] Entry retry {s.entry_retry_count}: {s.entry_side} @ ${s.entry_price:.4f}"
@@ -693,21 +572,20 @@ class SpreadCaptureStrategy:
         self,
         up_bid: float, up_ask: float,
         down_bid: float, down_ask: float,
-        z_score: float,
         current_time: float
     ) -> Optional[Tuple[str, float, int]]:
         """
         ENTRY_FILLED: Calculate and place hedge order.
 
         Key behaviors:
-        1. Calculate hedge offset based on current z
+        1. Calculate hedge offset (fixed)
         2. Apply profit ceiling (never exceed max hedge price)
         3. Place hedge as maker order
         """
         s = self.state
 
-        # Calculate hedge price
-        offset = self.calculate_hedge_offset(z_score)
+        # Calculate hedge price (fixed offset)
+        offset = self.calculate_hedge_offset()
         best_bid = down_bid if s.hedge_side == "DOWN" else up_bid
 
         hedge_price = max(0.01, round(best_bid - offset, 4))
@@ -726,13 +604,12 @@ class SpreadCaptureStrategy:
         s.hedge_price = hedge_price
         s.hedge_size = s.entry_fill_size  # Match entry size
         s.hedge_placed_at = current_time
-        s.hedge_z_score_at_place = z_score
         s.hedge_retry_count = 0
         s.phase = SpreadCapturePhase.HEDGE_PENDING
 
         logger.info(
             f"[SPREADCAP] Hedge: {s.hedge_side} {s.hedge_size} @ ${hedge_price:.4f} | "
-            f"z={z_score:.2f} offset=${offset:.4f} max_hedge=${max_hedge_price:.4f}"
+            f"offset=${offset:.4f} max_hedge=${max_hedge_price:.4f}"
         )
 
         return (s.hedge_side, hedge_price, s.hedge_size)
@@ -741,7 +618,6 @@ class SpreadCaptureStrategy:
         self,
         up_bid: float, up_ask: float,
         down_bid: float, down_ask: float,
-        z_score: float,
         current_time: float,
         velocity_bps: Optional[float] = None
     ) -> Optional[Tuple[str, float, int]]:
@@ -749,14 +625,14 @@ class SpreadCaptureStrategy:
         HEDGE_PENDING: Wait for fill, reprice if timeout.
 
         Key behavior on non-fill: RE-QUEUE at better price (not market take).
-        Now uses hybrid wait time: price-room based with velocity adjustment.
+        Uses price-room based wait time with velocity adjustment.
         """
         s = self.state
         # Calculate price room for price-dependent wait time
         max_hedge_price = self.calculate_max_hedge_price(s.entry_fill_price) if s.entry_fill_price > 0 else 0.99
         price_room = max_hedge_price - s.hedge_price if s.hedge_price > 0 else None
         wait_time = self.calculate_wait_time(
-            z_score, s.hedge_retry_count, is_entry=False,
+            s.hedge_retry_count, is_entry=False,
             price_room=price_room, velocity_bps=velocity_bps, hedge_side=s.hedge_side
         )
         elapsed = current_time - s.hedge_placed_at
@@ -775,7 +651,6 @@ class SpreadCaptureStrategy:
         self,
         up_bid: float, up_ask: float,
         down_bid: float, down_ask: float,
-        z_score: float,
         current_time: float
     ) -> Optional[Tuple[str, float, int]]:
         """
@@ -820,7 +695,6 @@ class SpreadCaptureStrategy:
         self,
         up_bid: float, up_ask: float,
         down_bid: float, down_ask: float,
-        z_score: float,
         current_time: float
     ) -> Optional[Tuple[str, float, int]]:
         """
@@ -979,8 +853,6 @@ class SpreadCaptureStrategy:
         s.entry_size = 0
         s.entry_placed_at = 0.0
         s.entry_retry_count = 0
-        s.entry_z_score_at_place = 0.0
-        s.entry_tier_at_place = ""
         s.entry_fill_price = 0.0
         s.entry_fill_size = 0
         s.entry_fill_time = 0.0
@@ -992,7 +864,6 @@ class SpreadCaptureStrategy:
         s.hedge_size = 0
         s.hedge_placed_at = 0.0
         s.hedge_retry_count = 0
-        s.hedge_z_score_at_place = 0.0
         s.hedge_fill_price = 0.0
         s.hedge_fill_size = 0
         s.hedge_fill_time = 0.0
@@ -1020,45 +891,31 @@ class SpreadCaptureStrategy:
 
     def should_pull_entry(
         self,
-        z_score: float,
-        trend_direction: str,
         velocity_bps: Optional[float] = None,
     ) -> bool:
         """
-        Check if entry order should be pulled due to market conditions.
+        Check if entry order should be pulled due to rapid market movement.
 
-        Uses same OR filter as TrendDetector.should_pull_quote():
-        - Z-score >= 2.0 (strong volatility) OR
-        - Velocity > 2 bps/sec (rapid movement)
+        Uses velocity-only trigger (z-score removed from codebase).
+        Pull when velocity exceeds threshold to avoid fills during fast moves.
 
-        Note: We ignore trend_direction because Binance z-score trends can
-        diverge from Chainlink (market oracle). Instead, we use pure volatility
-        signals that work regardless of direction accuracy.
+        Args:
+            velocity_bps: Current velocity in basis points per second
 
-        Integrates with existing quote pulling in live_trading.py
+        Returns:
+            True if entry should be cancelled and repriced
         """
         s = self.state
         if s.phase != SpreadCapturePhase.ENTRY_PENDING:
             return False
 
-        # OR FILTER (similar to TrendDetector):
-        # 1. Z-score trigger: Strong volatility
-        z_trigger = abs(z_score) >= Z_STRONG_THRESHOLD  # 2.0
-
-        # 2. Velocity trigger: Rapid movement (regardless of direction)
-        # Note: 2 bps = ~$90 move in 10s on $91k BTC (realistic threshold)
-        VELOCITY_PULL_THRESHOLD = 2.0  # bps/sec
-        vel_trigger = velocity_bps is not None and abs(velocity_bps) > VELOCITY_PULL_THRESHOLD
-
-        should_pull = z_trigger or vel_trigger
+        # Velocity trigger: Rapid movement
+        # 0.05 bps/sec = ~$5 BTC move in 10s (realistic threshold)
+        VELOCITY_PULL_THRESHOLD = 0.05  # bps/sec
+        should_pull = velocity_bps is not None and abs(velocity_bps) > VELOCITY_PULL_THRESHOLD
 
         if should_pull:
-            reasons = []
-            if z_trigger:
-                reasons.append(f"z={z_score:.2f}")
-            if vel_trigger:
-                reasons.append(f"vel={velocity_bps:.1f}bps")
-            logger.info(f"[SPREADCAP] Pull entry: {' + '.join(reasons)}")
+            logger.info(f"[SPREADCAP] Pull entry: vel={velocity_bps:.3f}bps")
 
         return should_pull
 

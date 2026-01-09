@@ -25,11 +25,11 @@ logger = logging.getLogger(__name__)
 
 
 class TrendState(Enum):
-    """Trend strength levels based on z-score."""
-    NEUTRAL = "neutral"    # |z| < 1.0 - Normal market conditions
-    MILD = "mild"          # 1.0 <= |z| < 2.0 - Some directional bias
-    STRONG = "strong"      # 2.0 <= |z| < 3.0 - Clear trend, reduce targets
-    EXTREME = "extreme"    # |z| >= 3.0 - Strong trend, minimal targets
+    """Trend strength levels based on velocity."""
+    NEUTRAL = "neutral"    # |velocity| < 0.02 bps/sec - Normal market conditions
+    MILD = "mild"          # 0.02 <= |velocity| < 0.05 bps/sec - Some movement
+    STRONG = "strong"      # 0.05 <= |velocity| < 0.10 bps/sec - Clear movement
+    EXTREME = "extreme"    # |velocity| >= 0.10 bps/sec - Rapid movement
 
 
 class TrendDirection(Enum):
@@ -44,7 +44,6 @@ class TrendSignal:
     """Actionable trend signal for trading decisions."""
     state: TrendState
     direction: TrendDirection
-    z_score: float
     price_vs_strike_pct: float
     velocity_bps: float  # Rate of change in basis points per second
     favored_side: str    # "UP" or "DOWN" - which side will win if trend continues
@@ -78,10 +77,11 @@ class TrendDetector:
             buy_up = True
     """
 
-    # Z-score thresholds for trend states
-    Z_MILD = 1.0
-    Z_STRONG = 2.0
-    Z_EXTREME = 3.0
+    # Velocity thresholds for trend states (bps/sec)
+    # 0.05 bps = ~$5 BTC move in 10s (realistic threshold)
+    VELOCITY_MILD = 0.02      # Mild movement
+    VELOCITY_STRONG = 0.05    # Clear movement - pull threshold
+    VELOCITY_EXTREME = 0.10   # Rapid movement
 
     # Price movement thresholds (percentage from strike)
     PCT_FLAT_THRESHOLD = 0.1   # <0.1% = flat
@@ -89,31 +89,26 @@ class TrendDetector:
     PCT_STRONG_THRESHOLD = 0.5 # <0.5% = strong
 
     # Quote pulling parameters
-    # NOTE: 2 bps = ~$90 move in 10s on $91k BTC (realistic threshold)
-    # Old value of 10-15 bps required $900-1400 moves (never triggered)
-    PULL_VELOCITY_BPS = 2.0   # Pull if velocity > 2 bps/sec
+    # 0.05 bps/sec = ~$5 BTC move in 10s (realistic threshold for pulling)
+    PULL_VELOCITY_BPS = 0.05  # Pull if velocity > 0.05 bps/sec
 
     def __init__(
         self,
         binance_client: 'BinanceClient',
-        z_score_mild: float = Z_MILD,
-        z_score_strong: float = Z_STRONG,
-        z_score_extreme: float = Z_EXTREME,
         velocity_window_secs: int = 10,
+        velocity_pull_threshold: float = None,
     ):
         """
         Initialize TrendDetector.
 
         Args:
             binance_client: Connected BinanceClient instance
-            z_score_mild: Z-score threshold for MILD state (default 1.0)
-            z_score_strong: Z-score threshold for STRONG state (default 2.0)
-            z_score_extreme: Z-score threshold for EXTREME state (default 3.0)
             velocity_window_secs: Window for velocity calculation (default 10s)
+            velocity_pull_threshold: Velocity threshold for pulling quotes (default 0.05 bps/sec)
         """
         self._binance = binance_client
-        self._z_thresholds = (z_score_mild, z_score_strong, z_score_extreme)
         self._velocity_window = velocity_window_secs
+        self._velocity_pull_threshold = velocity_pull_threshold or self.PULL_VELOCITY_BPS
 
         # Track last few prices for velocity calculation
         self._last_price: float = 0.0
@@ -126,8 +121,11 @@ class TrendDetector:
         Returns:
             TrendSignal with state, direction, and actionable data
         """
-        z_score = self._binance.calculate_z_score()
         price_vs_strike = self._binance.price_vs_strike_pct
+
+        # Calculate velocity first (bps/sec) - this is now the primary signal
+        velocity = self._calculate_velocity()
+        abs_velocity = abs(velocity)
 
         # Determine direction from price vs strike
         if price_vs_strike > self.PCT_FLAT_THRESHOLD:
@@ -141,28 +139,23 @@ class TrendDetector:
             # In flat conditions, no clear favorite
             favored_side = "UP" if price_vs_strike >= 0 else "DOWN"
 
-        # Determine state from z-score
-        abs_z = abs(z_score)
-        if abs_z >= self._z_thresholds[2]:  # EXTREME
+        # Determine state from velocity (not z-score)
+        if abs_velocity >= self.VELOCITY_EXTREME:
             state = TrendState.EXTREME
             confidence = 0.95
-        elif abs_z >= self._z_thresholds[1]:  # STRONG
+        elif abs_velocity >= self.VELOCITY_STRONG:
             state = TrendState.STRONG
             confidence = 0.80
-        elif abs_z >= self._z_thresholds[0]:  # MILD
+        elif abs_velocity >= self.VELOCITY_MILD:
             state = TrendState.MILD
             confidence = 0.60
         else:  # NEUTRAL
             state = TrendState.NEUTRAL
             confidence = 0.40
 
-        # Calculate velocity (bps/sec)
-        velocity = self._calculate_velocity()
-
         return TrendSignal(
             state=state,
             direction=direction,
-            z_score=z_score,
             price_vs_strike_pct=price_vs_strike,
             velocity_bps=velocity,
             favored_side=favored_side,
@@ -176,58 +169,38 @@ class TrendDetector:
         Implements professional MM behavior from Telegram alpha:
         "You get rolled over if you're not quick enough to pull your quotes when Binance moves"
 
-        Logic (OR filter - pull if EITHER condition true):
-        1. Z-SCORE: |z| >= 2.0 (STRONG/EXTREME) AND trending against our order
-        2. VELOCITY: Price moving fast (> threshold bps/sec) against our order
-
-        Why OR filter needed:
-        - Velocity catches rapid spikes (e.g., BTC jumps $50 in 2 seconds)
-        - Z-score catches sustained positions (e.g., BTC $100 above strike, velocity low after stabilizing)
-        - Lost $1.90 on Jan 7 because z=2.56 but velocity was low - order filled on losing side
+        Logic: VELOCITY-ONLY
+        Pull if price moving fast (> threshold bps/sec) AGAINST our order.
+        - 0.05 bps/sec = ~$5 BTC move in 10s (realistic threshold)
 
         Args:
             side: "UP" or "DOWN" - which side's quote we're evaluating
-            velocity_threshold_bps: Minimum velocity to trigger pull (default 10 bps/sec)
+            velocity_threshold_bps: Minimum velocity to trigger pull (default 0.05 bps/sec)
 
         Returns:
             True if quote should be cancelled
         """
         if velocity_threshold_bps is None:
-            velocity_threshold_bps = self.PULL_VELOCITY_BPS
+            velocity_threshold_bps = self._velocity_pull_threshold
 
         signal = self.get_trend_signal()
-
-        # Don't pull in neutral conditions - no urgency
-        if signal.state == TrendState.NEUTRAL:
-            return False
-
         side_upper = side.upper()
 
-        # Check if trend direction is AGAINST our order
-        trend_against_down = (side_upper == "DOWN" and signal.direction == TrendDirection.UP)
-        trend_against_up = (side_upper == "UP" and signal.direction == TrendDirection.DOWN)
+        # Check if velocity is ADVERSE for our order
+        # UP order: adverse if velocity < 0 (BTC falling, UP getting expensive)
+        # DOWN order: adverse if velocity > 0 (BTC rising, DOWN getting expensive)
+        if side_upper == "UP":
+            adverse_velocity = signal.velocity_bps < -velocity_threshold_bps
+        else:  # DOWN
+            adverse_velocity = signal.velocity_bps > velocity_threshold_bps
 
-        if not (trend_against_down or trend_against_up):
-            return False  # Trend is WITH our order, keep it
+        if adverse_velocity:
+            logger.info(
+                f"PULL {side_upper}: vel={signal.velocity_bps:.3f}bps | "
+                f"threshold={velocity_threshold_bps:.3f}bps | dir={signal.direction.value}"
+            )
 
-        # OR FILTER: Pull if EITHER condition is true
-        # Condition 1: Z-SCORE - Strong/Extreme trend against us (immediate pull)
-        z_score_trigger = signal.state in (TrendState.STRONG, TrendState.EXTREME)
-
-        # Condition 2: VELOCITY - Rapid movement against us
-        velocity_trigger = abs(signal.velocity_bps) > velocity_threshold_bps
-
-        should_pull = z_score_trigger or velocity_trigger
-
-        if should_pull:
-            reason = []
-            if z_score_trigger:
-                reason.append(f"z={signal.z_score:.2f}")
-            if velocity_trigger:
-                reason.append(f"vel={signal.velocity_bps:.1f}bps")
-            logger.info(f"PULL {side_upper}: {' + '.join(reason)} | dir={signal.direction.value}")
-
-        return should_pull
+        return adverse_velocity
 
     def get_priority_side(self) -> Optional[str]:
         """
@@ -322,6 +295,6 @@ class TrendDetector:
             f"TrendDetector("
             f"state={signal.state.value}, "
             f"direction={signal.direction.value}, "
-            f"z={signal.z_score:.2f}, "
+            f"vel={signal.velocity_bps:.3f}bps, "
             f"pct={signal.price_vs_strike_pct:.2f}%)"
         )

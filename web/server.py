@@ -300,7 +300,7 @@ class FairValueMMBotConfig(BaseModel):
 class SpreadCaptureBotConfig(BaseModel):
     """Configuration for Spread Capture strategy from web UI.
 
-    Z-score based spread capture for sub-$1.00 pair opportunities.
+    Velocity-based spread capture for sub-$1.00 pair opportunities.
     Dynamically adjusts entry/hedge offsets based on trend strength.
     """
     mode: str  # "paper" or "live"
@@ -376,7 +376,7 @@ class StrategyState:
 strategies = {
     "calculus_maker": StrategyState("calculus_maker"),  # Calculus MAKER (exponential decay + quadratic size)
     "fair_value_mm": StrategyState("fair_value_mm"),    # Fair Value MM (Binance-based pricing)
-    "spread_capture": StrategyState("spread_capture"),  # Spread Capture (z-score based offsets)
+    "spread_capture": StrategyState("spread_capture"),  # Spread Capture (velocity based offsets)
     "volume_weighted": StrategyState("volume_weighted"),  # Volume Weighted (Gabagool-style) mode
     # Legacy - keep for backward compat but not shown in UI
     "standard": StrategyState("standard"),
@@ -1717,7 +1717,7 @@ async def run_fair_value_mm_bot(config: FairValueMMBotConfig, strategy: Strategy
 async def run_spread_capture_bot(config: SpreadCaptureBotConfig, strategy: StrategyState):
     """Run the Spread Capture trading bot asynchronously.
 
-    Z-score based spread capture for sub-$1.00 pair opportunities.
+    Velocity-based spread capture for sub-$1.00 pair opportunities.
     """
     # Store config for auto-restart
     restart_configs["spread_capture"] = config.dict()

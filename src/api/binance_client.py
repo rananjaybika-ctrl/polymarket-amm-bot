@@ -20,11 +20,11 @@ from websockets.exceptions import ConnectionClosed
 logger = logging.getLogger(__name__)
 
 
-# Type for z-score threshold callbacks
-# callback(z_score: float, direction: str, trend_state: str)
+# Type for velocity threshold callbacks
+# callback(velocity_bps: float, direction: str)
 # Can be sync or async - we handle both
-ZScoreCallback = Callable[[float, str, str], None]
-AsyncZScoreCallback = Callable[[float, str, str], 'asyncio.coroutine']
+VelocityCallback = Callable[[float, str], None]
+AsyncVelocityCallback = Callable[[float, str], 'asyncio.coroutine']
 
 
 @dataclass
@@ -60,9 +60,8 @@ class BinanceClient:
     REST_URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
     KLINES_URL = "https://api.binance.com/api/v3/klines"
 
-    # Z-score thresholds for event-driven callbacks
-    Z_STRONG_THRESHOLD = 2.0
-    Z_EXTREME_THRESHOLD = 3.0
+    # Velocity threshold for event-driven callbacks (bps/sec)
+    VELOCITY_PULL_THRESHOLD = 0.05  # ~$5 BTC move in 10s
 
     def __init__(self, window_seconds: int = 60, max_history_seconds: int = 3600):
         """
@@ -89,12 +88,12 @@ class BinanceClient:
         self._max_reconnect_delay: float = 30.0
         self._reconnect_task: Optional[asyncio.Task] = None
 
-        # Event-driven z-score threshold callbacks
-        # These fire IMMEDIATELY when z-score crosses STRONG threshold
-        self._z_threshold_callbacks: List[ZScoreCallback] = []
-        self._last_z_state: str = "neutral"  # Track state changes: neutral, strong, extreme
+        # Event-driven velocity threshold callbacks
+        # These fire IMMEDIATELY when velocity exceeds threshold
+        self._velocity_callbacks: List[VelocityCallback] = []
         self._callback_cooldown_secs: float = 1.0  # Minimum time between callbacks
         self._last_callback_time: float = 0.0
+        self._velocity_window_secs: int = 10  # Window for velocity calculation
 
     async def connect(self) -> None:
         """Connect to Binance WebSocket stream and start receiving prices."""
@@ -154,10 +153,10 @@ class BinanceClient:
                     self._current_price = price
                     self._price_history.append(PricePoint(timestamp=now, price=price))
 
-                    # EVENT-DRIVEN: Check z-score on every tick
+                    # EVENT-DRIVEN: Check velocity on every tick
                     # This is the key latency advantage - react within 100ms of Binance move
-                    if self._z_threshold_callbacks and self._strike_price > 0:
-                        self._check_z_threshold_and_fire()
+                    if self._velocity_callbacks and self._strike_price > 0:
+                        self._check_velocity_and_fire()
 
             except (json.JSONDecodeError, KeyError, ValueError) as e:
                 logger.debug(f"Failed to parse Binance message: {e}")
@@ -379,60 +378,33 @@ class BinanceClient:
             sample_count=len(changes),
         )
 
-    def calculate_z_score(self, window_seconds: Optional[int] = None) -> float:
+    def calculate_velocity(self, window_seconds: Optional[int] = None) -> float:
         """
-        Calculate z-score of current price vs strike deviation.
+        Calculate price velocity in basis points per second.
 
-        Measures how many standard deviations the current move from strike is,
-        scaled by the number of observations (random walk adjustment).
-
-        The calculation accounts for the fact that price changes accumulate over time:
-        - current_deviation: Total % move from strike
-        - std_dev: Per-tick volatility
-        - num_ticks: Number of price observations in window
-
-        For a random walk, expected deviation after N steps ~ std_dev * sqrt(N).
-        Z-score = current_deviation / (std_dev * sqrt(N))
+        Positive = price rising (UP winning)
+        Negative = price falling (DOWN winning)
 
         Args:
-            window_seconds: Window size for std dev calculation
+            window_seconds: Window for velocity calculation (default 10s)
 
         Returns:
-            Z-score (absolute value), or 0.0 if insufficient data
+            Velocity in bps/sec
         """
-        window = window_seconds or self._window_seconds
+        window = window_seconds or self._velocity_window_secs
         changes = self.get_price_changes(window)
 
-        if len(changes) < 2:
+        if not changes:
             return 0.0
 
-        try:
-            std_dev = statistics.stdev(changes)
-        except statistics.StatisticsError:
-            return 0.0
+        # Sum of percentage changes over window
+        total_change_pct = sum(changes)
 
-        if std_dev <= 0:
-            return 0.0
+        # Convert to bps/sec
+        velocity_pct_per_sec = total_change_pct / window
 
-        # Number of ticks in the window
-        num_ticks = len(changes)
-
-        # Expected deviation for a random walk: std_dev * sqrt(N)
-        # This normalizes the z-score to account for time elapsed
-        expected_deviation = std_dev * (num_ticks ** 0.5)
-
-        if expected_deviation <= 0:
-            return 0.0
-
-        # Current move from strike (absolute value)
-        current_deviation = abs(self.price_vs_strike_pct)
-
-        # Z-score: how many "expected deviations" is the current move?
-        raw_z = current_deviation / expected_deviation
-
-        # Cap z-score to reasonable range (standard practice)
-        # Raw z can be huge when per-tick volatility is tiny but total move is large
-        return min(raw_z, 5.0)
+        # Convert % to bps (1% = 100 bps)
+        return velocity_pct_per_sec * 100
 
     def calculate_volatility_ratio(
         self,
@@ -478,101 +450,78 @@ class BinanceClient:
         return min(max(ratio, 0.1), 5.0)
 
     # =========================================================================
-    # EVENT-DRIVEN QUOTE PULLING
+    # EVENT-DRIVEN QUOTE PULLING (VELOCITY-BASED)
     # =========================================================================
     # React within 100-200ms of Binance price moves instead of waiting for
     # main loop iteration (1-2 seconds). This is the key latency advantage.
 
-    def on_z_threshold_crossed(self, callback: ZScoreCallback) -> None:
+    def on_velocity_threshold_crossed(self, callback: VelocityCallback) -> None:
         """
-        Register callback for when z-score crosses STRONG threshold (2.0).
+        Register callback for when velocity exceeds threshold (0.05 bps/sec).
 
-        The callback is fired IMMEDIATELY when z-score transitions from
-        neutral/mild to strong/extreme. This enables 100-200ms reaction time
-        to Binance price moves, compared to 1-2 second polling.
+        The callback is fired IMMEDIATELY when velocity exceeds the pull threshold.
+        This enables 100-200ms reaction time to Binance price moves.
 
         Args:
-            callback: Function(z_score, direction, trend_state) called on threshold cross
-                      direction: "UP" if price > strike, "DOWN" if price < strike
-                      trend_state: "strong" or "extreme"
+            callback: Function(velocity_bps, direction) called on threshold cross
+                      velocity_bps: Current velocity in basis points per second
+                      direction: "UP" if velocity > 0, "DOWN" if velocity < 0
 
         Example:
-            def on_trend_alert(z_score, direction, trend_state):
+            def on_velocity_alert(velocity_bps, direction):
                 if direction == "UP":
-                    # Cancel DOWN orders immediately
+                    # Cancel DOWN orders immediately (price rising)
                     asyncio.create_task(cancel_down_orders())
 
-            binance.on_z_threshold_crossed(on_trend_alert)
+            binance.on_velocity_threshold_crossed(on_velocity_alert)
         """
-        self._z_threshold_callbacks.append(callback)
-        logger.info(f"Registered z-threshold callback (total: {len(self._z_threshold_callbacks)})")
+        self._velocity_callbacks.append(callback)
+        logger.info(f"Registered velocity callback (total: {len(self._velocity_callbacks)})")
 
-    def remove_z_threshold_callback(self, callback: ZScoreCallback) -> bool:
+    def remove_velocity_callback(self, callback: VelocityCallback) -> bool:
         """Remove a previously registered callback."""
         try:
-            self._z_threshold_callbacks.remove(callback)
+            self._velocity_callbacks.remove(callback)
             return True
         except ValueError:
             return False
 
-    def clear_z_threshold_callbacks(self) -> None:
-        """Remove all z-threshold callbacks."""
-        self._z_threshold_callbacks.clear()
-        self._last_z_state = "neutral"
-        logger.info("Cleared all z-threshold callbacks")
+    def clear_velocity_callbacks(self) -> None:
+        """Remove all velocity callbacks."""
+        self._velocity_callbacks.clear()
+        logger.info("Cleared all velocity callbacks")
 
-    def reset_z_state(self) -> None:
+    def reset_velocity_state(self) -> None:
         """
-        Reset z-state tracking for new market.
+        Reset velocity state tracking for new market.
 
-        Call this when switching to a new market so we don't miss the first
-        threshold crossing. The strike price change means old z-state is invalid.
+        Call this when switching to a new market.
         """
-        self._last_z_state = "neutral"
         self._last_callback_time = 0.0
-        logger.debug("Reset z-state for new market")
+        logger.debug("Reset velocity state for new market")
 
-    def _check_z_threshold_and_fire(self) -> None:
+    def _check_velocity_and_fire(self) -> None:
         """
-        Check z-score and fire callbacks on state CHANGE to strong/extreme.
+        Check velocity and fire callbacks when threshold exceeded.
 
-        Called on every Binance WebSocket tick. Tracks state transitions to
-        avoid firing repeatedly while in same state.
-
-        State machine:
-            neutral <-> strong <-> extreme
-                     ↑ FIRE        ↑ FIRE (on entry)
+        Called on every Binance WebSocket tick.
         """
         import time
 
-        # Calculate current z-score
-        z_score = self.calculate_z_score()
-        abs_z = abs(z_score)
-
-        # Determine current state
-        if abs_z >= self.Z_EXTREME_THRESHOLD:
-            new_state = "extreme"
-        elif abs_z >= self.Z_STRONG_THRESHOLD:
-            new_state = "strong"
-        else:
-            new_state = "neutral"
+        # Calculate current velocity
+        velocity = self.calculate_velocity()
+        abs_velocity = abs(velocity)
 
         # Determine direction
-        if self.price_vs_strike_pct > 0.1:
-            direction = "UP"
-        elif self.price_vs_strike_pct < -0.1:
-            direction = "DOWN"
+        if velocity > 0:
+            direction = "UP"  # Price rising
+        elif velocity < 0:
+            direction = "DOWN"  # Price falling
         else:
             direction = "FLAT"
 
-        # Check for state TRANSITION into strong/extreme
-        # Fire when: neutral -> strong, neutral -> extreme, or strong -> extreme
-        should_fire = False
-
-        if self._last_z_state == "neutral" and new_state in ("strong", "extreme"):
-            should_fire = True  # Crossed into danger zone
-        elif self._last_z_state == "strong" and new_state == "extreme":
-            should_fire = True  # Getting worse
+        # Check if velocity exceeds threshold
+        should_fire = abs_velocity > self.VELOCITY_PULL_THRESHOLD
 
         # Cooldown to prevent callback spam
         now = time.time()
@@ -580,22 +529,19 @@ class BinanceClient:
             should_fire = False  # Still in cooldown
 
         # Fire callbacks
-        if should_fire and self._z_threshold_callbacks:
-            logger.warning(
-                f"[EVENT] Z-threshold crossed: {self._last_z_state} -> {new_state} | "
-                f"z={z_score:.2f}, dir={direction}, price=${self._current_price:,.2f}"
+        if should_fire and self._velocity_callbacks:
+            logger.info(
+                f"[EVENT] Velocity threshold: vel={velocity:.3f}bps | "
+                f"dir={direction}, price=${self._current_price:,.2f}"
             )
             self._last_callback_time = now
 
-            for callback in self._z_threshold_callbacks:
+            for callback in self._velocity_callbacks:
                 try:
                     # Handle both sync and async callbacks
-                    result = callback(z_score, direction, new_state)
+                    result = callback(velocity, direction)
                     if asyncio.iscoroutine(result):
                         # Schedule async callback without blocking
                         asyncio.create_task(result)
                 except Exception as e:
-                    logger.error(f"Z-threshold callback error: {e}")
-
-        # Update state
-        self._last_z_state = new_state
+                    logger.error(f"Velocity callback error: {e}")
