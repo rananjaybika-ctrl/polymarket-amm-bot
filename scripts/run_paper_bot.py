@@ -440,14 +440,14 @@ class PaperTradingBot:
         accum_max_share_price: float = 0.98,  # Never buy shares above this price (Gabagool buys up to $0.98)
         # GRID MAKER MODE - Gabagool-style two-sided passive market making
         accum_mode: str = "standard",  # "standard" or "grid_maker"
-        # Grid maker parameters (configurable via CLI)
-        grid_order_size: int = 10,
-        grid_min_price: float = 0.10,
-        grid_max_price: float = 0.90,
+        # Grid maker parameters - Week 1 Gabagool (conservative start)
+        grid_order_size: int = 5,         # Week 1: 5-10 shares per level
+        grid_min_price: float = 0.15,     # Week 1: avoid extremes
+        grid_max_price: float = 0.85,     # Week 1: avoid extremes
         grid_tick_size: float = 0.01,
         grid_post_delay: float = 5.0,
-        grid_max_position: float = 500.0,
-        grid_max_imbalance: float = 300.0,
+        grid_max_position: float = 200.0,  # Week 1: ~50-150 per side
+        grid_max_imbalance: float = 100.0, # Week 1: tight risk control
         # GABAGOOL-STYLE SETTINGS (reverse-engineered from their Dec 2024 behavior)
         vw_imbalance_pct: float = 0.20,  # Max 20% imbalance (gabagool: 10-20%)
         vw_cheap_threshold: float = 0.45,  # Buy aggressively below this (gabagool loads up < $0.45)

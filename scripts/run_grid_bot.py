@@ -30,37 +30,37 @@ import subprocess
 import sys
 import os
 
-# Phase presets based on Gabagool scaling analysis
+# Phase presets based on Gabagool Week 1-4 scaling
 PHASE_PRESETS = {
     1: {
-        "name": "Testing",
-        "order_size": 10,
-        "max_position": 500,
-        "max_imbalance": 300,
+        "name": "Week 1 (Conservative)",
+        "order_size": 5,           # Gabagool Week 1: 5-10 shares
+        "max_position": 200,       # Week 1: ~50-150 per side
+        "max_imbalance": 100,      # Week 1: tight risk control
         "min_price": 0.15,
         "max_price": 0.85,
-        "description": "Conservative testing - small orders, narrow grid"
+        "description": "Week 1 Gabagool - 5 shares, tight limits"
     },
     2: {
-        "name": "Validation",
-        "order_size": 12,
-        "max_position": 800,
-        "max_imbalance": 500,
-        "min_price": 0.10,
-        "max_price": 0.90,
-        "description": "Validation - proving profitability"
+        "name": "Week 2 (Validation)",
+        "order_size": 8,           # Increase to 8 shares
+        "max_position": 400,
+        "max_imbalance": 200,
+        "min_price": 0.12,
+        "max_price": 0.88,
+        "description": "Week 2 - proving profitability"
     },
     3: {
-        "name": "Scaling",
-        "order_size": 15,
-        "max_position": 1200,
-        "max_imbalance": 700,
-        "min_price": 0.08,
-        "max_price": 0.92,
-        "description": "Initial scaling - increasing volume"
+        "name": "Week 3 (Scaling)",
+        "order_size": 12,
+        "max_position": 800,
+        "max_imbalance": 400,
+        "min_price": 0.10,
+        "max_price": 0.90,
+        "description": "Week 3 - increasing volume"
     },
     4: {
-        "name": "Full Scale",
+        "name": "Week 4+ (Full Scale)",
         "order_size": 20,
         "max_position": 2000,
         "max_imbalance": 1000,
