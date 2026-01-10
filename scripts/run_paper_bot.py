@@ -440,6 +440,14 @@ class PaperTradingBot:
         accum_max_share_price: float = 0.98,  # Never buy shares above this price (Gabagool buys up to $0.98)
         # GRID MAKER MODE - Gabagool-style two-sided passive market making
         accum_mode: str = "standard",  # "standard" or "grid_maker"
+        # Grid maker parameters (configurable via CLI)
+        grid_order_size: int = 10,
+        grid_min_price: float = 0.10,
+        grid_max_price: float = 0.90,
+        grid_tick_size: float = 0.01,
+        grid_post_delay: float = 5.0,
+        grid_max_position: float = 500.0,
+        grid_max_imbalance: float = 300.0,
         # GABAGOOL-STYLE SETTINGS (reverse-engineered from their Dec 2024 behavior)
         vw_imbalance_pct: float = 0.20,  # Max 20% imbalance (gabagool: 10-20%)
         vw_cheap_threshold: float = 0.45,  # Buy aggressively below this (gabagool loads up < $0.45)
@@ -526,6 +534,13 @@ class PaperTradingBot:
 
         # Grid Maker mode parameters
         self.accum_mode = accum_mode
+        self.grid_order_size = grid_order_size
+        self.grid_min_price = grid_min_price
+        self.grid_max_price = grid_max_price
+        self.grid_tick_size = grid_tick_size
+        self.grid_post_delay = grid_post_delay
+        self.grid_max_position = grid_max_position
+        self.grid_max_imbalance = grid_max_imbalance
         self.vw_imbalance_pct = vw_imbalance_pct
         self.vw_cheap_threshold = vw_cheap_threshold
         self.vw_hedge_trigger_pct = vw_hedge_trigger_pct
@@ -642,15 +657,24 @@ class PaperTradingBot:
         self._grid_maker_strategy: Optional[GridMakerStrategy] = None
         if self.accum_mode == "grid_maker":
             self._grid_maker_strategy = GridMakerStrategy(
-                order_size=20,  # ~24 shares like Gabagool for BTC
-                min_price=0.05,
-                max_price=0.95,
-                tick_size=0.01,
-                post_delay=5.0,  # 5 seconds after market open
-                max_position=2000.0,
-                max_imbalance=1000.0,
+                order_size=self.grid_order_size,
+                min_price=self.grid_min_price,
+                max_price=self.grid_max_price,
+                tick_size=self.grid_tick_size,
+                post_delay=self.grid_post_delay,
+                max_position=self.grid_max_position,
+                max_imbalance=self.grid_max_imbalance,
             )
-            logger.info(f"[GRID] Strategy initialized: order_size=20, tick=$0.01, delay=5s")
+            # Calculate number of grid levels
+            num_levels = int((self.grid_max_price - self.grid_min_price) / self.grid_tick_size) + 1
+            logger.info(
+                f"[GRID] Strategy initialized: "
+                f"order_size={self.grid_order_size}, "
+                f"range=${self.grid_min_price:.2f}-${self.grid_max_price:.2f}, "
+                f"~{num_levels} levels, "
+                f"max_pos={self.grid_max_position:.0f}, "
+                f"max_imbal={self.grid_max_imbalance:.0f}"
+            )
 
         # Telegram notifications and remote control
         self._telegram: Optional[TelegramNotifier] = None
@@ -5676,6 +5700,64 @@ async def main():
         help='Accumulation strategy mode: standard, grid_maker (Gabagool-style), calculus_maker (exponential decay), or spread_capture (velocity based)',
     )
 
+    # ==========================================================================
+    # GRID MAKER PARAMETERS (used when --accum-mode grid_maker)
+    # Scaling phases based on Gabagool analysis:
+    #   Phase 1 (test):     10 shares, 500 max pos, 300 max imbal
+    #   Phase 2 (validate): 12 shares, 800 max pos, 500 max imbal
+    #   Phase 3 (scale):    15 shares, 1200 max pos, 700 max imbal
+    #   Phase 4 (full):     20 shares, 2000 max pos, 1000 max imbal
+    # ==========================================================================
+    parser.add_argument(
+        '--grid-phase',
+        type=int,
+        choices=[1, 2, 3, 4],
+        default=None,
+        help='Grid scaling phase (1=test, 2=validate, 3=scale, 4=full). Overrides individual grid params.',
+    )
+    parser.add_argument(
+        '--grid-order-size',
+        type=int,
+        default=10,
+        help='Shares per grid level (default: 10, Gabagool uses ~24)',
+    )
+    parser.add_argument(
+        '--grid-min-price',
+        type=float,
+        default=0.10,
+        help='Minimum grid price (default: 0.10)',
+    )
+    parser.add_argument(
+        '--grid-max-price',
+        type=float,
+        default=0.90,
+        help='Maximum grid price (default: 0.90)',
+    )
+    parser.add_argument(
+        '--grid-tick-size',
+        type=float,
+        default=0.01,
+        help='Grid price spacing (default: 0.01)',
+    )
+    parser.add_argument(
+        '--grid-post-delay',
+        type=float,
+        default=5.0,
+        help='Seconds to wait after market open before posting grid (default: 5.0)',
+    )
+    parser.add_argument(
+        '--grid-max-position',
+        type=float,
+        default=500.0,
+        help='Max shares per side (default: 500, Gabagool uses 2000)',
+    )
+    parser.add_argument(
+        '--grid-max-imbalance',
+        type=float,
+        default=300.0,
+        help='Max imbalance before pausing (default: 300, Gabagool uses 1000)',
+    )
+
     parser.add_argument(
         '--max-position-pct',
         type=float,
@@ -5696,6 +5778,29 @@ async def main():
         # But keep our bot logger at INFO for trade notifications
         logger.setLevel(logging.INFO)
 
+    # Apply grid phase presets if specified
+    grid_order_size = args.grid_order_size
+    grid_max_position = args.grid_max_position
+    grid_max_imbalance = args.grid_max_imbalance
+    grid_min_price = args.grid_min_price
+    grid_max_price = args.grid_max_price
+
+    if args.grid_phase is not None:
+        # Phase presets based on Gabagool scaling analysis
+        phase_presets = {
+            1: {"order_size": 10, "max_position": 500, "max_imbalance": 300, "min_price": 0.15, "max_price": 0.85},
+            2: {"order_size": 12, "max_position": 800, "max_imbalance": 500, "min_price": 0.10, "max_price": 0.90},
+            3: {"order_size": 15, "max_position": 1200, "max_imbalance": 700, "min_price": 0.08, "max_price": 0.92},
+            4: {"order_size": 20, "max_position": 2000, "max_imbalance": 1000, "min_price": 0.05, "max_price": 0.95},
+        }
+        preset = phase_presets[args.grid_phase]
+        grid_order_size = preset["order_size"]
+        grid_max_position = preset["max_position"]
+        grid_max_imbalance = preset["max_imbalance"]
+        grid_min_price = preset["min_price"]
+        grid_max_price = preset["max_price"]
+        logger.info(f"[GRID] Using Phase {args.grid_phase} preset: {preset}")
+
     # Create bot
     bot = PaperTradingBot(
         initial_balance=args.balance,
@@ -5711,6 +5816,14 @@ async def main():
         accum_max_share_price=args.accum_max_share_price,
         accum_mode=args.accum_mode,
         max_position_pct=args.max_position_pct,
+        # Grid maker parameters
+        grid_order_size=grid_order_size,
+        grid_min_price=grid_min_price,
+        grid_max_price=grid_max_price,
+        grid_tick_size=args.grid_tick_size,
+        grid_post_delay=args.grid_post_delay,
+        grid_max_position=grid_max_position,
+        grid_max_imbalance=grid_max_imbalance,
         # Quiet mode
         quiet_mode=args.quiet,
         # Trading mode (paper or live)

@@ -599,6 +599,10 @@ class UserWebSocketClient:
         # Track orders we're watching
         self._watched_orders: Dict[str, dict] = {}  # order_id -> {side, token_id, ...}
 
+        # Event-driven fill waiting (for LiveTradingEngine integration)
+        self._fill_events: Dict[str, asyncio.Event] = {}  # order_id -> Event
+        self._fill_data: Dict[str, OrderFill] = {}  # order_id -> OrderFill (when filled)
+
     @property
     def connected(self) -> bool:
         return self._connected and self._ws is not None and self._authenticated
@@ -630,6 +634,76 @@ class UserWebSocketClient:
     def unwatch_order(self, order_id: str) -> None:
         """Stop watching an order."""
         self._watched_orders.pop(order_id, None)
+        self._fill_events.pop(order_id, None)
+        self._fill_data.pop(order_id, None)
+
+    async def wait_for_fill(
+        self,
+        order_id: str,
+        timeout_seconds: float = 30.0,
+    ) -> Optional[OrderFill]:
+        """
+        Wait for a fill event on a specific order.
+
+        This is the key method for event-driven fill detection.
+        Instead of polling REST API every 2 seconds, we wait for
+        the WebSocket to notify us of fills (~100ms latency).
+
+        Args:
+            order_id: The order ID to wait for
+            timeout_seconds: Max time to wait (default 30s)
+
+        Returns:
+            OrderFill if filled, None if timeout or cancelled
+
+        Usage:
+            # After placing order
+            user_ws.watch_order(order_id, "UP", token_id, size, price)
+            fill = await user_ws.wait_for_fill(order_id, timeout=30.0)
+            if fill:
+                position.add_fill(fill.side, fill.price, fill.size_matched)
+            else:
+                # Timeout - cancel and retry
+        """
+        # Create event for this order if not exists
+        if order_id not in self._fill_events:
+            self._fill_events[order_id] = asyncio.Event()
+
+        event = self._fill_events[order_id]
+
+        # Check if already filled (race condition protection)
+        if order_id in self._fill_data:
+            fill = self._fill_data.pop(order_id)
+            self._fill_events.pop(order_id, None)
+            return fill
+
+        try:
+            # Wait for fill event with timeout
+            await asyncio.wait_for(event.wait(), timeout=timeout_seconds)
+
+            # Event was set - get fill data
+            fill = self._fill_data.pop(order_id, None)
+            self._fill_events.pop(order_id, None)
+            return fill
+
+        except asyncio.TimeoutError:
+            # Timeout - clean up and return None
+            logger.debug(f"[USER_WS] wait_for_fill timeout for {order_id[:16]}...")
+            self._fill_events.pop(order_id, None)
+            self._fill_data.pop(order_id, None)
+            return None
+
+    def get_fill_if_available(self, order_id: str) -> Optional[OrderFill]:
+        """
+        Non-blocking check if a fill has been received for an order.
+
+        Args:
+            order_id: The order ID to check
+
+        Returns:
+            OrderFill if available, None otherwise
+        """
+        return self._fill_data.get(order_id)
 
     async def connect(self) -> bool:
         """Connect to user WebSocket and authenticate."""
@@ -799,6 +873,12 @@ class UserWebSocketClient:
                             callback(fill)
                         except Exception as e:
                             logger.error(f"[USER_WS] Fill callback error: {e}")
+
+                    # Set event for wait_for_fill() callers
+                    if order_id in self._fill_events:
+                        self._fill_data[order_id] = fill
+                        self._fill_events[order_id].set()
+                        logger.debug(f"[USER_WS] Set fill event for {order_id[:16]}...")
 
             # Trade events
             elif event_type == "trade":

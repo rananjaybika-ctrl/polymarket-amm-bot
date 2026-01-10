@@ -55,24 +55,49 @@ Both strategies use velocity-based quote pulling to avoid adverse fills:
 # Constants
 VELOCITY_PULL_THRESHOLD = 0.05  # bps/sec (~$5 BTC move in 10s)
 
-# Logic: Pull entry if velocity is moving AGAINST our order
+# Logic: Pull entry while price is getting CHEAPER (wait for bottom)
 def should_pull_entry(velocity_bps: float, entry_side: str) -> bool:
     if entry_side == "UP":
-        # UP entry adverse if BTC falling (velocity negative)
+        # BTC falling = UP getting CHEAPER = PULL and wait
         return velocity_bps < -VELOCITY_PULL_THRESHOLD
     else:  # DOWN
-        # DOWN entry adverse if BTC rising (velocity positive)
+        # BTC rising = DOWN getting CHEAPER = PULL and wait
         return velocity_bps > VELOCITY_PULL_THRESHOLD
+
+# Logic: Enter when velocity REVERSES (price at bottom, about to get expensive)
+def should_enter_now(velocity_bps: float, entry_side: str) -> bool:
+    if entry_side == "UP":
+        # BTC rising = UP getting expensive = ENTER NOW (at the bottom)
+        return velocity_bps > VELOCITY_PULL_THRESHOLD
+    else:  # DOWN
+        # BTC falling = DOWN getting expensive = ENTER NOW (at the bottom)
+        return velocity_bps < -VELOCITY_PULL_THRESHOLD
 ```
 
-### Velocity Pull Truth Table
+### Price/Velocity Relationship
 
-| Order Side | Velocity | Action | Reason |
+| Velocity | BTC Movement | UP Price | DOWN Price |
+|----------|--------------|----------|------------|
+| **Negative** | BTC falling | CHEAP (losing) | **EXPENSIVE** (winning) |
+| **Positive** | BTC rising | **EXPENSIVE** (winning) | CHEAP (losing) |
+
+### Entry Pull Truth Table
+
+| Entry Side | Velocity | Action | Reason |
 |------------|----------|--------|--------|
-| UP | < -0.05 bps | **PULL** | BTC falling, UP getting expensive |
-| UP | > +0.05 bps | HOLD | BTC rising, UP getting cheap |
-| DOWN | > +0.05 bps | **PULL** | BTC rising, DOWN getting expensive |
-| DOWN | < -0.05 bps | HOLD | BTC falling, DOWN getting cheap |
+| UP | < -0.05 bps | **PULL** | BTC falling, UP getting CHEAP (wait for cheaper) |
+| UP | > +0.05 bps | **ENTER** | BTC rising, UP getting expensive (reversal - at bottom) |
+| DOWN | > +0.05 bps | **PULL** | BTC rising, DOWN getting CHEAP (wait for cheaper) |
+| DOWN | < -0.05 bps | **ENTER** | BTC falling, DOWN getting expensive (reversal - at bottom) |
+
+### Hedge "Let It Ride" Truth Table
+
+| Hedge Side | Velocity | Action | Reason |
+|------------|----------|--------|--------|
+| DOWN | > +0.05 bps | **WAIT** | BTC rising, DOWN getting cheap (favorable) |
+| DOWN | < -0.05 bps | **HEDGE** | BTC falling, DOWN getting expensive (reversal) |
+| UP | < -0.05 bps | **WAIT** | BTC falling, UP getting cheap (favorable) |
+| UP | > +0.05 bps | **HEDGE** | BTC rising, UP getting expensive (reversal) |
 
 ### Simulation Results: Adverse Fills
 - Expensive First: **0% adverse fills**

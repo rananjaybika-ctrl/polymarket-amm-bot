@@ -16,6 +16,7 @@ import uuid
 from py_clob_client.clob_types import OrderType
 
 from src.api.polymarket_client import PolymarketClient, PolymarketClientError
+from src.api.websocket_client import UserWebSocketClient, OrderFill
 from src.models.market import BTCMarket
 from src.models.position import Position, Fill
 
@@ -166,8 +167,24 @@ class LiveTradingEngine:
         # Fill rate monitoring - tracks order execution quality
         self._fill_stats: Dict[str, Dict[str, Any]] = {}  # market_slug -> stats
 
+        # WebSocket client for event-driven fill detection (~100ms vs 2s polling)
+        self._user_ws: Optional[UserWebSocketClient] = None
+
         order_type_str = "FOK (Fill-Or-Kill)" if use_fok else "GTC (Good-Til-Cancelled)"
         logger.info(f"LiveTradingEngine initialized: balance=${starting_balance:.2f}, order_type={order_type_str}")
+
+    def set_user_websocket(self, user_ws: UserWebSocketClient) -> None:
+        """
+        Inject UserWebSocketClient for event-driven fill detection.
+
+        When set, the engine will use WebSocket events (~100ms latency) instead of
+        REST polling (2s intervals) for detecting order fills.
+
+        Args:
+            user_ws: Connected UserWebSocketClient instance
+        """
+        self._user_ws = user_ws
+        logger.info("[LIVE] UserWebSocketClient injected - using event-driven fill detection")
 
     @property
     def balance(self) -> float:
@@ -282,6 +299,84 @@ class LiveTradingEngine:
                 logger.warning(f"[LIVE] Poll error: {e}")
 
             await asyncio.sleep(poll_interval)
+
+    async def _wait_for_ws_fill(
+        self,
+        order_id: str,
+        side: str,
+        token_id: str,
+        requested_size: float,
+        price: float,
+        timeout_seconds: float = 30.0,
+    ) -> Dict[str, Any]:
+        """
+        Wait for fill using WebSocket events (~100ms latency).
+
+        This replaces _poll_order_until_filled when UserWebSocketClient is available.
+        Uses asyncio.Event-based waiting instead of REST polling.
+
+        Args:
+            order_id: The order ID to watch
+            side: "UP" or "DOWN"
+            token_id: The token ID for this side
+            requested_size: Expected fill size
+            price: Order price
+            timeout_seconds: Max time to wait (default 30s)
+
+        Returns:
+            Dict with filled_size, final_status, was_cancelled, fill (OrderFill object)
+        """
+        if not self._user_ws or not self._user_ws.connected:
+            # Fallback to REST polling if WebSocket not available
+            logger.debug("[LIVE] WebSocket not available, falling back to REST polling")
+            return await self._poll_order_until_filled(
+                order_id, requested_size, timeout_seconds, poll_interval=2.0
+            )
+
+        # Register order for WebSocket watching
+        self._user_ws.watch_order(order_id, side, token_id, requested_size, price)
+
+        try:
+            # Wait for fill event from WebSocket
+            fill = await self._user_ws.wait_for_fill(order_id, timeout_seconds)
+
+            if fill:
+                # Fill received!
+                logger.info(
+                    f"[LIVE] 🚀 WS fill: {side} {fill.size_matched:.0f}/{fill.original_size:.0f} "
+                    f"@ ${fill.price:.4f} ({fill.status}) [~100ms]"
+                )
+                return {
+                    "filled_size": fill.size_matched,
+                    "final_status": "FILLED" if fill.is_fully_filled else "PARTIAL",
+                    "was_cancelled": False,
+                    "fill": fill,
+                }
+            else:
+                # Timeout - cancel order
+                logger.info(f"[LIVE] WS timeout after {timeout_seconds:.0f}s, cancelling {order_id[:16]}...")
+                try:
+                    await self.client.cancel_order(order_id)
+                except Exception as e:
+                    logger.warning(f"[LIVE] Failed to cancel order on timeout: {e}")
+
+                # Check if there were any partial fills via REST
+                try:
+                    final_status = await self.client.get_order(order_id)
+                    filled = float(final_status.get("size_matched", 0)) if final_status else 0
+                except Exception:
+                    filled = 0
+
+                return {
+                    "filled_size": filled,
+                    "final_status": "TIMEOUT",
+                    "was_cancelled": True,
+                    "fill": None,
+                }
+
+        finally:
+            # Clean up watching state
+            self._user_ws.unwatch_order(order_id)
 
     def get_position(self, market: BTCMarket) -> Optional[Position]:
         """Get position for a market."""
@@ -525,19 +620,31 @@ class LiveTradingEngine:
                     "order_id": order_id,
                 }
             elif status == "LIVE" and not self._use_fok:
-                # GTC order is live (sitting in orderbook) - poll until filled or timeout
-                # Use time-based timeout only
+                # GTC order is live (sitting in orderbook) - wait for fill
                 timeout = calculate_dynamic_timeout(
                     time_remaining_secs=time_remaining if time_remaining else 600,
                     is_emergency=False,
                 )
-                logger.info(f"[LIVE] GTC order LIVE, polling (timeout={timeout:.0f}s)")
-                poll_result = await self._poll_order_until_filled(
-                    order_id=order_id,
-                    requested_size=size,
-                    timeout_seconds=timeout,
-                    poll_interval=2.0,
-                )
+
+                # Use WebSocket if available (~100ms), else REST polling (2s)
+                if self._user_ws and self._user_ws.connected:
+                    logger.info(f"[LIVE] GTC order LIVE, waiting for WS fill (timeout={timeout:.0f}s)")
+                    poll_result = await self._wait_for_ws_fill(
+                        order_id=order_id,
+                        side=side_upper,
+                        token_id=token_id,
+                        requested_size=size,
+                        price=price,
+                        timeout_seconds=timeout,
+                    )
+                else:
+                    logger.info(f"[LIVE] GTC order LIVE, polling REST (timeout={timeout:.0f}s)")
+                    poll_result = await self._poll_order_until_filled(
+                        order_id=order_id,
+                        requested_size=size,
+                        timeout_seconds=timeout,
+                        poll_interval=2.0,
+                    )
 
                 filled_size = poll_result["filled_size"]
                 if filled_size > 0:
