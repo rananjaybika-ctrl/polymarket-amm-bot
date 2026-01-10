@@ -1,6 +1,6 @@
 /**
  * Polymarket Trading Bot - Card-Based Dashboard Controller
- * Manages trading modes: Calculus Maker, Volume Weighted
+ * Manages trading modes: Calculus Maker, Grid Maker
  */
 
 // ============================================
@@ -32,7 +32,7 @@ const modes = {
         timeRemaining: 0,
         countdownInterval: null
     },
-    'volume-weighted': {
+    'grid-maker': {
         status: 'stopped',
         running: false,
         config: {},
@@ -55,7 +55,7 @@ let reconnectTimeout = null;
  * Called before WebSocket connects to ensure clean slate.
  */
 function clearAllPositionDisplays() {
-    ['calculus-maker', 'fair-value-mm', 'spread-capture', 'volume-weighted'].forEach(mode => {
+    ['calculus-maker', 'fair-value-mm', 'spread-capture', 'grid-maker'].forEach(mode => {
         // Position quantities and prices
         setElementText(`${mode}-up-qty`, '--');
         setElementText(`${mode}-down-qty`, '--');
@@ -102,7 +102,7 @@ function init() {
     setDefaultDatetimes();
 
     // Setup config toggles
-    ['calculus-maker', 'fair-value-mm', 'spread-capture', 'volume-weighted'].forEach(mode => {
+    ['calculus-maker', 'fair-value-mm', 'spread-capture', 'grid-maker'].forEach(mode => {
         const toggleBtn = document.getElementById(`toggle-${mode}`);
         const configContent = document.getElementById(`config-${mode}`);
 
@@ -116,7 +116,7 @@ function init() {
     setupModeButtons('calculus-maker');
     setupModeButtons('fair-value-mm');
     setupModeButtons('spread-capture');
-    setupModeButtons('volume-weighted');
+    setupModeButtons('grid-maker');
 
     // Connect WebSocket
     connectWebSocket();
@@ -135,7 +135,7 @@ function setDefaultDatetimes() {
     const startStr = formatDatetimeLocal(start);
     const endStr = formatDatetimeLocal(end);
 
-    ['calculus-maker', 'fair-value-mm', 'spread-capture', 'volume-weighted'].forEach(mode => {
+    ['calculus-maker', 'fair-value-mm', 'spread-capture', 'grid-maker'].forEach(mode => {
         const startEl = document.getElementById(`${mode}-start`);
         const endEl = document.getElementById(`${mode}-end`);
         if (startEl) startEl.value = startStr;
@@ -228,10 +228,10 @@ function routeMessage(data) {
         if (data.calculus_maker) updateModeStatus('calculus-maker', data.calculus_maker);
         if (data.fair_value_mm) updateModeStatus('fair-value-mm', data.fair_value_mm);
         if (data.spread_capture) updateModeStatus('spread-capture', data.spread_capture);
-        if (data.volume_weighted) updateModeStatus('volume-weighted', data.volume_weighted);
+        if (data.grid_maker) updateModeStatus('grid-maker', data.grid_maker);
     } else if (data.type === 'trading_update') {
         // Route trading update to specific mode's card
-        // Convert underscore to hyphen for frontend mode names (volume_weighted -> volume-weighted)
+        // Convert underscore to hyphen for frontend mode names (grid_maker -> grid-maker)
         const strategy = (data.strategy || 'calculus-maker').replace('_', '-');
         console.log('[WS] Routing trading_update to:', strategy, 'Position:', data.position);
         updateLiveData(strategy, data);
@@ -246,7 +246,7 @@ async function fetchStatus() {
         if (data.calculus_maker) updateModeStatus('calculus-maker', data.calculus_maker);
         if (data.fair_value_mm) updateModeStatus('fair-value-mm', data.fair_value_mm);
         if (data.spread_capture) updateModeStatus('spread-capture', data.spread_capture);
-        if (data.volume_weighted) updateModeStatus('volume-weighted', data.volume_weighted);
+        if (data.grid_maker) updateModeStatus('grid-maker', data.grid_maker);
     } catch (error) {
         console.error('Failed to fetch status:', error);
     }
@@ -361,7 +361,7 @@ function formatConfigTooltip(modeName, status) {
         lines.push(`Min Profit: ${config.min_profit || '--'}`);
         lines.push(`Max Price: ${config.max_share_price || '--'}`);
         lines.push(`Hard Max: ${config.emergency_imbalance_threshold || '--'}`);
-    } else if (modeName === 'volume-weighted') {
+    } else if (modeName === 'grid-maker') {
         lines.push(`Target: ${config.accum_target_shares || '--'}`);
         lines.push(`Imbal %: ${config.vw_imbalance_pct || '--'}`);
     }
@@ -544,23 +544,23 @@ function stopCountdown(modeName) {
 // CONFIG COLLECTION
 // ============================================
 
-function getVolumeWeightedConfig() {
+function getGridMakerConfig() {
     return {
-        mode: document.querySelector('input[name="volume_weighted_mode"]:checked').value,
-        accum_mode: 'volume_weighted',
+        mode: document.querySelector('input[name="grid_maker_mode"]:checked').value,
+        accum_mode: 'grid_maker',
         market: 'btc-15m',
-        start_datetime: document.getElementById('volume-weighted-start').value,
-        end_datetime: document.getElementById('volume-weighted-end').value,
-        starting_balance: parseFloat(document.getElementById('volume-weighted-balance-input').value),
-        accum_target_shares: parseInt(document.getElementById('volume-weighted-target').value),
-        // VW-specific parameters
-        vw_imbalance_pct: parseFloat(document.getElementById('volume-weighted-imbalance').value),
-        vw_cheap_threshold: parseFloat(document.getElementById('volume-weighted-cheap').value),
-        vw_hedge_trigger_pct: parseFloat(document.getElementById('volume-weighted-hedge-trigger').value),
-        vw_max_hedge_price: parseFloat(document.getElementById('volume-weighted-max-hedge').value),
+        start_datetime: document.getElementById('grid-maker-start').value,
+        end_datetime: document.getElementById('grid-maker-end').value,
+        starting_balance: parseFloat(document.getElementById('grid-maker-balance-input').value),
+        accum_target_shares: parseInt(document.getElementById('grid-maker-target').value),
+        // Grid maker-specific parameters
+        vw_imbalance_pct: parseFloat(document.getElementById('grid-maker-imbalance').value),
+        vw_cheap_threshold: parseFloat(document.getElementById('grid-maker-cheap').value),
+        vw_hedge_trigger_pct: parseFloat(document.getElementById('grid-maker-hedge-trigger').value),
+        vw_max_hedge_price: parseFloat(document.getElementById('grid-maker-max-hedge').value),
         // Pair cost parameters
-        accum_pair_cost_target: parseFloat(document.getElementById('volume-weighted-pair-target').value),
-        accum_pair_cost_limit: parseFloat(document.getElementById('volume-weighted-pair-limit').value),
+        accum_pair_cost_target: parseFloat(document.getElementById('grid-maker-pair-target').value),
+        accum_pair_cost_limit: parseFloat(document.getElementById('grid-maker-pair-limit').value),
         // Fixed parameters
         max_share_price: 0.98,
         accum_buy_both_sides: true,
@@ -650,8 +650,8 @@ async function handleStart(modeName) {
     } else if (modeName === 'spread-capture') {
         config = getSpreadCaptureConfig();
         endpoint = '/api/start/spread_capture';
-    } else if (modeName === 'volume-weighted') {
-        config = getVolumeWeightedConfig();
+    } else if (modeName === 'grid-maker') {
+        config = getGridMakerConfig();
         endpoint = '/api/start/accumulation';
     }
 
@@ -711,7 +711,7 @@ async function handleStop(modeName) {
 
         // Map mode name to strategy for API (must match backend strategy keys)
         let strategy = modeName;
-        if (modeName === 'volume-weighted') strategy = 'volume_weighted';
+        if (modeName === 'grid-maker') strategy = 'grid_maker';
         else if (modeName === 'calculus-maker') strategy = 'calculus_maker';
         else if (modeName === 'fair-value-mm') strategy = 'fair_value_mm';
         else if (modeName === 'spread-capture') strategy = 'spread_capture';
@@ -742,7 +742,7 @@ async function handleNuke(modeName) {
 
         // Map mode name to strategy for API (must match backend strategy keys)
         let strategy = modeName;
-        if (modeName === 'volume-weighted') strategy = 'volume_weighted';
+        if (modeName === 'grid-maker') strategy = 'grid_maker';
         else if (modeName === 'calculus-maker') strategy = 'calculus_maker';
         else if (modeName === 'fair-value-mm') strategy = 'fair_value_mm';
         else if (modeName === 'spread-capture') strategy = 'spread_capture';

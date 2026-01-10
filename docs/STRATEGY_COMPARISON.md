@@ -4,13 +4,13 @@
 
 We have identified THREE distinct trading strategies for BTC 15-minute markets:
 
-1. **Current VW Logic** - Volume-weighted patient accumulation
+1. **Current Grid Maker Logic** - Gabagool-style two-sided passive market making
 2. **Calculus MAKER Logic** - Exponential mispricing threshold
 3. **Gabagool TAKER Logic** - Late-entry directional betting
 
 ---
 
-## Strategy 1: Current VW Logic (Existing Bot)
+## Strategy 1: Current Grid Maker Logic (Existing Bot)
 
 ### Implementation
 File: `scripts/run_paper_bot.py:196-235`
@@ -213,7 +213,7 @@ def get_direction_bias(btc_change: float) -> str:
 
 ## Side-by-Side Comparison
 
-| Aspect | Current VW | Calculus MAKER | Gabagool TAKER |
+| Aspect | Grid Maker | Calculus MAKER | Gabagool TAKER |
 |--------|------------|----------------|----------------|
 | **Order Type** | MAKER | MAKER | TAKER |
 | **Window** | Full 15 min | Full 15 min | Last 2 min |

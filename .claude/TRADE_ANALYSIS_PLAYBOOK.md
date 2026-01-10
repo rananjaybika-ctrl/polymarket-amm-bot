@@ -9,14 +9,14 @@ Use this playbook whenever the user requests trade analysis.
 
 ```
 paper_trades_standard.csv         - Standard accumulation strategy trades
-paper_trades_volume_weighted.csv  - Volume-weighted (Gabagool) strategy trades
+paper_trades_grid_maker.csv  - Grid Maker (Gabagool) strategy trades
 paper_trades_directional.csv      - Directional strategy trades
 ```
 
 **Web UI copies (updated in real-time):**
 ```
 web/paper_trades_standard.csv
-web/paper_trades_volume_weighted.csv
+web/paper_trades_grid_maker.csv
 web/paper_trades_directional.csv
 ```
 
@@ -232,9 +232,9 @@ merged = std_res[['market_slug', 'pnl']].merge(
 ).rename(columns={'pnl': 'pnl_dir'})
 
 # Calculate correlations
-corr_std_vw = merged['pnl_std'].corr(merged['pnl_vw'])
+corr_std_grid = merged['pnl_std'].corr(merged['pnl_grid'])
 corr_std_dir = merged['pnl_std'].corr(merged['pnl_dir'])
-corr_vw_dir = merged['pnl_vw'].corr(merged['pnl_dir'])
+corr_grid_dir = merged['pnl_grid'].corr(merged['pnl_dir'])
 ```
 
 **Interpretation:**
@@ -256,11 +256,11 @@ btc_change_corr = dir_res['pnl'].corr(dir_res['btc_change_pct'])
 
 ### 7. Three-Strategy Comparison Table
 
-For comparing Standard, VW, and Directional:
+For comparing Standard, Grid Maker, and Directional:
 
 ```
 ┌─────────────────────────┬──────────────┬──────────────┬──────────────────────┐
-│ METRIC                  │   STANDARD   │     VW       │    DIRECTIONAL       │
+│ METRIC                  │   STANDARD   │  GRID MAKER  │    DIRECTIONAL       │
 ├─────────────────────────┼──────────────┼──────────────┼──────────────────────┤
 │ Markets Resolved        │   [count]    │   [count]    │      [count]         │
 │ Total Trades            │   [count]    │   [count]    │      [count]         │
@@ -904,7 +904,7 @@ def should_buy_opportunistic(side, price, current_up, current_down):
 
 ## Version History
 
-- v1.4 (2025-12-25): Added Statistical Analysis framework (Sharpe, Sortino, CV, percentiles), Correlation Analysis (inter-strategy, BTC), and Three-Strategy Comparison Table. Updated data sources for Standard/VW/Directional strategies.
+- v1.4 (2025-12-25): Added Statistical Analysis framework (Sharpe, Sortino, CV, percentiles), Correlation Analysis (inter-strategy, BTC), and Three-Strategy Comparison Table. Updated data sources for Standard/Grid Maker/Directional strategies.
 - v1.3 (2025-12-22): Added Accumulation Mode Toggle documentation
 - v1.2 (2025-12-22): Added impulsive/trending market analysis, corrected "buy cheap only" misconception
 - v1.1 (2025-12-22): Added Unified Orderbook note and Gabagool22 strategy analysis

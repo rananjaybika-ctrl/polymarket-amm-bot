@@ -7,6 +7,7 @@ Strategies:
 - calculus_maker: Dynamic mispricing detection with exponential decay pricing
 - simple_hedger: Minimal hedging strategy with flip logic
 - spread_capture: Velocity-based spread capture with fixed entry/hedge offsets
+- grid_maker: Gabagool-style two-sided passive grid market making (71.2% imbalance win rate)
 """
 
 from .calculus_maker import (
@@ -29,6 +30,13 @@ from .spread_capture import (
     SpreadCapturePhase,
 )
 
+from .grid_maker import (
+    GridMakerStrategy,
+    GridState,
+    GridPhase,
+    GridLevel,
+)
+
 __all__ = [
     "CalculusMakerStrategy",
     "get_mispricing_threshold",
@@ -41,4 +49,8 @@ __all__ = [
     "SpreadCaptureStrategy",
     "SpreadCaptureState",
     "SpreadCapturePhase",
+    "GridMakerStrategy",
+    "GridState",
+    "GridPhase",
+    "GridLevel",
 ]

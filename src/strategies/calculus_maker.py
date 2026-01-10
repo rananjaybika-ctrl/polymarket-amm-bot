@@ -712,30 +712,69 @@ class CalculusMakerStrategy:
 
     def should_pull_entry(self, velocity_bps: float, entry_side: str) -> bool:
         """
-        Check if entry order should be pulled due to adverse velocity.
+        Check if entry order should be pulled while price is getting CHEAPER.
 
-        Pull entry if velocity is moving AGAINST our entry side:
-        - UP entry: adverse if velocity < 0 (BTC falling, UP getting expensive)
-        - DOWN entry: adverse if velocity > 0 (BTC rising, DOWN getting expensive)
+        Pull entry while velocity is making our entry side CHEAPER (favorable).
+        We WAIT for the price to get as cheap as possible, then enter on reversal.
+
+        Price/Velocity relationship:
+        - BTC falling (negative velocity): UP cheap, DOWN expensive
+        - BTC rising (positive velocity): UP expensive, DOWN cheap
+
+        Pull logic:
+        - UP entry: Pull while velocity < 0 (BTC falling, UP getting CHEAPER)
+        - DOWN entry: Pull while velocity > 0 (BTC rising, DOWN getting CHEAPER)
 
         Args:
             velocity_bps: Current velocity in basis points per second
-            entry_side: "UP" or "DOWN" - which side we entered
+            entry_side: "UP" or "DOWN" - which side we want to enter
 
         Returns:
-            True if entry should be pulled
+            True if entry should be pulled (wait for cheaper price)
         """
         if entry_side.upper() == "UP":
+            # BTC falling = UP getting cheaper = PULL and wait
             return velocity_bps < -VELOCITY_PULL_THRESHOLD
         else:  # DOWN
+            # BTC rising = DOWN getting cheaper = PULL and wait
             return velocity_bps > VELOCITY_PULL_THRESHOLD
+
+    def should_enter_now(self, velocity_bps: float, entry_side: str) -> bool:
+        """
+        Check if we should enter NOW (velocity reversal detected).
+
+        Enter when velocity REVERSES - price is at the bottom and about to get expensive.
+        This captures the best entry price.
+
+        Price/Velocity relationship:
+        - BTC falling (negative velocity): UP cheap, DOWN expensive
+        - BTC rising (positive velocity): UP expensive, DOWN cheap
+
+        Entry logic:
+        - UP entry: Enter when velocity > 0 (BTC rising, UP getting expensive - reversal!)
+        - DOWN entry: Enter when velocity < 0 (BTC falling, DOWN getting expensive - reversal!)
+
+        Args:
+            velocity_bps: Current velocity in basis points per second
+            entry_side: "UP" or "DOWN" - which side we want to enter
+
+        Returns:
+            True if we should enter now (reversal detected)
+        """
+        if entry_side.upper() == "UP":
+            # BTC rising = UP getting expensive = ENTER NOW (at the bottom)
+            return velocity_bps > VELOCITY_PULL_THRESHOLD
+        else:  # DOWN
+            # BTC falling = DOWN getting expensive = ENTER NOW (at the bottom)
+            return velocity_bps < -VELOCITY_PULL_THRESHOLD
 
     def should_hedge_now(
         self,
         velocity_bps: float,
         hedge_side: str,
         time_since_entry_fill: float,
-        time_remaining: float,
+        current_hedge_price: float = 0.0,
+        max_hedge_price: float = 1.0,
     ) -> tuple[bool, str]:
         """
         Check if we should hedge now or "let it ride".
@@ -744,39 +783,51 @@ class CalculusMakerStrategy:
         - After entry fills, DON'T hedge immediately
         - Wait while velocity is FAVORABLE (hedge getting cheaper)
         - Hedge when velocity REVERSES (hedge getting expensive)
-        - Force hedge on timeout or near market expiry
+        - Force hedge on timeout ONLY if current price < ceiling
+
+        Price/Velocity relationship:
+        - BTC falling (negative velocity): UP cheap, DOWN expensive
+        - BTC rising (positive velocity): UP expensive, DOWN cheap
+
+        Hedge logic:
+        - DOWN hedge: Wait while velocity > 0 (BTC rising, DOWN CHEAP)
+                      Hedge when velocity < 0 (BTC falling, DOWN EXPENSIVE - reversal!)
+        - UP hedge: Wait while velocity < 0 (BTC falling, UP CHEAP)
+                    Hedge when velocity > 0 (BTC rising, UP EXPENSIVE - reversal!)
 
         Args:
             velocity_bps: Current velocity in basis points per second
             hedge_side: "UP" or "DOWN" - which side we need to hedge
             time_since_entry_fill: Seconds since entry was filled
-            time_remaining: Seconds until market resolution
+            current_hedge_price: Current price we'd hedge at (for force hedge check)
+            max_hedge_price: Ceiling price (for force hedge check)
 
         Returns:
             (should_hedge, reason) tuple
         """
-        # Safety: Force hedge near market expiry
-        if time_remaining < MIN_TIME_TO_FORCE_HEDGE:
-            return True, f"Force hedge: time_remaining={time_remaining:.0f}s < {MIN_TIME_TO_FORCE_HEDGE}s"
-
-        # Safety: Force hedge after max wait time
+        # Safety: Force hedge after max wait time ONLY if price is below ceiling
+        # This ensures we don't force hedge at a loss
         if time_since_entry_fill > MAX_HEDGE_WAIT_SECS:
-            return True, f"Force hedge: waited {time_since_entry_fill:.0f}s > {MAX_HEDGE_WAIT_SECS}s"
+            if current_hedge_price <= max_hedge_price:
+                return True, f"Force hedge: waited {time_since_entry_fill:.0f}s > {MAX_HEDGE_WAIT_SECS}s (price ${current_hedge_price:.4f} < ceiling ${max_hedge_price:.4f})"
+            else:
+                # Price above ceiling - don't force, let emergency handle it
+                return False, f"Skip force: price ${current_hedge_price:.4f} > ceiling ${max_hedge_price:.4f}"
 
         # "Let it ride" logic based on velocity direction
-        # Hedge when velocity REVERSES (no longer favorable)
+        # Hedge when velocity REVERSES (hedge side getting expensive)
         if hedge_side.upper() == "DOWN":
-            # DOWN hedge: wait while velocity negative (BTC falling, DOWN cheap)
-            # Hedge when velocity turns positive (reversal - DOWN getting expensive)
-            if velocity_bps > VELOCITY_PULL_THRESHOLD:
-                return True, f"Hedge now: velocity reversal vel={velocity_bps:.3f}bps (DOWN getting expensive)"
+            # DOWN cheap while BTC rising (positive velocity) - WAIT
+            # DOWN expensive when BTC falling (negative velocity) - HEDGE NOW
+            if velocity_bps < -VELOCITY_PULL_THRESHOLD:
+                return True, f"Hedge now: reversal vel={velocity_bps:.3f}bps (DOWN getting expensive)"
             else:
                 return False, f"Let it ride: vel={velocity_bps:.3f}bps (DOWN still cheap)"
         else:  # hedge_side == "UP"
-            # UP hedge: wait while velocity positive (BTC rising, UP cheap)
-            # Hedge when velocity turns negative (reversal - UP getting expensive)
-            if velocity_bps < -VELOCITY_PULL_THRESHOLD:
-                return True, f"Hedge now: velocity reversal vel={velocity_bps:.3f}bps (UP getting expensive)"
+            # UP cheap while BTC falling (negative velocity) - WAIT
+            # UP expensive when BTC rising (positive velocity) - HEDGE NOW
+            if velocity_bps > VELOCITY_PULL_THRESHOLD:
+                return True, f"Hedge now: reversal vel={velocity_bps:.3f}bps (UP getting expensive)"
             else:
                 return False, f"Let it ride: vel={velocity_bps:.3f}bps (UP still cheap)"
 
@@ -793,9 +844,9 @@ class CalculusMakerStrategy:
 # COMPARISON HELPER (for frontend)
 # =============================================================================
 
-def compare_with_vw(time_remaining: float, best_bid: float = 0.50) -> dict:
+def compare_with_grid(time_remaining: float, best_bid: float = 0.50) -> dict:
     """
-    Compare Calculus MAKER vs Standard VW MAKER at a given time.
+    Compare Calculus MAKER vs Grid MAKER at a given time.
 
     Args:
         time_remaining: Seconds until market resolution
@@ -809,24 +860,24 @@ def compare_with_vw(time_remaining: float, best_bid: float = 0.50) -> dict:
     calc_price = best_bid - calc_threshold
     calc_size = get_dynamic_size(time_remaining)
 
-    # Standard VW MAKER (step function)
+    # Grid MAKER (step function)
     if time_remaining >= 600:
-        vw_offset = 0.03
+        grid_offset = 0.03
     elif time_remaining >= 300:
-        vw_offset = 0.02
+        grid_offset = 0.02
     elif time_remaining >= 120:
-        vw_offset = 0.01
+        grid_offset = 0.01
     else:
-        vw_offset = 0.00
+        grid_offset = 0.00
 
-    vw_price = best_bid - vw_offset
+    grid_price = best_bid - grid_offset
 
-    # VW size (decay - larger early) - approximate
+    # Grid size (decay - larger early) - approximate
     if time_remaining >= 300:
-        vw_percent = 0.10 + 0.10 * math.sqrt((time_remaining - 300) / 600)
+        grid_percent = 0.10 + 0.10 * math.sqrt((time_remaining - 300) / 600)
     else:
-        vw_percent = 0.02 + 0.08 * ((time_remaining / 300) ** 2)
-    vw_size = max(5, int(vw_percent * 50))
+        grid_percent = 0.02 + 0.08 * ((time_remaining / 300) ** 2)
+    grid_size = max(5, int(grid_percent * 50))
 
     return {
         "time_remaining": time_remaining,
@@ -837,10 +888,10 @@ def compare_with_vw(time_remaining: float, best_bid: float = 0.50) -> dict:
             "size": calc_size,
             "max_pair_cost": round(1.0 - calc_threshold, 4),
         },
-        "vw_maker": {
-            "offset": vw_offset,
-            "price": round(vw_price, 4),
-            "size": vw_size,
-            "max_pair_cost": round(1.0 - vw_offset, 4) if vw_offset > 0 else 1.0,
+        "grid_maker": {
+            "offset": grid_offset,
+            "price": round(grid_price, 4),
+            "size": grid_size,
+            "max_pair_cost": round(1.0 - grid_offset, 4) if grid_offset > 0 else 1.0,
         }
     }

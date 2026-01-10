@@ -101,7 +101,7 @@ class TelegramNotifier:
         # Graceful stop callbacks (stop after current market ends)
         self._on_graceful_stop_calculus_maker: Optional[Callable[[], Awaitable[None]]] = None
         self._on_graceful_stop_simple_hedger: Optional[Callable[[], Awaitable[None]]] = None
-        self._on_graceful_stop_volume_weighted: Optional[Callable[[], Awaitable[None]]] = None
+        self._on_graceful_stop_grid_maker: Optional[Callable[[], Awaitable[None]]] = None
         self._on_graceful_stop_directional: Optional[Callable[[], Awaitable[None]]] = None
 
         # Polling state
@@ -207,7 +207,7 @@ class TelegramNotifier:
                 [
                     {"text": "\u23F8 Calc", "callback_data": "graceful_stop_calculus_maker"},
                     {"text": "\u23F8 Simple", "callback_data": "graceful_stop_simple_hedger"},
-                    {"text": "\u23F8 VW", "callback_data": "graceful_stop_volume_weighted"},
+                    {"text": "\u23F8 GRID", "callback_data": "graceful_stop_grid_maker"},
                     {"text": "\u23F8 Dir", "callback_data": "graceful_stop_directional"},
                 ],
                 [
@@ -409,9 +409,9 @@ class TelegramNotifier:
         """Register callback for graceful stop of Simple Hedger mode (stops after current market)."""
         self._on_graceful_stop_simple_hedger = callback
 
-    def on_graceful_stop_volume_weighted(self, callback: Callable[[], Awaitable[None]]) -> None:
-        """Register callback for graceful stop of Volume Weighted mode (stops after current market)."""
-        self._on_graceful_stop_volume_weighted = callback
+    def on_graceful_stop_grid_maker(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Register callback for graceful stop of Grid Maker mode (stops after current market)."""
+        self._on_graceful_stop_grid_maker = callback
 
     def on_graceful_stop_directional(self, callback: Callable[[], Awaitable[None]]) -> None:
         """Register callback for graceful stop of Directional mode (stops after current market)."""
@@ -486,7 +486,7 @@ class TelegramNotifier:
 <b>Modes:</b>
 \u2022 <b>Calculus Maker</b> - Dynamic mispricing detection
 \u2022 <b>Simple Hedger</b> - Flip-based hedging strategy
-\u2022 <b>Volume Weighted</b> - Gabagool-style hedging
+\u2022 <b>Grid Maker</b> - Gabagool-style hedging
 \u2022 <b>Directional</b> - Bias-based with Binance feed"""
             await self.send_message(help_text)
 
@@ -528,7 +528,7 @@ class TelegramNotifier:
 \u2022 <b>Help</b> - Show this message
 \u2022 <b>Balances</b> - Check live & paper balances
 \u2022 <b>Status</b> - Get current bot status
-\u2022 <b>Calc/Simple/VW/Dir</b> - Graceful stop strategy
+\u2022 <b>Calc/Simple/GRID/Dir</b> - Graceful stop strategy
 \u2022 <b>NUKE ALL</b> - Emergency sell all & stop
 
 <b>Text Commands:</b>
@@ -542,7 +542,7 @@ class TelegramNotifier:
 <b>Modes:</b>
 \u2022 <b>Calculus Maker</b> - Dynamic mispricing detection
 \u2022 <b>Simple Hedger</b> - Flip-based hedging strategy
-\u2022 <b>Volume Weighted</b> - Gabagool-style hedging
+\u2022 <b>Grid Maker</b> - Gabagool-style hedging
 \u2022 <b>Directional</b> - Bias-based with Binance feed"""
             await self.send_message(help_text)
 
@@ -595,13 +595,13 @@ class TelegramNotifier:
             else:
                 await self.send_message("<i>Simple Hedger mode not running.</i>")
 
-        elif data == "graceful_stop_volume_weighted":
-            if self._on_graceful_stop_volume_weighted:
-                await self.send_message("\u23F8 <b>Volume Weighted: Will stop after current market...</b>")
-                await self._on_graceful_stop_volume_weighted()
-                await self.send_message("\u2705 Volume Weighted mode flagged for graceful stop.")
+        elif data == "graceful_stop_grid_maker":
+            if self._on_graceful_stop_grid_maker:
+                await self.send_message("\u23F8 <b>Grid Maker: Will stop after current market...</b>")
+                await self._on_graceful_stop_grid_maker()
+                await self.send_message("\u2705 Grid Maker mode flagged for graceful stop.")
             else:
-                await self.send_message("<i>Volume Weighted mode not running.</i>")
+                await self.send_message("<i>Grid Maker mode not running.</i>")
 
         elif data == "graceful_stop_directional":
             if self._on_graceful_stop_directional:

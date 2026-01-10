@@ -57,13 +57,13 @@ YOU                    RELAYER                 BLOCKCHAIN
 
 ## 2025-12-28
 
-### VW Gabagool-Style Opportunistic Accumulation
+### Grid Maker Gabagool-Style Opportunistic Accumulation
 
 **Market**: `btc-updown-15m-1766902500`
 **Observation Time**: 06:20 UTC (11:50 AM IST)
 **Outcome**: Resolved UP, +$1.08 PNL
 
-**Key Finding**: VW's flexible accumulation captured a spike mispricing that rigid threshold strategies would miss.
+**Key Finding**: Grid Maker's flexible accumulation captured a spike mispricing that rigid threshold strategies would miss.
 
 **The Trade**:
 ```
@@ -73,12 +73,12 @@ YOU                    RELAYER                 BLOCKCHAIN
 **Context**:
 - Prior pair cost was hovering around $0.98-1.01
 - A sudden 8-share DOWN fill at $0.14 (vs typical $0.35-0.58 range) appeared
-- VW grabbed it instantly, dropping running pair cost from ~$1.00 to $0.83
+- Grid Maker grabbed it instantly, dropping running pair cost from ~$1.00 to $0.83
 - This single opportunistic trade contributed ~$1.36 to final PNL
 
 **Why This Matters**:
 1. **Calculus MAKER** would have been bidding at `best_bid - threshold` and likely missed this flash
-2. **VW's Gabagool heritage** - always ready to accumulate when price is favorable, regardless of "expected" levels
+2. **Grid Maker's Gabagool heritage** - always ready to accumulate when price is favorable, regardless of "expected" levels
 3. **Liquidity pockets** exist in these markets; flexible strategies capture them
 
 **Recommendation**:

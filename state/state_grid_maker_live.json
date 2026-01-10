@@ -1,5 +1,5 @@
 {
-  "strategy_name": "volume_weighted",
+  "strategy_name": "grid_maker",
   "trading_mode": "live",
   "balance": 143.30523,
   "initial_balance": 100.0,

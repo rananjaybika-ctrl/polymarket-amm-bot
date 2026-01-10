@@ -65,6 +65,10 @@ from src.strategies.spread_capture import (
     SpreadCaptureStrategy,
     SpreadCapturePhase,
 )
+from src.strategies.grid_maker import (
+    GridMakerStrategy,
+    GridPhase,
+)
 from src.services.trend_detector import TrendDetector, TrendState, TrendDirection
 from src.api.websocket_client import UserWebSocketClient, OrderFill, MarketResolved
 from src.utils.market_detector import MarketTypeDetector
@@ -434,8 +438,8 @@ class PaperTradingBot:
         accum_buy_both_sides: bool = True,  # Try to buy both sides each cycle
         max_position_pct: float = 0.17,  # Max shares per side as % of balance (17% of $100 = 17 shares)
         accum_max_share_price: float = 0.98,  # Never buy shares above this price (Gabagool buys up to $0.98)
-        # VOLUME WEIGHTED MODE - Gabagool-style accumulation
-        accum_mode: str = "standard",  # "standard" or "volume_weighted"
+        # GRID MAKER MODE - Gabagool-style two-sided passive market making
+        accum_mode: str = "standard",  # "standard" or "grid_maker"
         # GABAGOOL-STYLE SETTINGS (reverse-engineered from their Dec 2024 behavior)
         vw_imbalance_pct: float = 0.20,  # Max 20% imbalance (gabagool: 10-20%)
         vw_cheap_threshold: float = 0.45,  # Buy aggressively below this (gabagool loads up < $0.45)
@@ -520,7 +524,7 @@ class PaperTradingBot:
         self.accum_buy_both_sides = accum_buy_both_sides
         self.accum_max_share_price = accum_max_share_price
 
-        # Volume Weighted mode parameters
+        # Grid Maker mode parameters
         self.accum_mode = accum_mode
         self.vw_imbalance_pct = vw_imbalance_pct
         self.vw_cheap_threshold = vw_cheap_threshold
@@ -601,6 +605,9 @@ class PaperTradingBot:
         self._confirmed_fills: set = set()  # order_ids already confirmed
         self._last_rest_verification: float = 0.0
 
+        # Emergency stop: track markets where emergency triggered (stop further trading)
+        self._emergency_triggered_markets: set = set()
+
         # WebSocket market resolution detection (instant <100ms vs REST 200-1000ms)
         self._pending_ws_resolution: Optional[MarketResolved] = None
 
@@ -630,6 +637,20 @@ class PaperTradingBot:
                 emergency_imbalance_threshold=self.hard_max_imbalance,
             )
             logger.info(f"[SPREADCAP] Strategy initialized: entry_size=5, target={self.accum_target_shares}")
+
+        # Grid Maker strategy instance (Gabagool-style)
+        self._grid_maker_strategy: Optional[GridMakerStrategy] = None
+        if self.accum_mode == "grid_maker":
+            self._grid_maker_strategy = GridMakerStrategy(
+                order_size=20,  # ~24 shares like Gabagool for BTC
+                min_price=0.05,
+                max_price=0.95,
+                tick_size=0.01,
+                post_delay=5.0,  # 5 seconds after market open
+                max_position=2000.0,
+                max_imbalance=1000.0,
+            )
+            logger.info(f"[GRID] Strategy initialized: order_size=20, tick=$0.01, delay=5s")
 
         # Telegram notifications and remote control
         self._telegram: Optional[TelegramNotifier] = None
@@ -912,7 +933,7 @@ class PaperTradingBot:
         Args:
             config: Dictionary with web UI configuration values
             web_callback: Optional callback for web UI updates
-            strategy_name: Strategy identifier for Discord and web UI (e.g., "standard", "volume_weighted")
+            strategy_name: Strategy identifier for Discord and web UI (e.g., "standard", "grid_maker")
             session_start_utc: UTC start time - only trade markets ending AFTER this
             session_end_utc: UTC end time - only trade markets ending BEFORE this
 
@@ -921,7 +942,7 @@ class PaperTradingBot:
         """
         # Determine accum_mode from config or strategy_name
         accum_mode = config.get("accum_mode", "standard")
-        if strategy_name in ["standard", "volume_weighted"]:
+        if strategy_name in ["standard", "grid_maker"]:
             accum_mode = strategy_name
 
         # Get trading mode (paper or live)
@@ -943,7 +964,7 @@ class PaperTradingBot:
             accum_pair_cost_target=config.get("accum_pair_cost_target", 0.995),
             accum_pair_cost_limit=config.get("accum_pair_cost_limit", 1.02),
             accum_buy_both_sides=config.get("accum_buy_both_sides", True),
-            # Volume Weighted mode params (only used when accum_mode="volume_weighted")
+            # Grid Maker mode params (only used when accum_mode="grid_maker")
             # Gabagool-style settings
             vw_imbalance_pct=config.get("vw_imbalance_pct", 0.20),
             vw_cheap_threshold=config.get("vw_cheap_threshold", 0.45),
@@ -1164,28 +1185,28 @@ class PaperTradingBot:
             async def _noop():
                 pass  # No-op for non-matching strategies
 
-            if self.accum_mode == "volume_weighted":
-                mode_label = "Volume Weighted (Gabagool-style)"
-                self._telegram.on_graceful_stop_volume_weighted(self._handle_telegram_graceful_stop)
+            if self.accum_mode == "grid_maker":
+                mode_label = "Grid Maker (Gabagool-style)"
+                self._telegram.on_graceful_stop_grid_maker(self._handle_telegram_graceful_stop)
                 self._telegram.on_graceful_stop_calculus_maker(_noop)
             elif self.accum_mode == "calculus_maker":
                 mode_label = "Calculus MAKER"
                 self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
-                self._telegram.on_graceful_stop_volume_weighted(_noop)
+                self._telegram.on_graceful_stop_grid_maker(_noop)
             elif self.accum_mode == "fair_value_mm":
                 mode_label = "Fair Value MM"
                 # Fair Value MM uses calculus_maker button since they're similar
                 self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
-                self._telegram.on_graceful_stop_volume_weighted(_noop)
+                self._telegram.on_graceful_stop_grid_maker(_noop)
             elif self.accum_mode == "spread_capture":
                 mode_label = "Spread Capture"
                 # Spread Capture uses calculus_maker button since they're similar
                 self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
-                self._telegram.on_graceful_stop_volume_weighted(_noop)
+                self._telegram.on_graceful_stop_grid_maker(_noop)
             else:
                 mode_label = "Unknown Mode"
                 self._telegram.on_graceful_stop_calculus_maker(_noop)
-                self._telegram.on_graceful_stop_volume_weighted(_noop)
+                self._telegram.on_graceful_stop_grid_maker(_noop)
 
             await self._telegram.start()
             await self._telegram.send_info(
@@ -1889,7 +1910,7 @@ class PaperTradingBot:
             # Determine mode label from strategy_name
             mode_labels = {
                 "calculus_maker": "Calculus Maker",
-                "volume_weighted": "Volume Weighted",
+                "grid_maker": "Grid Maker",
                 "standard": "Standard",
             }
             mode = mode_labels.get(self.strategy_name, self.strategy_name.replace("_", " ").title())
@@ -2062,8 +2083,8 @@ class PaperTradingBot:
         if self._telegram and self._telegram.enabled:
             try:
                 # Determine mode label
-                if self.accum_mode == "volume_weighted":
-                    mode = "Volume Weighted"
+                if self.accum_mode == "grid_maker":
+                    mode = "Grid Maker"
                 elif self.accum_mode == "calculus_maker":
                     mode = "Calculus Maker"
                 elif self.accum_mode == "fair_value_mm":
@@ -2190,8 +2211,8 @@ class PaperTradingBot:
         if self._telegram and self._telegram.enabled:
             try:
                 # Determine mode label
-                if self.accum_mode == "volume_weighted":
-                    mode = "Volume Weighted"
+                if self.accum_mode == "grid_maker":
+                    mode = "Grid Maker"
                 elif self.accum_mode == "calculus_maker":
                     mode = "Calculus Maker"
                 elif self.accum_mode == "fair_value_mm":
@@ -2315,8 +2336,8 @@ class PaperTradingBot:
             logger.info(f"Starting paper trading bot for {duration_minutes:.1f} minutes")
         # Log mode info
         logger.info("=" * 50)
-        if self.accum_mode == "volume_weighted":
-            mode_label = "VOLUME WEIGHTED (Gabagool-style)"
+        if self.accum_mode == "grid_maker":
+            mode_label = "GRID MAKER (Gabagool-style)"
         elif self.accum_mode == "calculus_maker":
             mode_label = "CALCULUS MAKER"
         elif self.accum_mode == "fair_value_mm":
@@ -2329,7 +2350,7 @@ class PaperTradingBot:
         logger.info("=" * 50)
         logger.info(f"  - Trade size: {self.accum_trade_size} shares per trade")
         logger.info(f"  - Pair cost limit: ${self.accum_pair_cost_limit}")
-        if self.accum_mode == "volume_weighted":
+        if self.accum_mode == "grid_maker":
             logger.info(f"  - Max imbalance: {self.vw_imbalance_pct*100:.0f}% of position (dynamic)")
             logger.info(f"  - Cheap threshold: ${self.vw_cheap_threshold} (always buy below)")
             logger.info(f"  - Hedge trigger: {self.vw_hedge_trigger_pct*100:.0f}% imbalance")
@@ -2368,7 +2389,12 @@ class PaperTradingBot:
 
         # Start user WebSocket for instant fill notifications (live mode only)
         if self.trading_mode == "live":
-            await self._setup_user_websocket()
+            ws_ok = await self._setup_user_websocket()
+
+            # Inject WebSocket client into LiveTradingEngine for event-driven fills
+            if ws_ok and self._user_ws and hasattr(self._engine, 'set_user_websocket'):
+                self._engine.set_user_websocket(self._user_ws)
+                logger.info("[LIVE] UserWebSocketClient injected into LiveTradingEngine (~100ms fills)")
 
         # Start rotator session
         if not await self._rotator.start_session():
@@ -2473,7 +2499,7 @@ class PaperTradingBot:
         current_down: float,
     ) -> bool:
         """
-        Volume Weighted (Gabagool-style) buy decision.
+        Grid Maker (Gabagool-style) buy decision.
 
         Gabagool's strategy (reverse-engineered from Dec 2024):
         1. Buy aggressively when price < $0.45 (load up on cheap side)
@@ -2504,9 +2530,9 @@ class PaperTradingBot:
 
         return False
 
-    def get_vw_trade_size(self, price: float, remaining_capacity: int) -> int:
+    def get_grid_trade_size(self, price: float, remaining_capacity: int) -> int:
         """
-        Volume-weighted trade size based on remaining capacity.
+        Grid-weighted trade size based on remaining capacity.
 
         Uses percentage of remaining capacity, weighted by price:
         - Cheaper prices = larger % of remaining capacity per trade
@@ -2534,9 +2560,9 @@ class PaperTradingBot:
         size = max(1, int(remaining_capacity * pct))
         return min(size, remaining_capacity)
 
-    def get_vw_max_imbalance(self, current_up: float, current_down: float) -> int:
+    def get_grid_max_imbalance(self, current_up: float, current_down: float) -> int:
         """
-        Calculate max allowed imbalance in volume_weighted mode.
+        Calculate max allowed imbalance in grid_maker mode.
 
         Returns percentage-based imbalance limit instead of absolute.
 
@@ -2571,6 +2597,22 @@ class PaperTradingBot:
         market = self._rotator.current_market
         if not market:
             logger.warning("No current market")
+            return
+
+        # ============================================================================
+        # EMERGENCY STOP: Don't trade in markets where emergency already triggered
+        # ============================================================================
+        # Once emergency triggers, we stop ALL further trading in that market.
+        # The imbalance is too severe - wait for resolution and move on.
+        # NOTE: This will change when sizing up - emergency will be quicker.
+        if market.slug in self._emergency_triggered_markets:
+            # Only log once per minute to avoid spam
+            if not hasattr(self, '_last_emergency_stop_log'):
+                self._last_emergency_stop_log = {}
+            last_log = self._last_emergency_stop_log.get(market.slug, 0)
+            if time.time() - last_log > 60:
+                logger.warning(f"[EMERGENCY_STOP] No more trading for {market.slug} - emergency already triggered")
+                self._last_emergency_stop_log[market.slug] = time.time()
             return
 
         # ============================================================================
@@ -2672,6 +2714,18 @@ class PaperTradingBot:
             )
             return  # Spread capture handles its own logic
 
+        # ============================================================================
+        # GRID MAKER MODE: Use dedicated cycle method (Gabagool-style)
+        # ============================================================================
+        if self.accum_mode == "grid_maker" and self._grid_maker_strategy:
+            await self._run_grid_maker_cycle(
+                market=market,
+                position=position,
+                current_up=current_up,
+                current_down=current_down,
+            )
+            return  # Grid maker handles its own logic
+
         # Check if we've hit target shares
         if current_up >= self.accum_target_shares and current_down >= self.accum_target_shares:
             # Already at target - just wait for rotation
@@ -2751,8 +2805,8 @@ class PaperTradingBot:
             time_remaining_secs = max(0, (market.end_time - datetime.now(timezone.utc)).total_seconds())
 
         # Calculate max imbalance for emergency determination
-        if self.accum_mode == "volume_weighted":
-            max_imbalance_check = self.get_vw_max_imbalance(current_up, current_down)
+        if self.accum_mode == "grid_maker":
+            max_imbalance_check = self.get_grid_max_imbalance(current_up, current_down)
         else:
             max_imbalance_check = max(int(self.accum_max_imbalance_pct * self.accum_target_shares), 2)
 
@@ -2799,6 +2853,13 @@ class PaperTradingBot:
                         f"(time_left={time_remaining_secs:.0f}s)"
                     )
                     self._last_emergency_time[market.slug] = current_time
+
+                    # EMERGENCY STOP: Mark this market as having triggered emergency
+                    # No more trading in this market after emergency hedge completes
+                    self._emergency_triggered_markets.add(market.slug)
+                    logger.warning(
+                        f"[EMERGENCY_STOP] Flagged {market.slug} - will stop trading after this hedge"
+                    )
 
                     # Cancel any pending chased order for the emergency side (prevent double fill)
                     if hasattr(self._engine, 'cancel_pending_order'):
@@ -2869,7 +2930,7 @@ class PaperTradingBot:
                 time_elapsed=time_elapsed_secs,
                 balance_min=0.35,
                 balance_max=0.65,
-                gate_duration=60.0,
+                gate_duration=5.0,  # Reduced from 60s for faster entry
             )
             if not can_enter:
                 if self._opportunities_checked % 10 == 0:
@@ -2906,7 +2967,9 @@ class PaperTradingBot:
 
             # Use calculus strategy's size (quadratic ramp: 5 early → 50 late)
             buy_size = self._calculus_strategy.get_size(time_remaining_secs)
-            logger.info(f"[CALC] ✅ TRADING: mispricing {mispricing:.1%} >= threshold {threshold:.1%}, size={buy_size}")
+            # Rate-limit logging to every 100 checks to avoid spam at max speed
+            if self._opportunities_checked % 100 == 0:
+                logger.info(f"[CALC] ✅ TRADING: mispricing {mispricing:.1%} >= threshold {threshold:.1%}, size={buy_size}")
         else:
             # Dynamic sizing: 20% at 15min → 10% at 5min → 2% at 0min
             # Minimum 5 shares per Polymarket requirement
@@ -3003,24 +3066,28 @@ class PaperTradingBot:
                 room_to_target = self.accum_target_shares - current_up
                 if room_to_target < 5:
                     # Not enough room for minimum order - close enough to balanced
-                    logger.info(f"[REBAL] Skip UP: room {room_to_target} < min 5, close enough")
+                    if self._opportunities_checked % 100 == 0:
+                        logger.info(f"[REBAL] Skip UP: room {room_to_target} < min 5, close enough")
                     force_rebalance = False
                 else:
                     buy_up = True
                     buy_down = False
                     buy_size = min(rebalance_size, room_to_target)
-                    logger.info(f"REBALANCE: Buying {buy_size} UP to fix imbalance ({share_imbalance:.0f} → ~0)")
+                    if self._opportunities_checked % 100 == 0:
+                        logger.info(f"REBALANCE: Buying {buy_size} UP to fix imbalance ({share_imbalance:.0f} → ~0)")
             elif deficit_side == "DOWN" and current_down < self.accum_target_shares:
                 room_to_target = self.accum_target_shares - current_down
                 if room_to_target < 5:
                     # Not enough room for minimum order - close enough to balanced
-                    logger.info(f"[REBAL] Skip DOWN: room {room_to_target} < min 5, close enough")
+                    if self._opportunities_checked % 100 == 0:
+                        logger.info(f"[REBAL] Skip DOWN: room {room_to_target} < min 5, close enough")
                     force_rebalance = False
                 else:
                     buy_up = False
                     buy_down = True
                     buy_size = min(rebalance_size, room_to_target)
-                    logger.info(f"REBALANCE: Buying {buy_size} DOWN to fix imbalance ({share_imbalance:.0f} → ~0)")
+                    if self._opportunities_checked % 100 == 0:
+                        logger.info(f"REBALANCE: Buying {buy_size} DOWN to fix imbalance ({share_imbalance:.0f} → ~0)")
         elif not near_target:
             # =================================================================
             # TRENDING MARKET IMPROVEMENTS (from Telegram alpha)
@@ -3128,7 +3195,7 @@ class PaperTradingBot:
                     f"[CALC] Trading: threshold={threshold:.1%}, pair_cost=${pair_cost:.4f}, "
                     f"buy_up={buy_up}, buy_down={buy_down}"
                 )
-            elif self.accum_mode == "volume_weighted":
+            elif self.accum_mode == "grid_maker":
                 # TRUE GABAGOOL MODE: Continuous accumulation on BOTH sides
                 # Analysis of gabagool22 (Dec 2024) revealed:
                 # - NO selective buying - they buy at ALL prices ($0.02 to $0.98)
@@ -3137,10 +3204,10 @@ class PaperTradingBot:
                 # - Expensive buys on one side offset by cheap buys on other
                 # - Final pair cost always ends under $1.00
                 #
-                # NO pair cost blocking in VW mode - allows temporary imbalances like Gabagool
+                # NO pair cost blocking in Grid mode - allows temporary imbalances like Gabagool
                 # Volume weighting naturally keeps final pair cost reasonable
 
-                logger.debug(f"[VW] Gabagool mode: UP@${up_price:.3f} buy={buy_up}, DOWN@${down_price:.3f} buy={buy_down}")
+                logger.debug(f"[GRID] Gabagool mode: UP@${up_price:.3f} buy={buy_up}, DOWN@${down_price:.3f} buy={buy_down}")
             else:
                 # STANDARD MODE: Use pair cost threshold
                 if position and position.pair_count > 0:
@@ -3231,14 +3298,14 @@ class PaperTradingBot:
                 logger.info(f"⛔ SKIP DOWN: price ${down_price:.3f} > ceiling ${ceiling_used}")
 
         # GABAGOOL-STYLE VOLUME WEIGHTING: Percentage of remaining capacity, weighted by price
-        # Only applies in volume_weighted mode
-        if self.accum_mode == "volume_weighted":
+        # Only applies in grid_maker mode
+        if self.accum_mode == "grid_maker":
             up_remaining = max(0, int(self.accum_target_shares - current_up))
             down_remaining = max(0, int(self.accum_target_shares - current_down))
-            up_buy_size = self.get_vw_trade_size(up_price, up_remaining)
-            down_buy_size = self.get_vw_trade_size(down_price, down_remaining)
-            logger.debug(f"[VW] UP: {up_remaining} remaining → buy {up_buy_size} @ ${up_price:.3f} ({int(up_buy_size/max(1,up_remaining)*100) if up_remaining > 0 else 0}%)")
-            logger.debug(f"[VW] DOWN: {down_remaining} remaining → buy {down_buy_size} @ ${down_price:.3f} ({int(down_buy_size/max(1,down_remaining)*100) if down_remaining > 0 else 0}%)")
+            up_buy_size = self.get_grid_trade_size(up_price, up_remaining)
+            down_buy_size = self.get_grid_trade_size(down_price, down_remaining)
+            logger.debug(f"[GRID] UP: {up_remaining} remaining → buy {up_buy_size} @ ${up_price:.3f} ({int(up_buy_size/max(1,up_remaining)*100) if up_remaining > 0 else 0}%)")
+            logger.debug(f"[GRID] DOWN: {down_remaining} remaining → buy {down_buy_size} @ ${down_price:.3f} ({int(down_buy_size/max(1,down_remaining)*100) if down_remaining > 0 else 0}%)")
         else:
             up_buy_size = buy_size
             down_buy_size = buy_size
@@ -3301,12 +3368,12 @@ class PaperTradingBot:
             down_buy_size = 0
 
         # IMBALANCE ENFORCEMENT: Applies to ALL modes to prevent one-sided exposure
-        # VW mode uses more permissive limit via get_vw_max_imbalance (min 10, or 20% of position)
+        # Grid mode uses more permissive limit via get_grid_max_imbalance (min 10, or 20% of position)
         # Standard mode uses accum_max_imbalance_pct (default 15%)
         #
         # KEY FIX: When buying BOTH sides, check NET imbalance after both trades
         # This allows balanced pair buying even when each side individually exceeds limit
-        mode_label = "[VW]" if self.accum_mode == "volume_weighted" else ""
+        mode_label = "[GRID]" if self.accum_mode == "grid_maker" else ""
 
         # ============================================================================
         # IMBALANCE BLOCKING (FIXED: Block BOTH sides when imbalanced)
@@ -3331,16 +3398,20 @@ class PaperTradingBot:
             if buy_up:
                 if new_up_imbalance >= current_imbalance:
                     buy_up = False
-                    logger.info(f"⛔ {mode_label} BLOCKED UP: imbalanced {current_imbalance:.0f} > limit, UP doesn't reduce")
+                    if self._opportunities_checked % 100 == 0:
+                        logger.info(f"⛔ {mode_label} BLOCKED UP: imbalanced {current_imbalance:.0f} > limit, UP doesn't reduce")
                 else:
-                    logger.info(f"✅ {mode_label} ALLOWING UP: reduces imbalance {current_imbalance:.0f} → {new_up_imbalance:.0f}")
+                    if self._opportunities_checked % 100 == 0:
+                        logger.info(f"✅ {mode_label} ALLOWING UP: reduces imbalance {current_imbalance:.0f} → {new_up_imbalance:.0f}")
 
             if buy_down:
                 if new_down_imbalance >= current_imbalance:
                     buy_down = False
-                    logger.info(f"⛔ {mode_label} BLOCKED DOWN: imbalanced {current_imbalance:.0f} > limit, DOWN doesn't reduce")
+                    if self._opportunities_checked % 100 == 0:
+                        logger.info(f"⛔ {mode_label} BLOCKED DOWN: imbalanced {current_imbalance:.0f} > limit, DOWN doesn't reduce")
                 else:
-                    logger.info(f"✅ {mode_label} ALLOWING DOWN: reduces imbalance {current_imbalance:.0f} → {new_down_imbalance:.0f}")
+                    if self._opportunities_checked % 100 == 0:
+                        logger.info(f"✅ {mode_label} ALLOWING DOWN: reduces imbalance {current_imbalance:.0f} → {new_down_imbalance:.0f}")
 
         # If buying both sides, check net result
         elif buy_up and buy_down:
@@ -3434,50 +3505,77 @@ class PaperTradingBot:
                     expected_fill = pending_info.get("expected_size", 5)
                     # Check against last known position
                     last_pos = pending_info.get("position_when_placed", 0)
-                    if current_up > last_pos:
-                        # Expensive side filled! Check if instant hedge already placed
+                    entry_filled_at = pending_info.get("entry_filled_at")
+
+                    if current_up > last_pos or entry_filled_at:
+                        # Entry filled! First time seeing fill or already waiting for hedge
+                        if not entry_filled_at:
+                            # First time detecting fill - record timestamp
+                            entry_filled_at = time.time()
+                            pending_info["entry_filled_at"] = entry_filled_at
+                            filled_amount = current_up - last_pos
+                            logger.info(
+                                f"[SEQ_PAIR] ✓ Expensive UP filled +{filled_amount:.0f} "
+                                f"(position {last_pos:.0f} → {current_up:.0f})"
+                            )
+
+                        # Check if instant hedge already placed via WebSocket
                         if pending_info.get("hedge_placed"):
-                            # WebSocket instant hedge already handled this - just clear tracking
                             del self._pending_expensive_orders[pending_key]
                             logger.info(
                                 f"[SEQ_PAIR] ✓ UP filled, instant hedge already placed via WebSocket. Skipping."
                             )
-                            # Don't place duplicate hedge - instant hedge handled it
                         else:
-                            # No instant hedge yet - place hedge via main cycle
-                            del self._pending_expensive_orders[pending_key]
-                            filled_amount = current_up - last_pos
-                            logger.info(
-                                f"[SEQ_PAIR] ✓ Expensive UP filled +{filled_amount:.0f} "
-                                f"(position {last_pos:.0f} → {current_up:.0f}). Now placing DOWN hedge."
-                            )
-                            # FORCE hedge even if down_order is None (buy_down was blocked)
-                            if down_order:
-                                pending_trades.append(down_order)
+                            # VELOCITY GATE: Check if velocity favors hedge now
+                            time_since_fill = time.time() - entry_filled_at
+                            velocity_bps = trend_signal.velocity_bps if trend_signal else 0.0
+                            expensive_price = pending_info.get("expensive_price", 0)
+                            MIN_PROFIT = 0.005
+                            max_hedge_price = 1.00 - expensive_price - MIN_PROFIT if expensive_price > 0 else 0.99
+                            current_hedge_price = down_price if down_price > 0 else raw_down_ask
+
+                            should_hedge = True  # Default: hedge if no calculus strategy
+                            hedge_reason = "no velocity strategy"
+                            if self._calculus_strategy and hasattr(self._calculus_strategy, 'should_hedge_now'):
+                                should_hedge, hedge_reason = self._calculus_strategy.should_hedge_now(
+                                    velocity_bps=velocity_bps,
+                                    hedge_side="DOWN",
+                                    time_since_entry_fill=time_since_fill,
+                                    current_hedge_price=current_hedge_price,
+                                    max_hedge_price=max_hedge_price,
+                                )
+
+                            if should_hedge:
+                                # Place hedge now
+                                del self._pending_expensive_orders[pending_key]
+                                logger.info(
+                                    f"[VELOCITY_HEDGE] DOWN hedge: {hedge_reason} "
+                                    f"(vel={velocity_bps:.3f}bps, wait={time_since_fill:.0f}s)"
+                                )
+                                if down_order:
+                                    pending_trades.append(down_order)
+                                else:
+                                    # Create forced hedge order with PROFIT CEILING
+                                    filled_amount = pending_info.get("filled_amount", current_up - last_pos)
+                                    hedge_size = min(filled_amount, down_buy_size) if down_buy_size > 0 else filled_amount
+                                    hedge_size = max(5, int(hedge_size))
+                                    hedge_price = min(current_hedge_price, max_hedge_price)
+
+                                    forced_order = {
+                                        "side": "DOWN",
+                                        "price": hedge_price,
+                                        "size": hedge_size,
+                                        "best_ask": raw_down_ask,
+                                        "best_bid": raw_down_bid,
+                                    }
+                                    pending_trades.append(forced_order)
+                                    logger.info(f"[SEQ_PAIR] FORCED DOWN hedge @ ${hedge_price:.4f}")
                             else:
-                                # Create forced hedge order with PROFIT CEILING
-                                hedge_size = min(filled_amount, down_buy_size) if down_buy_size > 0 else filled_amount
-                                hedge_size = max(5, int(hedge_size))
-                                hedge_price = down_price if down_price > 0 else raw_down_ask
-
-                                # Apply profit ceiling: never pay more than would wipe out edge
-                                expensive_price = pending_info.get("expensive_price", 0)
-                                if expensive_price > 0:
-                                    MIN_PROFIT = 0.005
-                                    max_hedge_price = 1.00 - expensive_price - MIN_PROFIT
-                                    if hedge_price > max_hedge_price:
-                                        logger.warning(f"[FORCED_HEDGE] DOWN capped @ ${max_hedge_price:.4f} (was ${hedge_price:.4f})")
-                                        hedge_price = max_hedge_price
-
-                                forced_order = {
-                                    "side": "DOWN",
-                                    "price": hedge_price,
-                                    "size": hedge_size,
-                                    "best_ask": raw_down_ask,
-                                    "best_bid": raw_down_bid,
-                                }
-                                pending_trades.append(forced_order)
-                                logger.info(f"[SEQ_PAIR] FORCED DOWN hedge @ ${hedge_price:.4f} (buy_down was blocked)")
+                                # Let it ride - wait for better hedge price
+                                logger.debug(
+                                    f"[VELOCITY_HEDGE] Let it ride: {hedge_reason} "
+                                    f"(vel={velocity_bps:.3f}bps, wait={time_since_fill:.0f}s)"
+                                )
                     elif pending_age > 30:
                         # Timeout - expensive side didn't fill in 30s, cancel and reset
                         del self._pending_expensive_orders[pending_key]
@@ -3495,50 +3593,77 @@ class PaperTradingBot:
                         # Don't place anything
                 else:  # pending_side == "DOWN"
                     last_pos = pending_info.get("position_when_placed", 0)
-                    if current_down > last_pos:
-                        # Expensive side filled! Check if instant hedge already placed
+                    entry_filled_at = pending_info.get("entry_filled_at")
+
+                    if current_down > last_pos or entry_filled_at:
+                        # Entry filled! First time seeing fill or already waiting for hedge
+                        if not entry_filled_at:
+                            # First time detecting fill - record timestamp
+                            entry_filled_at = time.time()
+                            pending_info["entry_filled_at"] = entry_filled_at
+                            filled_amount = current_down - last_pos
+                            logger.info(
+                                f"[SEQ_PAIR] ✓ Expensive DOWN filled +{filled_amount:.0f} "
+                                f"(position {last_pos:.0f} → {current_down:.0f})"
+                            )
+
+                        # Check if instant hedge already placed via WebSocket
                         if pending_info.get("hedge_placed"):
-                            # WebSocket instant hedge already handled this - just clear tracking
                             del self._pending_expensive_orders[pending_key]
                             logger.info(
                                 f"[SEQ_PAIR] ✓ DOWN filled, instant hedge already placed via WebSocket. Skipping."
                             )
-                            # Don't place duplicate hedge - instant hedge handled it
                         else:
-                            # No instant hedge yet - place hedge via main cycle
-                            del self._pending_expensive_orders[pending_key]
-                            filled_amount = current_down - last_pos
-                            logger.info(
-                                f"[SEQ_PAIR] ✓ Expensive DOWN filled +{filled_amount:.0f} "
-                                f"(position {last_pos:.0f} → {current_down:.0f}). Now placing UP hedge."
-                            )
-                            # FORCE hedge even if up_order is None (buy_up was blocked)
-                            if up_order:
-                                pending_trades.append(up_order)
+                            # VELOCITY GATE: Check if velocity favors hedge now
+                            time_since_fill = time.time() - entry_filled_at
+                            velocity_bps = trend_signal.velocity_bps if trend_signal else 0.0
+                            expensive_price = pending_info.get("expensive_price", 0)
+                            MIN_PROFIT = 0.005
+                            max_hedge_price = 1.00 - expensive_price - MIN_PROFIT if expensive_price > 0 else 0.99
+                            current_hedge_price = up_price if up_price > 0 else raw_up_ask
+
+                            should_hedge = True  # Default: hedge if no calculus strategy
+                            hedge_reason = "no velocity strategy"
+                            if self._calculus_strategy and hasattr(self._calculus_strategy, 'should_hedge_now'):
+                                should_hedge, hedge_reason = self._calculus_strategy.should_hedge_now(
+                                    velocity_bps=velocity_bps,
+                                    hedge_side="UP",
+                                    time_since_entry_fill=time_since_fill,
+                                    current_hedge_price=current_hedge_price,
+                                    max_hedge_price=max_hedge_price,
+                                )
+
+                            if should_hedge:
+                                # Place hedge now
+                                del self._pending_expensive_orders[pending_key]
+                                logger.info(
+                                    f"[VELOCITY_HEDGE] UP hedge: {hedge_reason} "
+                                    f"(vel={velocity_bps:.3f}bps, wait={time_since_fill:.0f}s)"
+                                )
+                                if up_order:
+                                    pending_trades.append(up_order)
+                                else:
+                                    # Create forced hedge order with PROFIT CEILING
+                                    filled_amount = pending_info.get("filled_amount", current_down - last_pos)
+                                    hedge_size = min(filled_amount, up_buy_size) if up_buy_size > 0 else filled_amount
+                                    hedge_size = max(5, int(hedge_size))
+                                    hedge_price = min(current_hedge_price, max_hedge_price)
+
+                                    forced_order = {
+                                        "side": "UP",
+                                        "price": hedge_price,
+                                        "size": hedge_size,
+                                        "best_ask": raw_up_ask,
+                                        "best_bid": raw_up_bid,
+                                    }
+                                    pending_trades.append(forced_order)
+                                    logger.info(f"[SEQ_PAIR] FORCED UP hedge @ ${hedge_price:.4f}")
                             else:
-                                # Create forced hedge order with PROFIT CEILING
-                                hedge_size = min(filled_amount, up_buy_size) if up_buy_size > 0 else filled_amount
-                                hedge_size = max(5, int(hedge_size))
-                                hedge_price = up_price if up_price > 0 else raw_up_ask
-
-                                # Apply profit ceiling: never pay more than would wipe out edge
-                                expensive_price = pending_info.get("expensive_price", 0)
-                                if expensive_price > 0:
-                                    MIN_PROFIT = 0.005
-                                    max_hedge_price = 1.00 - expensive_price - MIN_PROFIT
-                                    if hedge_price > max_hedge_price:
-                                        logger.warning(f"[FORCED_HEDGE] UP capped @ ${max_hedge_price:.4f} (was ${hedge_price:.4f})")
-                                        hedge_price = max_hedge_price
-
-                                forced_order = {
-                                    "side": "UP",
-                                    "price": hedge_price,
-                                    "size": hedge_size,
-                                    "best_ask": raw_up_ask,
-                                    "best_bid": raw_up_bid,
-                                }
-                                pending_trades.append(forced_order)
-                                logger.info(f"[SEQ_PAIR] FORCED UP hedge @ ${hedge_price:.4f} (buy_up was blocked)")
+                                # Let it ride - wait for better hedge price
+                                logger.debug(
+                                    f"[VELOCITY_HEDGE] Let it ride: {hedge_reason} "
+                                    f"(vel={velocity_bps:.3f}bps, wait={time_since_fill:.0f}s)"
+                                )
                     elif pending_age > 30:
                         # Timeout
                         del self._pending_expensive_orders[pending_key]
@@ -3557,6 +3682,24 @@ class PaperTradingBot:
                     # Balanced - place expensive side first
                     expensive_order = up_order if expensive_side == "UP" else down_order
                     if expensive_order:
+                        # VELOCITY GATE: Check if velocity favors entry now
+                        # Wait for reversal (price at bottom) before entering
+                        velocity_bps = trend_signal.velocity_bps if trend_signal else 0.0
+                        should_enter = True  # Default: enter if no calculus strategy
+                        if self._calculus_strategy and hasattr(self._calculus_strategy, 'should_enter_now'):
+                            should_enter = self._calculus_strategy.should_enter_now(velocity_bps, expensive_side)
+                            if not should_enter:
+                                # Velocity not favorable - wait for reversal
+                                logger.debug(
+                                    f"[VELOCITY_GATE] Skipping {expensive_side} entry: vel={velocity_bps:.3f}bps "
+                                    f"(waiting for reversal)"
+                                )
+                                return  # Skip this cycle, try again next time
+                            else:
+                                logger.info(
+                                    f"[VELOCITY_GATE] {expensive_side} entry: vel={velocity_bps:.3f}bps "
+                                    f"(reversal detected - entering now)"
+                                )
                         pending_trades.append(expensive_order)
                         # Track this as pending (includes cheap side info for instant hedge)
                         cheap_order = down_order if expensive_side == "UP" else up_order
@@ -4300,6 +4443,228 @@ class PaperTradingBot:
         except Exception as e:
             logger.error(f"[SPREADCAP] Order execution error: {e}")
 
+    # =========================================================================
+    # GRID MAKER CYCLE (Gabagool-style two-sided passive market making)
+    # =========================================================================
+
+    async def _run_grid_maker_cycle(
+        self,
+        market,
+        position,
+        current_up: float,
+        current_down: float,
+    ) -> None:
+        """
+        Dedicated trading cycle for Grid Maker strategy (Gabagool-style).
+
+        Posts grid orders on BOTH sides simultaneously:
+        - UP levels: $0.05 to $0.95 in $0.01 increments
+        - DOWN levels: Complementary prices (1 - UP price)
+
+        Unlike spread_capture's entry→hedge cycle, grid_maker:
+        - Posts ALL grid levels at market open + delay
+        - Lets orders fill passively from market flow
+        - Accumulates imbalances naturally (71.2% win rate on trending side)
+        - NO velocity timing - pure passive maker
+
+        Integration:
+        - Uses self._engine.execute_single_side_trade() for order placement
+        - Tracks fills via engine's position tracking
+        - Works for both paper and live modes
+        """
+        if not self._grid_maker_strategy:
+            logger.warning("[GRID] Strategy not initialized")
+            return
+
+        strategy = self._grid_maker_strategy
+        time_remaining_secs = market.time_remaining()
+        market_duration = 15 * 60  # 15-minute markets
+        time_into_market = market_duration - time_remaining_secs
+
+        # Check for rotation
+        if self._rotator.should_rotate():
+            await self._handle_market_rotation(market)
+            return
+
+        # Get orderbook data
+        opportunity = None
+        current_up_cost = position.up_cost if position else 0.0
+        current_down_cost = position.down_cost if position else 0.0
+
+        for attempt in range(self.max_retries):
+            try:
+                opportunity = await self._analyzer.analyze_asymmetric_opportunity(
+                    market=market,
+                    current_up_size=current_up,
+                    current_down_size=current_down,
+                    current_up_cost=current_up_cost,
+                    current_down_cost=current_down_cost,
+                    pair_cost_threshold=1.00,
+                )
+                break
+            except Exception as e:
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(0.5)
+
+        if not opportunity or opportunity.up_ask is None or opportunity.down_ask is None:
+            logger.debug("[GRID] No valid opportunity data")
+            return
+
+        # Extract prices
+        up_ask = opportunity.up_ask
+        down_ask = opportunity.down_ask
+        up_bid = opportunity.up_bid or (up_ask * 0.98)
+        down_bid = opportunity.down_bid or (down_ask * 0.98)
+
+        # Update display prices
+        self._last_up_price = up_ask
+        self._last_down_price = down_ask
+        self._last_spread = 1.0 - up_ask - down_ask
+        self._update_live_display()
+
+        current_time = time.time()
+
+        # Get orders to place from strategy
+        orders = strategy.get_orders_to_place(
+            up_best_bid=up_bid,
+            up_best_ask=up_ask,
+            down_best_bid=down_bid,
+            down_best_ask=down_ask,
+            time_into_market=time_into_market,
+            time_remaining=time_remaining_secs,
+            current_time=current_time,
+        )
+
+        # =================================================================
+        # FILL DETECTION: Check if any posted grid levels would fill
+        # For MAKER orders: we fill when someone sells TO us (ask <= our bid)
+        # =================================================================
+        for level in strategy.state.up_levels:
+            if level.status == "posted":
+                # MAKER BUY fills when market ask price <= our posted price
+                # (someone willing to sell at or below what we're paying)
+                if up_ask <= level.price:
+                    fill_size = level.size - level.filled_size
+                    if fill_size > 0:
+                        # Execute through engine for proper position tracking
+                        result = await self._engine.execute_single_side_trade(
+                            market=market,
+                            side="UP",
+                            price=level.price,
+                            size=fill_size,
+                            best_ask=up_ask,
+                            use_pending_orders=False,
+                        )
+
+                        if result.get("success"):
+                            filled_size = result.get("filled_size", 0)
+                            filled_price = result.get("filled_price", level.price)
+
+                            if filled_size > 0:
+                                strategy.on_fill(side="UP", price=filled_price, size=int(filled_size))
+                                self._trade_count += 1
+
+                                await self._log_trade({
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "market_slug": market.slug,
+                                    "side": "UP",
+                                    "price": filled_price,
+                                    "size": filled_size,
+                                    "mode": "grid_maker",
+                                    "phase": strategy.state.phase.value,
+                                })
+
+                                logger.info(
+                                    f"[GRID] Fill: UP {filled_size} @ ${filled_price:.3f} | "
+                                    f"ask=${up_ask:.3f} crossed level=${level.price:.2f}"
+                                )
+
+        for level in strategy.state.down_levels:
+            if level.status == "posted":
+                if down_ask <= level.price:
+                    fill_size = level.size - level.filled_size
+                    if fill_size > 0:
+                        result = await self._engine.execute_single_side_trade(
+                            market=market,
+                            side="DOWN",
+                            price=level.price,
+                            size=fill_size,
+                            best_ask=down_ask,
+                            use_pending_orders=False,
+                        )
+
+                        if result.get("success"):
+                            filled_size = result.get("filled_size", 0)
+                            filled_price = result.get("filled_price", level.price)
+
+                            if filled_size > 0:
+                                strategy.on_fill(side="DOWN", price=filled_price, size=int(filled_size))
+                                self._trade_count += 1
+
+                                await self._log_trade({
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "market_slug": market.slug,
+                                    "side": "DOWN",
+                                    "price": filled_price,
+                                    "size": filled_size,
+                                    "mode": "grid_maker",
+                                    "phase": strategy.state.phase.value,
+                                })
+
+                                logger.info(
+                                    f"[GRID] Fill: DOWN {filled_size} @ ${filled_price:.3f} | "
+                                    f"ask=${down_ask:.3f} crossed level=${level.price:.2f}"
+                                )
+
+        # =================================================================
+        # POST NEW ORDERS: Place pending grid levels
+        # Limit orders posted per cycle to avoid overloading API
+        # =================================================================
+        MAX_ORDERS_PER_CYCLE = 10  # Avoid posting 90+ orders at once
+
+        if orders:
+            phase = strategy.state.phase.value
+            orders_to_post = orders[:MAX_ORDERS_PER_CYCLE]
+
+            if len(orders) > MAX_ORDERS_PER_CYCLE:
+                logger.info(
+                    f"[GRID] Posting {len(orders_to_post)}/{len(orders)} grid orders | "
+                    f"phase={phase} | time_into={time_into_market:.0f}s"
+                )
+            else:
+                logger.info(
+                    f"[GRID] Posting {len(orders_to_post)} grid orders | "
+                    f"phase={phase} | time_into={time_into_market:.0f}s"
+                )
+
+            for order in orders_to_post:
+                side = order["side"]
+                price = order["price"]
+                size = order["size"]
+
+                # Mark as posted in strategy (order is now "live")
+                # In paper mode this simulates the order being on the book
+                # In live mode we would actually call the CLOB API here
+                strategy.on_order_posted(
+                    side=side,
+                    price=price,
+                    order_id=f"grid_{side}_{price:.2f}_{current_time}"
+                )
+
+                logger.debug(f"[GRID] Posted: {side} {size} @ ${price:.2f}")
+
+            self._send_web_update()
+
+        # Log periodic status
+        if self._opportunities_checked % 30 == 0:
+            status = strategy.get_status()
+            logger.info(
+                f"[GRID] Status | phase={status['phase']} | "
+                f"UP={status['up_shares']:.0f} DOWN={status['down_shares']:.0f} | "
+                f"imbalance={status['imbalance']:+.0f} ({status['imbalance_pct']:+.1f}%) | "
+                f"pair_cost=${status['pair_cost']:.4f} | trades={status['total_trades']}"
+            )
+
     async def _setup_user_websocket(self) -> bool:
         """
         Set up user WebSocket for instant fill notifications.
@@ -4634,6 +4999,9 @@ class PaperTradingBot:
         old_market_slug = market.slug
         logger.info(f"[{self.strategy_name}] Rotating from {market.slug}")
 
+        # Clear emergency stop flag for this market (we're done with it)
+        self._emergency_triggered_markets.discard(old_market_slug)
+
         # Teardown event-driven quote pulling for old market
         self._teardown_event_driven_pull()
 
@@ -4848,6 +5216,10 @@ class PaperTradingBot:
                     if self._spread_capture_strategy:
                         self._spread_capture_strategy.reset()
                         logger.info(f"[SPREADCAP] Strategy reset for new market {new_slug}")
+                    # Reset grid maker strategy for new market
+                    if self._grid_maker_strategy:
+                        self._grid_maker_strategy.reset(market_slug=new_slug)
+                        logger.info(f"[GRID] Strategy reset for new market {new_slug}")
                     # CRITICAL: Subscribe WebSocket to new market immediately
                     # (Don't wait for next trading cycle - that causes 2-5s latency gap)
                     if self._orderbook_manager and new_market:
@@ -4984,8 +5356,8 @@ class PaperTradingBot:
         realized = self._engine.get_realized_pnl() if self._engine else 0
 
         # Determine mode label
-        if self.accum_mode == "volume_weighted":
-            mode = "Volume Weighted"
+        if self.accum_mode == "grid_maker":
+            mode = "Grid Maker"
         elif self.accum_mode == "calculus_maker":
             mode = "Calculus Maker"
         elif self.accum_mode == "fair_value_mm":
@@ -5299,9 +5671,9 @@ async def main():
     parser.add_argument(
         '--accum-mode',
         type=str,
-        choices=['standard', 'volume_weighted', 'calculus_maker', 'spread_capture'],
+        choices=['standard', 'grid_maker', 'calculus_maker', 'spread_capture'],
         default='standard',
-        help='Accumulation strategy mode: standard, volume_weighted (Gabagool-style), calculus_maker (exponential decay), or spread_capture (velocity based)',
+        help='Accumulation strategy mode: standard, grid_maker (Gabagool-style), calculus_maker (exponential decay), or spread_capture (velocity based)',
     )
 
     parser.add_argument(
