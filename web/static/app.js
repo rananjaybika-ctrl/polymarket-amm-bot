@@ -552,7 +552,7 @@ function getGridMakerConfig() {
         start_datetime: document.getElementById('grid-maker-start').value,
         end_datetime: document.getElementById('grid-maker-end').value,
         starting_balance: parseFloat(document.getElementById('grid-maker-balance-input').value),
-        accum_target_shares: parseInt(document.getElementById('grid-maker-target').value),
+        grid_max_position: parseInt(document.getElementById('grid-maker-max-position').value),
         // Grid maker-specific parameters
         vw_imbalance_pct: parseFloat(document.getElementById('grid-maker-imbalance').value),
         vw_cheap_threshold: parseFloat(document.getElementById('grid-maker-cheap').value),
@@ -565,7 +565,7 @@ function getGridMakerConfig() {
         max_share_price: 0.98,
         accum_buy_both_sides: true,
         accum_max_imbalance_pct: 0.15,  // 15% (gabagool-style)
-        hard_max_imbalance: parseInt(document.getElementById('grid-maker-hard-max').value) || 300
+        grid_max_imbalance: parseInt(document.getElementById('grid-maker-hard-max').value) || 15
     };
 }
 
