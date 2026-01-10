@@ -420,7 +420,7 @@ class PaperTradingBot:
 
     def __init__(
         self,
-        initial_balance: float = 100.0,
+        initial_balance: float = 170.0,
         csv_path: str = "paper_trades.csv",
         discord_interval_minutes: float = 30.0,
         max_retries: int = 5,
@@ -5625,8 +5625,8 @@ async def main():
     parser.add_argument(
         '--balance', '-b',
         type=float,
-        default=100.0,
-        help='Initial paper balance (default: $100)',
+        default=170.0,
+        help='Initial paper balance (default: $170)',
     )
     parser.add_argument(
         '--csv', '-c',
