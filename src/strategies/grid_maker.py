@@ -460,26 +460,30 @@ class GridMakerStrategy:
     # FILL HANDLING
     # =========================================================================
 
-    def on_fill(self, side: str, price: float, size: int) -> None:
+    def on_fill(self, side: str, price: float, size: int, level_price: float = None) -> None:
         """
         Process a fill event.
 
         Args:
             side: "UP" or "DOWN"
-            price: Fill price
+            price: Actual fill price (may differ from level due to price improvement)
             size: Fill size
+            level_price: Original grid level price (for matching). If None, uses price.
         """
         s = self.state
         side_upper = side.upper()
 
+        # Use level_price for matching grid levels, price for cost tracking
+        match_price = level_price if level_price is not None else price
+
         if side_upper == "UP":
             s.up_shares += size
-            s.up_cost += price * size
+            s.up_cost += price * size  # Use actual fill price for cost
             s.total_up_fills += size
 
-            # Update level status
+            # Update level status - match by level_price, not fill price
             for level in s.up_levels:
-                if abs(level.price - price) < 0.001:
+                if abs(level.price - match_price) < 0.001:
                     level.filled_size += size
                     if level.filled_size >= level.size:
                         level.status = "filled"
@@ -488,11 +492,11 @@ class GridMakerStrategy:
                     break
         else:
             s.down_shares += size
-            s.down_cost += price * size
+            s.down_cost += price * size  # Use actual fill price for cost
             s.total_down_fills += size
 
             for level in s.down_levels:
-                if abs(level.price - price) < 0.001:
+                if abs(level.price - match_price) < 0.001:
                     level.filled_size += size
                     if level.filled_size >= level.size:
                         level.status = "filled"

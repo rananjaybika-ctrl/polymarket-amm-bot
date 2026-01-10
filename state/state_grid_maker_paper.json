@@ -1,13 +1,13 @@
 {
   "strategy_name": "grid_maker",
   "trading_mode": "paper",
-  "balance": 270.05803646236245,
+  "balance": -268.43815177812235,
   "initial_balance": 500.0,
   "realized_pnl": 0.0,
   "session_start": "2025-12-26T10:20:03.544414+00:00",
-  "last_save": "2025-12-29T04:30:03.940541+00:00",
-  "trade_count": 470,
-  "current_market_slug": "btc-updown-15m-1766981700",
+  "last_save": "2026-01-10T12:06:46.658096+00:00",
+  "trade_count": 108,
+  "current_market_slug": "btc-updown-15m-1768046400",
   "positions": {
     "btc-updown-15m-1766745000": {
       "market_slug": "btc-updown-15m-1766745000",
@@ -1009,6 +1009,28 @@
       "pair_cost": 0.9199980866711883,
       "locked_profit": 2.4000573998643504,
       "last_updated": "2025-12-29T04:16:52.847189+00:00"
+    },
+    "btc-updown-15m-1768045500": {
+      "market_slug": "btc-updown-15m-1768045500",
+      "up_shares": 103.0,
+      "up_avg_price": 0.49805443718114856,
+      "down_shares": 0.0,
+      "down_avg_price": 0.0,
+      "hedged_pairs": 0.0,
+      "pair_cost": 0,
+      "locked_profit": 0.0,
+      "last_updated": "2026-01-10T11:46:56.020791+00:00"
+    },
+    "btc-updown-15m-1768046400": {
+      "market_slug": "btc-updown-15m-1768046400",
+      "up_shares": 294.0,
+      "up_avg_price": 0.6268729234859015,
+      "down_shares": 682.0,
+      "down_avg_price": 0.26999635230684366,
+      "hedged_pairs": 294.0,
+      "pair_cost": 0.8968692757927452,
+      "locked_profit": 32.957228587763574,
+      "last_updated": "2026-01-10T12:06:46.658031+00:00"
     }
   },
   "recent_trades": [],

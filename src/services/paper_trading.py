@@ -75,6 +75,11 @@ class SimulationConfig:
     competition_factor: float = 0.25  # 25% chance of being sniped by competition
     min_fill_delay_ms: float = 500.0  # 500ms minimum before fill (queue simulation)
 
+    # Fill price improvement when market crosses our limit (ask < limit)
+    # When market offers better than our limit, fill between ask and limit
+    market_cross_improvement_min: float = 0.70  # Min 70% of potential improvement
+    market_cross_improvement_max: float = 0.95  # Max 95% of potential improvement
+
     def __post_init__(self):
         if self.random_seed is not None:
             random.seed(self.random_seed)
@@ -356,34 +361,57 @@ class PaperTradingEngine:
             )
             return int(requested_size * fill_pct)
 
-    def _simulate_price(self, base_price: float, is_buy: bool) -> float:
+    def _simulate_price(
+        self,
+        limit_price: float,
+        is_buy: bool,
+        best_ask: Optional[float] = None,
+    ) -> float:
         """
-        Simulate execution price for LIMIT orders.
+        Simulate execution price for LIMIT orders with market awareness.
 
-        For limit orders, fills happen at the limit price or BETTER:
-        - Buy limit: fills at limit or LOWER (price improvement only)
-        - Sell limit: fills at limit or HIGHER (price improvement only)
+        When best_ask < limit_price (market crossed our limit):
+        - Fill at a price BETWEEN best_ask and limit_price
+        - Weighted toward best_ask (you typically get close to market price)
+        - This simulates realistic fills where you get the market price, not your limit
 
-        Negative slippage (worse price) is NOT possible for limit orders.
+        When best_ask >= limit_price (we're at or better than market):
+        - Fill at limit price with optional small improvement (existing logic)
 
         Args:
-            base_price: Limit order price
+            limit_price: Limit order price
             is_buy: Whether this is a buy order
+            best_ask: Current best ask price (for realistic fill calculation)
 
         Returns:
             Simulated execution price (always at limit or better)
         """
-        # Limit orders fill at limit price or better - never worse
-        # Check for price improvement (random chance to get better price)
+        # REALISTIC FILL: If market crossed our limit (ask < limit), fill between ask and limit
+        # This is the key improvement - when market offers better than our limit,
+        # we should fill closer to the market price, not at our limit
+        if is_buy and best_ask is not None and best_ask < limit_price:
+            # Market is offering better than our limit
+            # Fill somewhere between best_ask and limit_price
+            # Weighted toward best_ask (70-95% of potential improvement)
+            improvement_factor = random.uniform(
+                self.config.market_cross_improvement_min,
+                self.config.market_cross_improvement_max,
+            )
+            fill_price = limit_price - (limit_price - best_ask) * improvement_factor
+            # Never fill better than best_ask (can't do better than market)
+            return max(best_ask, fill_price)
+
+        # Standard logic: order at or above market
+        # Check for small random price improvement (5% chance)
         if random.random() < self.config.price_improvement_chance:
             improvement = random.uniform(0, self.config.slippage_bps) / 10000
             if is_buy:
-                return base_price * (1 - improvement)  # Lower = better for buy
+                return limit_price * (1 - improvement)  # Lower = better for buy
             else:
-                return base_price * (1 + improvement)  # Higher = better for sell
+                return limit_price * (1 + improvement)  # Higher = better for sell
 
         # No improvement - fill at exactly the limit price
-        return base_price
+        return limit_price
 
     async def execute_paper_trade(
         self,
@@ -439,7 +467,7 @@ class PaperTradingEngine:
         # Simulate Up order
         up_fill_type = self._simulate_fill()
         up_filled_size = self._simulate_fill_size(size, up_fill_type)
-        up_price = self._simulate_price(opportunity.up_ask, is_buy=True)
+        up_price = self._simulate_price(opportunity.up_ask, is_buy=True, best_ask=opportunity.up_ask)
 
         up_order = OrderInfo(
             token_id=market.up_token_id,
@@ -454,7 +482,7 @@ class PaperTradingEngine:
         # Simulate Down order
         down_fill_type = self._simulate_fill()
         down_filled_size = self._simulate_fill_size(size, down_fill_type)
-        down_price = self._simulate_price(opportunity.down_ask, is_buy=True)
+        down_price = self._simulate_price(opportunity.down_ask, is_buy=True, best_ask=opportunity.down_ask)
 
         down_order = OrderInfo(
             token_id=market.down_token_id,
@@ -706,7 +734,8 @@ class PaperTradingEngine:
             fill_type = self._simulate_fill()
 
         filled_size = self._simulate_fill_size(size, fill_type)
-        filled_price = self._simulate_price(price, is_buy=True) if filled_size > 0 else 0.0
+        # Pass best_ask for realistic fill price when market crosses our limit
+        filled_price = self._simulate_price(price, is_buy=True, best_ask=best_ask) if filled_size > 0 else 0.0
         cost = filled_size * filled_price
 
         # Update balance
@@ -1079,7 +1108,9 @@ class PaperTradingEngine:
                 # FILL!
                 fill_type = FillType.PARTIAL if random.random() < self.config.partial_fill_rate else FillType.FULL
                 filled_size = self._simulate_fill_size(pending["size"], fill_type)
-                filled_price = self._simulate_price(pending["price"], is_buy=True)
+                # Use current best_ask for realistic fill price (price may have moved since order placed)
+                current_best_ask = current_prices.get(pending["side"], best_ask) if current_prices else best_ask
+                filled_price = self._simulate_price(pending["price"], is_buy=True, best_ask=current_best_ask)
                 cost = filled_size * filled_price
 
                 # Update balance

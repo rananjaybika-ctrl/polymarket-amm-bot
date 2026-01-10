@@ -979,6 +979,10 @@ class PaperTradingBot:
         # For grid_maker mode, use much higher hard_max_imbalance (Gabagool tolerates 300+)
         # Standard mode keeps the tight limit of 10 for safety
         default_hard_max = 300 if accum_mode == "grid_maker" else 10
+        max_imbalance = float(config.get("hard_max_imbalance", default_hard_max))
+
+        # Grid parameters - Gabagool defaults
+        grid_order_size = int(config.get("grid_order_size", 10))
 
         return cls(
             initial_balance=config.get("starting_balance", 100.0),
@@ -999,8 +1003,9 @@ class PaperTradingBot:
             vw_hedge_trigger_pct=config.get("vw_hedge_trigger_pct", 0.15),
             vw_max_hedge_price=config.get("vw_max_hedge_price", 0.85),
             vw_bootstrap_pct=config.get("vw_bootstrap_pct", 0.33),
-            # CRITICAL: Pass hard_max_imbalance to grid_max_imbalance so grid maker respects it
-            grid_max_imbalance=float(config.get("hard_max_imbalance", default_hard_max)),
+            # Grid params - use class defaults (0.10-0.90), pass max_imbalance from config
+            grid_order_size=grid_order_size,
+            grid_max_imbalance=max_imbalance,
             # Output
             csv_path=csv_path,
             live_display=True,
@@ -4591,7 +4596,8 @@ class PaperTradingBot:
                             filled_price = result.get("filled_price", level.price)
 
                             if filled_size > 0:
-                                strategy.on_fill(side="UP", price=filled_price, size=int(filled_size))
+                                # Pass level.price for matching, filled_price for cost tracking
+                                strategy.on_fill(side="UP", price=filled_price, size=int(filled_size), level_price=level.price)
                                 self._trade_count += 1
 
                                 await self._log_trade({
@@ -4628,7 +4634,8 @@ class PaperTradingBot:
                             filled_price = result.get("filled_price", level.price)
 
                             if filled_size > 0:
-                                strategy.on_fill(side="DOWN", price=filled_price, size=int(filled_size))
+                                # Pass level.price for matching, filled_price for cost tracking
+                                strategy.on_fill(side="DOWN", price=filled_price, size=int(filled_size), level_price=level.price)
                                 self._trade_count += 1
 
                                 await self._log_trade({

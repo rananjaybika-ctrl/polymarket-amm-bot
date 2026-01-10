@@ -1,44 +1,4 @@
 {
-  "btc-updown-15m-1767891600": {
-    "strike_price": 90926.84,
-    "source": "accumulation_accum",
-    "timestamp": "2026-01-08T17:10:19.697304+00:00"
-  },
-  "btc-updown-15m-1767892500": {
-    "strike_price": 91114.23,
-    "source": "accumulation_accum",
-    "timestamp": "2026-01-08T17:15:26.734594+00:00"
-  },
-  "btc-updown-15m-1767893400": {
-    "strike_price": 90865.59,
-    "source": "accumulation_accum",
-    "timestamp": "2026-01-08T17:31:40.143061+00:00"
-  },
-  "btc-updown-15m-1767894300": {
-    "strike_price": 91206.0,
-    "source": "accumulation_accum",
-    "timestamp": "2026-01-08T17:45:02.198219+00:00"
-  },
-  "btc-updown-15m-1767895200": {
-    "strike_price": 91366.39,
-    "source": "accumulation_accum",
-    "timestamp": "2026-01-08T18:00:02.487332+00:00"
-  },
-  "btc-updown-15m-1767896100": {
-    "strike_price": 91172.64,
-    "source": "accumulation_accum",
-    "timestamp": "2026-01-08T18:15:02.355925+00:00"
-  },
-  "btc-updown-15m-1767897000": {
-    "strike_price": 91257.36,
-    "source": "accumulation_accum",
-    "timestamp": "2026-01-08T18:30:02.310951+00:00"
-  },
-  "btc-updown-15m-1767897900": {
-    "strike_price": 91010.0,
-    "source": "accumulation_accum",
-    "timestamp": "2026-01-08T18:45:02.205332+00:00"
-  },
   "btc-updown-15m-1767963600": {
     "strike_price": 90449.23,
     "source": "accumulation_accum",
@@ -73,5 +33,15 @@
     "strike_price": 90556.92,
     "source": "accumulation_accum",
     "timestamp": "2026-01-09T14:30:02.382587+00:00"
+  },
+  "btc-updown-15m-1768045500": {
+    "strike_price": 90780.0,
+    "source": "grid_maker_accum",
+    "timestamp": "2026-01-10T11:46:40.413386+00:00"
+  },
+  "btc-updown-15m-1768046400": {
+    "strike_price": 90723.86,
+    "source": "grid_maker_accum",
+    "timestamp": "2026-01-10T12:01:56.074703+00:00"
   }
 }
