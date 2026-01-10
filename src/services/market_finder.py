@@ -818,8 +818,14 @@ class MarketFinder:
         if first_boundary > last_boundary:
             logger.warning(
                 f"Time range too short: {start_utc.isoformat()} to {end_utc.isoformat()}, "
-                f"no 15-minute markets fit"
+                f"no 15-minute markets fit entirely within window"
             )
+            # FALLBACK: Get current active market even if it doesn't fit entirely
+            logger.info("Falling back to current active market via REST API")
+            active_market = await self.get_active_market()
+            if active_market:
+                logger.info(f"Using active market as fallback: {active_market.slug}")
+                return [active_market]
             return []
 
         # Generate slugs for all markets that END within the range
