@@ -446,8 +446,8 @@ class PaperTradingBot:
         grid_max_price: float = 0.85,     # Week 1: avoid extremes
         grid_tick_size: float = 0.01,
         grid_post_delay: float = 5.0,
-        grid_max_position: float = 200.0,  # Week 1: ~50-150 per side
-        grid_max_imbalance: float = 100.0, # Week 1: tight risk control
+        grid_max_position: float = 30.0,   # Conservative: 30 per side
+        grid_max_imbalance: float = 15.0,  # Conservative: 15 max imbalance
         # GABAGOOL-STYLE SETTINGS (reverse-engineered from their Dec 2024 behavior)
         vw_imbalance_pct: float = 0.20,  # Max 20% imbalance (gabagool: 10-20%)
         vw_cheap_threshold: float = 0.45,  # Buy aggressively below this (gabagool loads up < $0.45)

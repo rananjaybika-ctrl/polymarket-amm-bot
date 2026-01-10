@@ -35,8 +35,8 @@ PHASE_PRESETS = {
     1: {
         "name": "Week 1 (Conservative)",
         "order_size": 5,           # Gabagool Week 1: 5-10 shares
-        "max_position": 200,       # Week 1: ~50-150 per side
-        "max_imbalance": 100,      # Week 1: tight risk control
+        "max_position": 30,        # Conservative: 30 per side
+        "max_imbalance": 15,       # Conservative: 15 max imbalance
         "min_price": 0.15,
         "max_price": 0.85,
         "description": "Week 1 Gabagool - 5 shares, tight limits"
