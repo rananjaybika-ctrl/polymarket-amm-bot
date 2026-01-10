@@ -976,6 +976,10 @@ class PaperTradingBot:
         csv_prefix = "live_trades" if trading_mode == "live" else "paper_trades"
         csv_path = f"{csv_prefix}_{accum_mode}.csv"
 
+        # For grid_maker mode, use much higher hard_max_imbalance (Gabagool tolerates 300+)
+        # Standard mode keeps the tight limit of 10 for safety
+        default_hard_max = 300 if accum_mode == "grid_maker" else 10
+
         return cls(
             initial_balance=config.get("starting_balance", 100.0),
             # Accumulation mode params
@@ -984,7 +988,7 @@ class PaperTradingBot:
             accum_trade_size=config.get("accum_trade_size", 1),
             accum_target_shares=config.get("accum_target_shares", 15),
             accum_max_imbalance_pct=config.get("accum_max_imbalance_pct", 0.15),
-            hard_max_imbalance=config.get("hard_max_imbalance", 10),
+            hard_max_imbalance=config.get("hard_max_imbalance", default_hard_max),
             accum_pair_cost_target=config.get("accum_pair_cost_target", 0.995),
             accum_pair_cost_limit=config.get("accum_pair_cost_limit", 1.02),
             accum_buy_both_sides=config.get("accum_buy_both_sides", True),

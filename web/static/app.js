@@ -565,7 +565,7 @@ function getGridMakerConfig() {
         max_share_price: 0.98,
         accum_buy_both_sides: true,
         accum_max_imbalance_pct: 0.15,  // 15% (gabagool-style)
-        hard_max_imbalance: 10
+        hard_max_imbalance: 300  // Grid mode needs high limit (Gabagool tolerates 300+)
     };
 }
 
