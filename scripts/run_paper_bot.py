@@ -445,7 +445,7 @@ class PaperTradingBot:
         grid_min_price: float = 0.15,     # Week 1: avoid extremes
         grid_max_price: float = 0.85,     # Week 1: avoid extremes
         grid_tick_size: float = 0.01,
-        grid_post_delay: float = 5.0,
+        grid_post_delay: float = 0.0,  # No delay - post immediately at market open
         grid_max_position: float = 30.0,   # Conservative: 30 per side
         grid_max_imbalance: float = 15.0,  # Conservative: 15 max imbalance
         # GABAGOOL-STYLE SETTINGS (reverse-engineered from their Dec 2024 behavior)

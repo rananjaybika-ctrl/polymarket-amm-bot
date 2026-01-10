@@ -59,7 +59,7 @@ DEFAULT_MAX_PRICE = 0.95         # Don't post above 95c
 DEFAULT_TICK_SIZE = 0.01         # $0.01 grid spacing
 
 # Timing
-DEFAULT_POST_DELAY = 5.0         # Seconds after market open to post grid
+DEFAULT_POST_DELAY = 0.0         # No delay - post immediately at market open (Gabagool: <1s)
 DEFAULT_REFRESH_INTERVAL = 60.0  # Seconds between grid refreshes
 
 # Risk limits
