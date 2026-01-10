@@ -5799,12 +5799,12 @@ async def main():
     grid_max_price = args.grid_max_price
 
     if args.grid_phase is not None:
-        # Phase presets based on Gabagool scaling analysis
+        # Phase presets - conservative Week 1 Gabagool style
         phase_presets = {
-            1: {"order_size": 10, "max_position": 500, "max_imbalance": 300, "min_price": 0.15, "max_price": 0.85},
-            2: {"order_size": 12, "max_position": 800, "max_imbalance": 500, "min_price": 0.10, "max_price": 0.90},
-            3: {"order_size": 15, "max_position": 1200, "max_imbalance": 700, "min_price": 0.08, "max_price": 0.92},
-            4: {"order_size": 20, "max_position": 2000, "max_imbalance": 1000, "min_price": 0.05, "max_price": 0.95},
+            1: {"order_size": 5, "max_position": 30, "max_imbalance": 15, "min_price": 0.15, "max_price": 0.85},
+            2: {"order_size": 8, "max_position": 50, "max_imbalance": 25, "min_price": 0.12, "max_price": 0.88},
+            3: {"order_size": 12, "max_position": 100, "max_imbalance": 50, "min_price": 0.10, "max_price": 0.90},
+            4: {"order_size": 20, "max_position": 200, "max_imbalance": 100, "min_price": 0.05, "max_price": 0.95},
         }
         preset = phase_presets[args.grid_phase]
         grid_order_size = preset["order_size"]

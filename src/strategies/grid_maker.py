@@ -429,12 +429,33 @@ class GridMakerStrategy:
                     if level.status == "cancelled":
                         level.status = "pending"
 
-            # Collect pending orders
+            # Calculate current exposure: filled + posted (unfilled) orders
+            # This ensures we don't over-post orders that could all fill
+            up_posted = sum(
+                level.size - level.filled_size
+                for level in self.state.up_levels
+                if level.status == "posted"
+            )
+            down_posted = sum(
+                level.size - level.filled_size
+                for level in self.state.down_levels
+                if level.status == "posted"
+            )
+
+            up_exposure = self.state.up_shares + up_posted
+            down_exposure = self.state.down_shares + down_posted
+
+            # Collect pending orders, respecting position limits
             for level in self.state.up_levels:
                 if level.status == "pending":
-                    # Don't post if we'd exceed position limit
-                    if self.state.up_shares + level.size > self.max_position:
+                    # Don't post if filled + posted + this order > max_position
+                    if up_exposure + level.size > self.max_position:
                         continue
+                    # Also check imbalance limit
+                    potential_imbalance = abs((up_exposure + level.size) - down_exposure)
+                    if potential_imbalance > self.max_imbalance:
+                        continue
+                    up_exposure += level.size  # Track for next iteration
                     orders.append({
                         "side": "UP",
                         "price": level.price,
@@ -443,8 +464,12 @@ class GridMakerStrategy:
 
             for level in self.state.down_levels:
                 if level.status == "pending":
-                    if self.state.down_shares + level.size > self.max_position:
+                    if down_exposure + level.size > self.max_position:
                         continue
+                    potential_imbalance = abs(up_exposure - (down_exposure + level.size))
+                    if potential_imbalance > self.max_imbalance:
+                        continue
+                    down_exposure += level.size
                     orders.append({
                         "side": "DOWN",
                         "price": level.price,
