@@ -999,6 +999,8 @@ class PaperTradingBot:
             vw_hedge_trigger_pct=config.get("vw_hedge_trigger_pct", 0.15),
             vw_max_hedge_price=config.get("vw_max_hedge_price", 0.85),
             vw_bootstrap_pct=config.get("vw_bootstrap_pct", 0.33),
+            # CRITICAL: Pass hard_max_imbalance to grid_max_imbalance so grid maker respects it
+            grid_max_imbalance=float(config.get("hard_max_imbalance", default_hard_max)),
             # Output
             csv_path=csv_path,
             live_display=True,
