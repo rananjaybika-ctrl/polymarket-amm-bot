@@ -4331,14 +4331,18 @@ class PaperTradingBot:
             best_bid = up_bid if side == "UP" else down_bid
 
             try:
-                result = await self._engine.execute_single_side_trade(
-                    market=market,
-                    side=side,
-                    price=price,
-                    size=size,
-                    best_ask=best_ask,
-                    use_pending_orders=True,  # Enable for zone-based order pulling
-                )
+                # Build execution kwargs (use_pending_orders only for paper mode)
+                exec_kwargs = {
+                    "market": market,
+                    "side": side,
+                    "price": price,
+                    "size": size,
+                    "best_ask": best_ask,
+                }
+                if self.trading_mode == "paper":
+                    exec_kwargs["use_pending_orders"] = True  # Enable for zone-based order pulling
+
+                result = await self._engine.execute_single_side_trade(**exec_kwargs)
 
                 if result.get("success"):
                     filled_size = result.get("filled_size", 0)
