@@ -84,7 +84,7 @@ class StatePersistence:
     Example:
         persistence = StatePersistence(
             state_dir=Path("./state"),
-            strategy_name="grid_maker",
+            strategy_name="spread_capture",
         )
 
         # Load previous state if exists

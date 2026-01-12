@@ -458,7 +458,12 @@
                                 <input type="number" id="spread-capture-max-loss" value="7" step="1" min="0" title="Stop trading if daily loss exceeds this amount (0 = disabled)">
                             </div>
                             <div class="config-field">
-                                <!-- Placeholder for grid alignment -->
+                                <label>Grid Levels</label>
+                                <input type="number" id="spread-capture-grid-levels" value="3" min="1" max="10" step="1" title="Number of price levels per side for continuous quoting">
+                            </div>
+                            <div class="config-field">
+                                <label>Imbal %</label>
+                                <input type="number" id="spread-capture-imbalance-pct" value="0.10" step="0.01" min="0.05" max="0.50" title="Max inventory imbalance as percentage (10% = 0.10)">
                             </div>
                         </div>
                     </div>
@@ -471,151 +476,6 @@
                     <button class="btn btn-nuke" id="btn-nuke-spread-capture" disabled>NUKE</button>
                 </div>
                 <div id="error-spread-capture" class="card-error hidden"></div>
-            </div>
-
-            <!-- ========== GRID MAKER MODE CARD ========== -->
-            <div class="mode-card" id="card-grid-maker">
-                <div class="card-header">
-                    <h2>GRID MAKER</h2>
-                    <div class="status-badge stopped" id="badge-grid-maker">
-                        <span class="status-dot"></span>
-                        <span class="status-text">Stopped</span>
-                    </div>
-                </div>
-
-                <!-- Live Data Section -->
-                <div class="card-live-data" id="live-grid-maker">
-                    <div class="market-row">
-                        <span class="market-label">Market:</span>
-                        <span class="market-value" id="grid-maker-market">--</span>
-                        <span class="time-remaining" id="grid-maker-time">--:--</span>
-                    </div>
-                    <div class="market-prices-row">
-                        <span class="price up" id="grid-maker-up-price">UP $--</span>
-                        <span class="price down" id="grid-maker-down-price">DOWN $--</span>
-                    </div>
-                    <table class="position-table">
-                        <thead>
-                            <tr>
-                                <th></th>
-                                <th>avg price</th>
-                                <th>qty</th>
-                                <th>cost</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr class="up-row">
-                                <td class="side-label">up</td>
-                                <td class="avg-price up" id="grid-maker-up-avg">--</td>
-                                <td class="qty up" id="grid-maker-up-qty">--</td>
-                                <td class="cost" id="grid-maker-up-cost">--</td>
-                            </tr>
-                            <tr class="down-row">
-                                <td class="side-label">down</td>
-                                <td class="avg-price down" id="grid-maker-down-avg">--</td>
-                                <td class="qty down" id="grid-maker-down-qty">--</td>
-                                <td class="cost" id="grid-maker-down-cost">--</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                    <div class="metrics-row">
-                        <div class="metric pairs">
-                            <span class="value" id="grid-maker-pairs">--</span>
-                            <span class="label">@ <span id="grid-maker-avg-pair-cost">--</span></span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Locked PNL</span>
-                            <span class="value pnl" id="grid-maker-locked-pnl">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Range PNL</span>
-                            <span class="value pnl" id="grid-maker-pnl-range">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Balance</span>
-                            <span class="value" id="grid-maker-balance">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Session P&L</span>
-                            <span class="value pnl" id="grid-maker-realized-pnl">--</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Collapsible Config -->
-                <div class="card-config">
-                    <button type="button" class="config-toggle expanded" id="toggle-grid-maker">
-                        <span class="toggle-icon">&#9660;</span> Config
-                    </button>
-                    <div class="config-content expanded" id="config-grid-maker">
-                        <div class="config-row">
-                            <div class="toggle-group mode-toggle">
-                                <label class="toggle-option">
-                                    <input type="radio" name="grid_maker_mode" value="paper" checked>
-                                    <span>Paper</span>
-                                </label>
-                                <label class="toggle-option live-option">
-                                    <input type="radio" name="grid_maker_mode" value="live">
-                                    <span>LIVE</span>
-                                </label>
-                            </div>
-                        </div>
-                        <div class="config-grid">
-                            <div class="config-field">
-                                <label>Start</label>
-                                <input type="datetime-local" id="grid-maker-start" required>
-                            </div>
-                            <div class="config-field">
-                                <label>End</label>
-                                <input type="datetime-local" id="grid-maker-end" required>
-                            </div>
-                            <div class="config-field">
-                                <label>Balance</label>
-                                <input type="number" id="grid-maker-balance-input" value="170" min="1">
-                            </div>
-                            <div class="config-field">
-                                <label>Max Pos</label>
-                                <input type="number" id="grid-maker-max-position" value="30" min="1" max="500" title="Max position per side (shares)">
-                            </div>
-                            <div class="config-field">
-                                <label>Imbal %</label>
-                                <input type="number" id="grid-maker-imbalance" value="0.20" step="0.01" title="Max imbalance as % of position">
-                            </div>
-                            <div class="config-field">
-                                <label>Cheap $</label>
-                                <input type="number" id="grid-maker-cheap" value="0.45" step="0.01" title="Load up aggressively below this price">
-                            </div>
-                            <div class="config-field">
-                                <label>Hedge %</label>
-                                <input type="number" id="grid-maker-hedge-trigger" value="0.15" step="0.01" title="Start hedging when imbalance > this">
-                            </div>
-                            <div class="config-field">
-                                <label>Max Hedge $</label>
-                                <input type="number" id="grid-maker-max-hedge" value="0.85" step="0.01" title="Never pay more than this for hedge">
-                            </div>
-                            <div class="config-field">
-                                <label>Pair Target</label>
-                                <input type="number" id="grid-maker-pair-target" value="0.98" step="0.01" title="Target pair cost">
-                            </div>
-                            <div class="config-field">
-                                <label>Pair Limit</label>
-                                <input type="number" id="grid-maker-pair-limit" value="1.05" step="0.01" title="Max pair cost for rebalancing">
-                            </div>
-                            <div class="config-field">
-                                <label>Max Imbal</label>
-                                <input type="number" id="grid-maker-hard-max" value="15" min="1" max="100" title="Hard max imbalance in shares (stop trading if exceeded)">
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Action Buttons -->
-                <div class="card-actions">
-                    <button class="btn btn-start" id="btn-start-grid-maker">START</button>
-                    <button class="btn btn-stop" id="btn-stop-grid-maker" disabled>STOP</button>
-                    <button class="btn btn-nuke" id="btn-nuke-grid-maker" disabled>NUKE</button>
-                </div>
-                <div id="error-grid-maker" class="card-error hidden"></div>
             </div>
 
         </div>

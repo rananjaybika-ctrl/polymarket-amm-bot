@@ -31,14 +31,6 @@ const modes = {
         liveData: {},
         timeRemaining: 0,
         countdownInterval: null
-    },
-    'grid-maker': {
-        status: 'stopped',
-        running: false,
-        config: {},
-        liveData: {},
-        timeRemaining: 0,
-        countdownInterval: null
     }
 };
 
@@ -55,7 +47,7 @@ let reconnectTimeout = null;
  * Called before WebSocket connects to ensure clean slate.
  */
 function clearAllPositionDisplays() {
-    ['calculus-maker', 'fair-value-mm', 'spread-capture', 'grid-maker'].forEach(mode => {
+    ['calculus-maker', 'fair-value-mm', 'spread-capture'].forEach(mode => {
         // Position quantities and prices
         setElementText(`${mode}-up-qty`, '--');
         setElementText(`${mode}-down-qty`, '--');
@@ -102,7 +94,7 @@ function init() {
     setDefaultDatetimes();
 
     // Setup config toggles
-    ['calculus-maker', 'fair-value-mm', 'spread-capture', 'grid-maker'].forEach(mode => {
+    ['calculus-maker', 'fair-value-mm', 'spread-capture'].forEach(mode => {
         const toggleBtn = document.getElementById(`toggle-${mode}`);
         const configContent = document.getElementById(`config-${mode}`);
 
@@ -116,7 +108,6 @@ function init() {
     setupModeButtons('calculus-maker');
     setupModeButtons('fair-value-mm');
     setupModeButtons('spread-capture');
-    setupModeButtons('grid-maker');
 
     // Connect WebSocket
     connectWebSocket();
@@ -135,7 +126,7 @@ function setDefaultDatetimes() {
     const startStr = formatDatetimeLocal(start);
     const endStr = formatDatetimeLocal(end);
 
-    ['calculus-maker', 'fair-value-mm', 'spread-capture', 'grid-maker'].forEach(mode => {
+    ['calculus-maker', 'fair-value-mm', 'spread-capture'].forEach(mode => {
         const startEl = document.getElementById(`${mode}-start`);
         const endEl = document.getElementById(`${mode}-end`);
         if (startEl) startEl.value = startStr;
@@ -228,10 +219,9 @@ function routeMessage(data) {
         if (data.calculus_maker) updateModeStatus('calculus-maker', data.calculus_maker);
         if (data.fair_value_mm) updateModeStatus('fair-value-mm', data.fair_value_mm);
         if (data.spread_capture) updateModeStatus('spread-capture', data.spread_capture);
-        if (data.grid_maker) updateModeStatus('grid-maker', data.grid_maker);
     } else if (data.type === 'trading_update') {
         // Route trading update to specific mode's card
-        // Convert underscore to hyphen for frontend mode names (grid_maker -> grid-maker)
+        // Convert underscore to hyphen for frontend mode names (spread_capture -> spread-capture)
         const strategy = (data.strategy || 'calculus-maker').replace('_', '-');
         console.log('[WS] Routing trading_update to:', strategy, 'Position:', data.position);
         updateLiveData(strategy, data);
@@ -246,7 +236,6 @@ async function fetchStatus() {
         if (data.calculus_maker) updateModeStatus('calculus-maker', data.calculus_maker);
         if (data.fair_value_mm) updateModeStatus('fair-value-mm', data.fair_value_mm);
         if (data.spread_capture) updateModeStatus('spread-capture', data.spread_capture);
-        if (data.grid_maker) updateModeStatus('grid-maker', data.grid_maker);
     } catch (error) {
         console.error('Failed to fetch status:', error);
     }
@@ -361,9 +350,6 @@ function formatConfigTooltip(modeName, status) {
         lines.push(`Min Profit: ${config.min_profit || '--'}`);
         lines.push(`Max Price: ${config.max_share_price || '--'}`);
         lines.push(`Hard Max: ${config.emergency_imbalance_threshold || '--'}`);
-    } else if (modeName === 'grid-maker') {
-        lines.push(`Target: ${config.accum_target_shares || '--'}`);
-        lines.push(`Imbal %: ${config.vw_imbalance_pct || '--'}`);
     }
 
     lines.push(`Balance: $${config.starting_balance || '--'}`);
@@ -544,31 +530,6 @@ function stopCountdown(modeName) {
 // CONFIG COLLECTION
 // ============================================
 
-function getGridMakerConfig() {
-    return {
-        mode: document.querySelector('input[name="grid_maker_mode"]:checked').value,
-        accum_mode: 'grid_maker',
-        market: 'btc-15m',
-        start_datetime: document.getElementById('grid-maker-start').value,
-        end_datetime: document.getElementById('grid-maker-end').value,
-        starting_balance: parseFloat(document.getElementById('grid-maker-balance-input').value),
-        grid_max_position: parseInt(document.getElementById('grid-maker-max-position').value),
-        // Grid maker-specific parameters
-        vw_imbalance_pct: parseFloat(document.getElementById('grid-maker-imbalance').value),
-        vw_cheap_threshold: parseFloat(document.getElementById('grid-maker-cheap').value),
-        vw_hedge_trigger_pct: parseFloat(document.getElementById('grid-maker-hedge-trigger').value),
-        vw_max_hedge_price: parseFloat(document.getElementById('grid-maker-max-hedge').value),
-        // Pair cost parameters
-        accum_pair_cost_target: parseFloat(document.getElementById('grid-maker-pair-target').value),
-        accum_pair_cost_limit: parseFloat(document.getElementById('grid-maker-pair-limit').value),
-        // Fixed parameters
-        max_share_price: 0.98,
-        accum_buy_both_sides: true,
-        accum_max_imbalance_pct: 0.15,  // 15% (gabagool-style)
-        grid_max_imbalance: parseInt(document.getElementById('grid-maker-hard-max').value) || 15
-    };
-}
-
 function getCalculusMakerConfig() {
     return {
         mode: document.querySelector('input[name="calculus_maker_mode"]:checked').value,
@@ -621,12 +582,16 @@ function getSpreadCaptureConfig() {
         start_datetime: document.getElementById('spread-capture-start').value,
         end_datetime: document.getElementById('spread-capture-end').value,
         starting_balance: parseFloat(document.getElementById('spread-capture-balance-input').value),
-        entry_size: parseInt(document.getElementById('spread-capture-entry-size').value),
+        // Base size = entry_size for backward compatibility
+        base_size: parseInt(document.getElementById('spread-capture-entry-size').value),
         target_shares: parseInt(document.getElementById('spread-capture-target').value),
         min_profit: parseFloat(document.getElementById('spread-capture-min-profit').value),
         max_share_price: parseFloat(document.getElementById('spread-capture-max-price').value),
         hard_max_imbalance: parseInt(document.getElementById('spread-capture-max-imbalance').value),
-        max_daily_loss: parseFloat(document.getElementById('spread-capture-max-loss').value) || 0
+        max_daily_loss: parseFloat(document.getElementById('spread-capture-max-loss').value) || 0,
+        // NEW: Continuous velocity mode parameters
+        grid_levels: parseInt(document.getElementById('spread-capture-grid-levels').value) || 3,
+        max_imbalance_pct: parseFloat(document.getElementById('spread-capture-imbalance-pct').value) || 0.10
     };
 }
 
@@ -650,9 +615,6 @@ async function handleStart(modeName) {
     } else if (modeName === 'spread-capture') {
         config = getSpreadCaptureConfig();
         endpoint = '/api/start/spread_capture';
-    } else if (modeName === 'grid-maker') {
-        config = getGridMakerConfig();
-        endpoint = '/api/start/accumulation';
     }
 
     // Validation
@@ -711,8 +673,7 @@ async function handleStop(modeName) {
 
         // Map mode name to strategy for API (must match backend strategy keys)
         let strategy = modeName;
-        if (modeName === 'grid-maker') strategy = 'grid_maker';
-        else if (modeName === 'calculus-maker') strategy = 'calculus_maker';
+        if (modeName === 'calculus-maker') strategy = 'calculus_maker';
         else if (modeName === 'fair-value-mm') strategy = 'fair_value_mm';
         else if (modeName === 'spread-capture') strategy = 'spread_capture';
         await fetch(`/api/stop/${strategy}`, { method: 'POST' });
@@ -742,8 +703,7 @@ async function handleNuke(modeName) {
 
         // Map mode name to strategy for API (must match backend strategy keys)
         let strategy = modeName;
-        if (modeName === 'grid-maker') strategy = 'grid_maker';
-        else if (modeName === 'calculus-maker') strategy = 'calculus_maker';
+        if (modeName === 'calculus-maker') strategy = 'calculus_maker';
         else if (modeName === 'fair-value-mm') strategy = 'fair_value_mm';
         else if (modeName === 'spread-capture') strategy = 'spread_capture';
         const res = await fetch(`/api/emergency-stop/${strategy}`, { method: 'POST' });

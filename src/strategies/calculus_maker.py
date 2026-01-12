@@ -846,14 +846,18 @@ class CalculusMakerStrategy:
 
 def compare_with_grid(time_remaining: float, best_bid: float = 0.50) -> dict:
     """
-    Compare Calculus MAKER vs Grid MAKER at a given time.
+    Compare Calculus MAKER vs legacy step-based pricing at a given time.
+
+    Note: Grid MAKER strategy has been removed. This comparison is kept
+    for historical reference to show how exponential decay improves on
+    simple step-function approaches.
 
     Args:
         time_remaining: Seconds until market resolution
         best_bid: Reference bid price for comparison
 
     Returns:
-        Dict comparing both strategies
+        Dict comparing calculus_maker with legacy step-based pricing
     """
     # Calculus MAKER
     calc_threshold = get_mispricing_threshold(time_remaining)
@@ -888,7 +892,7 @@ def compare_with_grid(time_remaining: float, best_bid: float = 0.50) -> dict:
             "size": calc_size,
             "max_pair_cost": round(1.0 - calc_threshold, 4),
         },
-        "grid_maker": {
+        "legacy_step_pricing": {
             "offset": grid_offset,
             "price": round(grid_price, 4),
             "size": grid_size,

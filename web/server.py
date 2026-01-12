@@ -210,7 +210,7 @@ class AccumulationBotConfig(BaseModel):
     max_share_price: float = 0.98  # Never buy above this price (Gabagool buys up to $0.98)
 
     # Accumulation mode parameters
-    accum_mode: str = "standard"  # "standard" or "grid_maker"
+    accum_mode: str = "standard"
     accum_trade_size: int = 1
     accum_target_shares: int = 15
     accum_max_imbalance_pct: float = 0.20  # Max imbalance as % of target (20% = 6 shares)
@@ -218,13 +218,6 @@ class AccumulationBotConfig(BaseModel):
     accum_pair_cost_target: float = 0.995  # Target for normal trading (buy cheap)
     accum_pair_cost_limit: float = 1.02    # Max for rebalancing only
     accum_buy_both_sides: bool = True
-
-    # Grid Maker mode parameters - Gabagool-style (only used when accum_mode="grid_maker")
-    vw_imbalance_pct: float = 0.40       # Max 40% imbalance (gabagool avg: 39.6%)
-    vw_cheap_threshold: float = 0.45     # Load up aggressively below this
-    vw_hedge_trigger_pct: float = 0.30   # Start hedging when imbalance > 30%
-    vw_max_hedge_price: float = 0.70     # Never pay > $0.70 for hedge
-    vw_bootstrap_pct: float = 0.33       # Bootstrap phase: buy both sides until 33% of target
 
 
 class CalculusMakerBotConfig(BaseModel):
@@ -300,8 +293,8 @@ class FairValueMMBotConfig(BaseModel):
 class SpreadCaptureBotConfig(BaseModel):
     """Configuration for Spread Capture strategy from web UI.
 
-    Velocity-based spread capture for sub-$1.00 pair opportunities.
-    Dynamically adjusts entry/hedge offsets based on trend strength.
+    Continuous velocity market maker with two-sided quoting.
+    Dynamically adjusts quote offsets based on BTC velocity.
     """
     mode: str  # "paper" or "live"
     market: str = "btc-15m"
@@ -309,8 +302,13 @@ class SpreadCaptureBotConfig(BaseModel):
     end_datetime: str
     starting_balance: float = 500.0
 
-    # Spread Capture specific parameters
-    entry_size: int = 5                   # Shares per entry order
+    # Continuous Velocity Mode parameters (NEW - replaces sequential mode)
+    base_size: int = 10                   # Base order size per quote level
+    grid_levels: int = 3                  # Number of price levels per side
+    max_imbalance_pct: float = 0.10       # Max inventory imbalance (10%)
+
+    # Spread Capture specific parameters (legacy support)
+    entry_size: int = 5                   # Shares per entry order (alias for base_size)
     target_shares: int = 15               # Total target per market
     min_profit: float = 0.005             # Minimum profit per pair (profit ceiling)
     max_share_price: float = 0.95         # Never buy above this
@@ -376,8 +374,7 @@ class StrategyState:
 strategies = {
     "calculus_maker": StrategyState("calculus_maker"),  # Calculus MAKER (exponential decay + quadratic size)
     "fair_value_mm": StrategyState("fair_value_mm"),    # Fair Value MM (Binance-based pricing)
-    "spread_capture": StrategyState("spread_capture"),  # Spread Capture (velocity based offsets)
-    "grid_maker": StrategyState("grid_maker"),  # Grid Maker (Gabagool-style) mode
+    "spread_capture": StrategyState("spread_capture"),  # Spread Capture (continuous velocity mode)
     # Legacy - keep for backward compat but not shown in UI
     "standard": StrategyState("standard"),
     "accumulation": None,  # Will point to "standard" for backward compat
@@ -475,7 +472,7 @@ async def handle_auto_restart(strategy_name: str):
                 await broadcast_status()
                 strategy.task = asyncio.create_task(run_calculus_bot(calc_config, strategy))
             else:
-                # Accumulation strategies (standard, grid_maker) ONLY
+                # Accumulation strategies (standard) ONLY
                 accum_config = AccumulationBotConfig(**config)
                 strategy.status["running"] = True
                 strategy.status["error"] = None
@@ -601,7 +598,6 @@ async def get_status(username: str = Depends(verify_credentials)):
         "calculus_maker": strategies["calculus_maker"].status,
         "fair_value_mm": strategies["fair_value_mm"].status,
         "spread_capture": strategies["spread_capture"].status,
-        "grid_maker": strategies["grid_maker"].status,
         # Legacy format for backward compatibility
         "standard": strategies["standard"].status,
         "accumulation": strategies["standard"].status,  # Alias to standard
@@ -609,7 +605,6 @@ async def get_status(username: str = Depends(verify_credentials)):
             strategies["calculus_maker"].status["running"] or
             strategies["fair_value_mm"].status["running"] or
             strategies["spread_capture"].status["running"] or
-            strategies["grid_maker"].status["running"] or
             strategies["standard"].status["running"]
         ),
         "kill_switch_active": is_kill_switch_active(),
@@ -921,8 +916,8 @@ async def start_accumulation(config: AccumulationBotConfig, username: str = Depe
     clear_kill_switch()
 
     # Determine which strategy slot to use based on accum_mode
-    strategy_name = config.accum_mode  # "standard" or "grid_maker"
-    if strategy_name not in ["standard", "grid_maker"]:
+    strategy_name = config.accum_mode
+    if strategy_name != "standard":
         strategy_name = "standard"
 
     strategy = strategies[strategy_name]
@@ -1003,13 +998,6 @@ async def start_accumulation(config: AccumulationBotConfig, username: str = Depe
 async def start_standard(config: AccumulationBotConfig, username: str = Depends(verify_credentials)):
     """Start Standard accumulation mode. Requires authentication."""
     config.accum_mode = "standard"
-    return await start_accumulation(config)
-
-
-@app.post("/api/start/grid_maker")
-async def start_grid_maker(config: AccumulationBotConfig, username: str = Depends(verify_credentials)):
-    """Start Grid Maker mode (Gabagool-style). Requires authentication."""
-    config.accum_mode = "grid_maker"
     return await start_accumulation(config)
 
 
@@ -1458,7 +1446,7 @@ async def emergency_stop_strategy(strategy_name: str, username: str = Depends(ve
 
 async def run_accumulation_bot(config: AccumulationBotConfig, strategy: StrategyState):
     """Run the Accumulation trading bot asynchronously with resilience."""
-    accum_mode = config.accum_mode  # "standard" or "grid_maker"
+    accum_mode = config.accum_mode
 
     # Store config for auto-restart
     restart_configs[accum_mode] = config.dict()
@@ -1832,7 +1820,6 @@ async def websocket_endpoint(websocket: WebSocket):
             "calculus_maker": strategies["calculus_maker"].status,
             "fair_value_mm": strategies["fair_value_mm"].status,
             "spread_capture": strategies["spread_capture"].status,
-            "grid_maker": strategies["grid_maker"].status,
             "standard": strategies["standard"].status,
             "accumulation": strategies["standard"].status,  # Legacy alias
         })
@@ -1854,7 +1841,6 @@ async def broadcast_status():
         "calculus_maker": strategies["calculus_maker"].status,
         "fair_value_mm": strategies["fair_value_mm"].status,
         "spread_capture": strategies["spread_capture"].status,
-        "grid_maker": strategies["grid_maker"].status,
         "standard": strategies["standard"].status,
         "accumulation": strategies["standard"].status,  # Legacy alias
     }

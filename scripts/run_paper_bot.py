@@ -65,10 +65,6 @@ from src.strategies.spread_capture import (
     SpreadCaptureStrategy,
     SpreadCapturePhase,
 )
-from src.strategies.grid_maker import (
-    GridMakerStrategy,
-    GridPhase,
-)
 from src.services.trend_detector import TrendDetector, TrendState, TrendDirection
 from src.api.websocket_client import UserWebSocketClient, OrderFill, MarketResolved
 from src.utils.market_detector import MarketTypeDetector
@@ -438,16 +434,8 @@ class PaperTradingBot:
         accum_buy_both_sides: bool = True,  # Try to buy both sides each cycle
         max_position_pct: float = 0.17,  # Max shares per side as % of balance (17% of $100 = 17 shares)
         accum_max_share_price: float = 0.98,  # Never buy shares above this price (Gabagool buys up to $0.98)
-        # GRID MAKER MODE - Gabagool-style two-sided passive market making
-        accum_mode: str = "standard",  # "standard" or "grid_maker"
-        # Grid maker parameters - Week 1 Gabagool (conservative start)
-        grid_order_size: int = 5,         # Week 1: 5-10 shares per level
-        grid_min_price: float = 0.15,     # Week 1: avoid extremes
-        grid_max_price: float = 0.85,     # Week 1: avoid extremes
-        grid_tick_size: float = 0.01,
-        grid_post_delay: float = 0.0,  # No delay - post immediately at market open
-        grid_max_position: float = 30.0,   # Conservative: 30 per side
-        grid_max_imbalance: float = 15.0,  # Conservative: 15 max imbalance
+        # Accumulation mode (legacy - use spread_capture for new deployments)
+        accum_mode: str = "standard",
         # GABAGOOL-STYLE SETTINGS (reverse-engineered from their Dec 2024 behavior)
         vw_imbalance_pct: float = 0.20,  # Max 20% imbalance (gabagool: 10-20%)
         vw_cheap_threshold: float = 0.45,  # Buy aggressively below this (gabagool loads up < $0.45)
@@ -492,6 +480,10 @@ class PaperTradingBot:
         # Session time window (UTC) - only trade markets ending within this window
         session_start_utc: Optional[datetime] = None,
         session_end_utc: Optional[datetime] = None,
+        # NEW: Spread Capture continuous velocity mode parameters
+        spread_base_size: int = 10,           # Base order size per quote level
+        spread_grid_levels: int = 3,          # Number of price levels per side
+        spread_max_imbalance_pct: float = 0.10,  # Max inventory imbalance (10%)
     ):
         self.initial_balance = initial_balance
         self.trading_mode = trading_mode
@@ -532,15 +524,8 @@ class PaperTradingBot:
         self.accum_buy_both_sides = accum_buy_both_sides
         self.accum_max_share_price = accum_max_share_price
 
-        # Grid Maker mode parameters
+        # Accumulation mode
         self.accum_mode = accum_mode
-        self.grid_order_size = grid_order_size
-        self.grid_min_price = grid_min_price
-        self.grid_max_price = grid_max_price
-        self.grid_tick_size = grid_tick_size
-        self.grid_post_delay = grid_post_delay
-        self.grid_max_position = grid_max_position
-        self.grid_max_imbalance = grid_max_imbalance
         self.vw_imbalance_pct = vw_imbalance_pct
         self.vw_cheap_threshold = vw_cheap_threshold
         self.vw_hedge_trigger_pct = vw_hedge_trigger_pct
@@ -562,6 +547,11 @@ class PaperTradingBot:
         self.fv_sensitivity_early = fv_sensitivity_early
         self.fv_sensitivity_late = fv_sensitivity_late
         self.fv_reprice_threshold = fv_reprice_threshold
+
+        # NEW: Spread Capture continuous velocity mode parameters
+        self.spread_base_size = spread_base_size
+        self.spread_grid_levels = spread_grid_levels
+        self.spread_max_imbalance_pct = spread_max_imbalance_pct
 
         # Track order replacements per side for chase count
         self._replacement_count: dict[str, int] = {}  # "market_slug_SIDE" -> count
@@ -642,38 +632,23 @@ class PaperTradingBot:
             )
             logger.info(f"[CALCULUS] Sizing mode: NORMAL (5 early → 15 late)")
 
-        # Spread Capture strategy instance
+        # Spread Capture strategy instance (Continuous Velocity Mode)
         self._spread_capture_strategy: Optional[SpreadCaptureStrategy] = None
         if self.accum_mode == "spread_capture":
             self._spread_capture_strategy = SpreadCaptureStrategy(
-                entry_size=self.calc_min_shares,  # 5 shares
-                target_shares=self.accum_target_shares,  # 15 shares
+                # NEW: Continuous velocity mode params
+                base_size=self.spread_base_size,
+                grid_levels=self.spread_grid_levels,
+                max_imbalance_pct=self.spread_max_imbalance_pct,
+                # Legacy params (for backward compatibility)
+                target_shares=self.accum_target_shares,
+                max_imbalance_shares=self.hard_max_imbalance,
                 min_profit=0.005,
-                emergency_imbalance_threshold=self.hard_max_imbalance,
             )
-            logger.info(f"[SPREADCAP] Strategy initialized: entry_size=5, target={self.accum_target_shares}")
-
-        # Grid Maker strategy instance (Gabagool-style)
-        self._grid_maker_strategy: Optional[GridMakerStrategy] = None
-        if self.accum_mode == "grid_maker":
-            self._grid_maker_strategy = GridMakerStrategy(
-                order_size=self.grid_order_size,
-                min_price=self.grid_min_price,
-                max_price=self.grid_max_price,
-                tick_size=self.grid_tick_size,
-                post_delay=self.grid_post_delay,
-                max_position=self.grid_max_position,
-                max_imbalance=self.grid_max_imbalance,
-            )
-            # Calculate number of grid levels
-            num_levels = int((self.grid_max_price - self.grid_min_price) / self.grid_tick_size) + 1
             logger.info(
-                f"[GRID] Strategy initialized: "
-                f"order_size={self.grid_order_size}, "
-                f"range=${self.grid_min_price:.2f}-${self.grid_max_price:.2f}, "
-                f"~{num_levels} levels, "
-                f"max_pos={self.grid_max_position:.0f}, "
-                f"max_imbal={self.grid_max_imbalance:.0f}"
+                f"[SPREADCAP] Continuous velocity mode initialized: "
+                f"base_size={self.spread_base_size}, grid_levels={self.spread_grid_levels}, "
+                f"max_imbalance={self.spread_max_imbalance_pct*100:.0f}%, target={self.accum_target_shares}"
             )
 
         # Telegram notifications and remote control
@@ -957,7 +932,7 @@ class PaperTradingBot:
         Args:
             config: Dictionary with web UI configuration values
             web_callback: Optional callback for web UI updates
-            strategy_name: Strategy identifier for Discord and web UI (e.g., "standard", "grid_maker")
+            strategy_name: Strategy identifier for Discord and web UI (e.g., "standard")
             session_start_utc: UTC start time - only trade markets ending AFTER this
             session_end_utc: UTC end time - only trade markets ending BEFORE this
 
@@ -966,7 +941,7 @@ class PaperTradingBot:
         """
         # Determine accum_mode from config or strategy_name
         accum_mode = config.get("accum_mode", "standard")
-        if strategy_name in ["standard", "grid_maker"]:
+        if strategy_name == "standard":
             accum_mode = strategy_name
 
         # Get trading mode (paper or live)
@@ -976,14 +951,6 @@ class PaperTradingBot:
         csv_prefix = "live_trades" if trading_mode == "live" else "paper_trades"
         csv_path = f"{csv_prefix}_{accum_mode}.csv"
 
-        # For grid_maker mode, use much higher hard_max_imbalance (Gabagool tolerates 300+)
-        # Standard mode keeps the tight limit of 10 for safety
-        default_hard_max = 300 if accum_mode == "grid_maker" else 10
-        max_imbalance = float(config.get("hard_max_imbalance", default_hard_max))
-
-        # Grid parameters - Gabagool defaults
-        grid_order_size = int(config.get("grid_order_size", 10))
-
         return cls(
             initial_balance=config.get("starting_balance", 100.0),
             # Accumulation mode params
@@ -992,20 +959,10 @@ class PaperTradingBot:
             accum_trade_size=config.get("accum_trade_size", 1),
             accum_target_shares=config.get("accum_target_shares", 15),
             accum_max_imbalance_pct=config.get("accum_max_imbalance_pct", 0.15),
-            hard_max_imbalance=config.get("hard_max_imbalance", default_hard_max),
+            hard_max_imbalance=config.get("hard_max_imbalance", 10),
             accum_pair_cost_target=config.get("accum_pair_cost_target", 0.995),
             accum_pair_cost_limit=config.get("accum_pair_cost_limit", 1.02),
             accum_buy_both_sides=config.get("accum_buy_both_sides", True),
-            # Grid Maker mode params (only used when accum_mode="grid_maker")
-            # Gabagool-style settings
-            vw_imbalance_pct=config.get("vw_imbalance_pct", 0.20),
-            vw_cheap_threshold=config.get("vw_cheap_threshold", 0.45),
-            vw_hedge_trigger_pct=config.get("vw_hedge_trigger_pct", 0.15),
-            vw_max_hedge_price=config.get("vw_max_hedge_price", 0.85),
-            vw_bootstrap_pct=config.get("vw_bootstrap_pct", 0.33),
-            # Grid params - use class defaults (0.10-0.90), pass max_imbalance from config
-            grid_order_size=grid_order_size,
-            grid_max_imbalance=max_imbalance,
             # Output
             csv_path=csv_path,
             live_display=True,
@@ -1159,7 +1116,8 @@ class PaperTradingBot:
     ) -> "PaperTradingBot":
         """Create bot instance from Spread Capture web UI configuration.
 
-        Velocity-based spread capture for sub-$1.00 pair opportunities.
+        Continuous velocity market maker with two-sided quoting.
+        Dynamically adjusts quote offsets based on BTC velocity.
 
         Args:
             config: Dictionary with spread capture configuration values
@@ -1172,11 +1130,20 @@ class PaperTradingBot:
         """
         trading_mode = config.get("mode", "paper")
 
+        # NEW: Continuous velocity mode params (with legacy fallbacks)
+        base_size = config.get("base_size", config.get("entry_size", 10))
+        grid_levels = config.get("grid_levels", 3)
+        max_imbalance_pct = config.get("max_imbalance_pct", 0.10)
+
         return cls(
             initial_balance=config.get("starting_balance", 500.0),
             # Set accum_mode to spread_capture
             accum_mode="spread_capture",
-            # Spread Capture specific parameters
+            # NEW: Continuous velocity mode parameters
+            spread_base_size=base_size,
+            spread_grid_levels=grid_levels,
+            spread_max_imbalance_pct=max_imbalance_pct,
+            # Spread Capture specific parameters (legacy support)
             calc_min_shares=config.get("entry_size", 5),  # Entry size per order
             accum_target_shares=config.get("target_shares", 15),  # Total target
             accum_max_share_price=config.get("max_share_price", 0.95),
@@ -1215,33 +1182,19 @@ class PaperTradingBot:
             self._telegram.on_balance(self._handle_telegram_balance)
 
             # Register graceful stop handlers for ALL strategy types
-            # This ensures whichever TelegramNotifier receives the callback can route it
-            # Each bot only responds to its own strategy button (others are no-ops)
-            async def _noop():
-                pass  # No-op for non-matching strategies
-
-            if self.accum_mode == "grid_maker":
-                mode_label = "Grid Maker (Gabagool-style)"
-                self._telegram.on_graceful_stop_grid_maker(self._handle_telegram_graceful_stop)
-                self._telegram.on_graceful_stop_calculus_maker(_noop)
-            elif self.accum_mode == "calculus_maker":
+            # Each bot only responds to its own strategy button
+            if self.accum_mode == "calculus_maker":
                 mode_label = "Calculus MAKER"
                 self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
-                self._telegram.on_graceful_stop_grid_maker(_noop)
             elif self.accum_mode == "fair_value_mm":
                 mode_label = "Fair Value MM"
-                # Fair Value MM uses calculus_maker button since they're similar
                 self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
-                self._telegram.on_graceful_stop_grid_maker(_noop)
             elif self.accum_mode == "spread_capture":
-                mode_label = "Spread Capture"
-                # Spread Capture uses calculus_maker button since they're similar
+                mode_label = "Spread Capture (Continuous Velocity)"
                 self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
-                self._telegram.on_graceful_stop_grid_maker(_noop)
             else:
-                mode_label = "Unknown Mode"
-                self._telegram.on_graceful_stop_calculus_maker(_noop)
-                self._telegram.on_graceful_stop_grid_maker(_noop)
+                mode_label = "Standard Mode"
+                self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
 
             await self._telegram.start()
             await self._telegram.send_info(
@@ -1945,7 +1898,7 @@ class PaperTradingBot:
             # Determine mode label from strategy_name
             mode_labels = {
                 "calculus_maker": "Calculus Maker",
-                "grid_maker": "Grid Maker",
+                "spread_capture": "Spread Capture",
                 "standard": "Standard",
             }
             mode = mode_labels.get(self.strategy_name, self.strategy_name.replace("_", " ").title())
@@ -2118,9 +2071,7 @@ class PaperTradingBot:
         if self._telegram and self._telegram.enabled:
             try:
                 # Determine mode label
-                if self.accum_mode == "grid_maker":
-                    mode = "Grid Maker"
-                elif self.accum_mode == "calculus_maker":
+                if self.accum_mode == "calculus_maker":
                     mode = "Calculus Maker"
                 elif self.accum_mode == "fair_value_mm":
                     mode = "Fair Value MM"
@@ -2246,9 +2197,7 @@ class PaperTradingBot:
         if self._telegram and self._telegram.enabled:
             try:
                 # Determine mode label
-                if self.accum_mode == "grid_maker":
-                    mode = "Grid Maker"
-                elif self.accum_mode == "calculus_maker":
+                if self.accum_mode == "calculus_maker":
                     mode = "Calculus Maker"
                 elif self.accum_mode == "fair_value_mm":
                     mode = "Fair Value MM"
@@ -2371,25 +2320,22 @@ class PaperTradingBot:
             logger.info(f"Starting paper trading bot for {duration_minutes:.1f} minutes")
         # Log mode info
         logger.info("=" * 50)
-        if self.accum_mode == "grid_maker":
-            mode_label = "GRID MAKER (Gabagool-style)"
-        elif self.accum_mode == "calculus_maker":
+        if self.accum_mode == "calculus_maker":
             mode_label = "CALCULUS MAKER"
         elif self.accum_mode == "fair_value_mm":
             mode_label = "FAIR VALUE MM"
         elif self.accum_mode == "spread_capture":
-            mode_label = "SPREAD CAPTURE"
+            mode_label = "SPREAD CAPTURE (Continuous Velocity)"
         else:
             mode_label = "STANDARD"
         logger.info(f"ACCUMULATION MODE [{mode_label}] - High Frequency Trading")
         logger.info("=" * 50)
         logger.info(f"  - Trade size: {self.accum_trade_size} shares per trade")
         logger.info(f"  - Pair cost limit: ${self.accum_pair_cost_limit}")
-        if self.accum_mode == "grid_maker":
-            logger.info(f"  - Max imbalance: {self.vw_imbalance_pct*100:.0f}% of position (dynamic)")
-            logger.info(f"  - Cheap threshold: ${self.vw_cheap_threshold} (always buy below)")
-            logger.info(f"  - Hedge trigger: {self.vw_hedge_trigger_pct*100:.0f}% imbalance")
-            logger.info(f"  - Max hedge price: ${self.vw_max_hedge_price}")
+        if self.accum_mode == "spread_capture":
+            logger.info(f"  - Base size: {self.spread_base_size} shares per level")
+            logger.info(f"  - Grid levels: {self.spread_grid_levels} per side")
+            logger.info(f"  - Max imbalance: {self.spread_max_imbalance_pct*100:.0f}%")
         else:
             # Calculate actual max imbalance from percentage
             max_imbal = max(int(self.accum_max_imbalance_pct * self.accum_target_shares), 2)
@@ -2565,56 +2511,6 @@ class PaperTradingBot:
 
         return False
 
-    def get_grid_trade_size(self, price: float, remaining_capacity: int) -> int:
-        """
-        Grid-weighted trade size based on remaining capacity.
-
-        Uses percentage of remaining capacity, weighted by price:
-        - Cheaper prices = larger % of remaining capacity per trade
-        - Prevents one side from filling too fast
-        - Works with any target size (15, 50, 100+)
-
-        Thresholds:
-        - Price < $0.20: 25% of remaining (load up when cheap!)
-        - Price $0.20-0.40: 15% of remaining
-        - Price $0.40-0.60: 10% of remaining
-        - Price > $0.60: 5% of remaining (go slow when expensive)
-        """
-        if remaining_capacity <= 0:
-            return 0
-
-        if price < 0.20:
-            pct = 0.25
-        elif price < 0.40:
-            pct = 0.15
-        elif price < 0.60:
-            pct = 0.10
-        else:
-            pct = 0.05
-
-        size = max(1, int(remaining_capacity * pct))
-        return min(size, remaining_capacity)
-
-    def get_grid_max_imbalance(self, current_up: float, current_down: float) -> int:
-        """
-        Calculate max allowed imbalance in grid_maker mode.
-
-        Returns percentage-based imbalance limit instead of absolute.
-
-        Minimum of 10 to allow initial bootstrap trades:
-        - Polymarket $1 minimum order requires ceil(1.00/price) shares
-        - At $0.20 price, that's 5 shares per trade
-        - Need to allow both sides to trade independently during bootstrap
-        - Minimum 10 allows first trades on both sides without blocking
-
-        Once position is established, the 40% rule takes over:
-        - At 50 shares: max imbalance = 20 shares
-        - At 100 shares: max imbalance = 40 shares
-        """
-        max_position = max(current_up, current_down, 1)
-        # Minimum of 5 (one order) - tighter control to prevent large directional exposure
-        return max(5, int(max_position * self.vw_imbalance_pct))
-
     async def _accumulation_trading_cycle(self) -> None:
         """
         High-frequency accumulation trading cycle.
@@ -2749,18 +2645,6 @@ class PaperTradingBot:
             )
             return  # Spread capture handles its own logic
 
-        # ============================================================================
-        # GRID MAKER MODE: Use dedicated cycle method (Gabagool-style)
-        # ============================================================================
-        if self.accum_mode == "grid_maker" and self._grid_maker_strategy:
-            await self._run_grid_maker_cycle(
-                market=market,
-                position=position,
-                current_up=current_up,
-                current_down=current_down,
-            )
-            return  # Grid maker handles its own logic
-
         # Check if we've hit target shares
         if current_up >= self.accum_target_shares and current_down >= self.accum_target_shares:
             # Already at target - just wait for rotation
@@ -2840,10 +2724,7 @@ class PaperTradingBot:
             time_remaining_secs = max(0, (market.end_time - datetime.now(timezone.utc)).total_seconds())
 
         # Calculate max imbalance for emergency determination
-        if self.accum_mode == "grid_maker":
-            max_imbalance_check = self.get_grid_max_imbalance(current_up, current_down)
-        else:
-            max_imbalance_check = max(int(self.accum_max_imbalance_pct * self.accum_target_shares), 2)
+        max_imbalance_check = max(int(self.accum_max_imbalance_pct * self.accum_target_shares), 2)
 
         # Determine if this is an emergency hedge situation
         # Emergency triggers:
@@ -3224,25 +3105,11 @@ class PaperTradingBot:
         if not force_rebalance:
             if self.accum_mode in ("calculus_maker", "fair_value_mm"):
                 # CALCULUS MAKER / FAIR VALUE MM MODE: Already checked via should_buy() above
-                # Just log what we're doing
                 threshold = self._calculus_strategy.get_threshold(time_remaining_secs) if self._calculus_strategy else 0
                 logger.debug(
                     f"[CALC] Trading: threshold={threshold:.1%}, pair_cost=${pair_cost:.4f}, "
                     f"buy_up={buy_up}, buy_down={buy_down}"
                 )
-            elif self.accum_mode == "grid_maker":
-                # TRUE GABAGOOL MODE: Continuous accumulation on BOTH sides
-                # Analysis of gabagool22 (Dec 2024) revealed:
-                # - NO selective buying - they buy at ALL prices ($0.02 to $0.98)
-                # - NO cheap threshold - continuous buying both sides
-                # - Volume weighting handles balance (buy more when cheap)
-                # - Expensive buys on one side offset by cheap buys on other
-                # - Final pair cost always ends under $1.00
-                #
-                # NO pair cost blocking in Grid mode - allows temporary imbalances like Gabagool
-                # Volume weighting naturally keeps final pair cost reasonable
-
-                logger.debug(f"[GRID] Gabagool mode: UP@${up_price:.3f} buy={buy_up}, DOWN@${down_price:.3f} buy={buy_down}")
             else:
                 # STANDARD MODE: Use pair cost threshold
                 if position and position.pair_count > 0:
@@ -3332,18 +3199,9 @@ class PaperTradingBot:
                 ceiling_used = emergency_ceiling if emergency_ceiling else self.accum_max_share_price
                 logger.info(f"⛔ SKIP DOWN: price ${down_price:.3f} > ceiling ${ceiling_used}")
 
-        # GABAGOOL-STYLE VOLUME WEIGHTING: Percentage of remaining capacity, weighted by price
-        # Only applies in grid_maker mode
-        if self.accum_mode == "grid_maker":
-            up_remaining = max(0, int(self.accum_target_shares - current_up))
-            down_remaining = max(0, int(self.accum_target_shares - current_down))
-            up_buy_size = self.get_grid_trade_size(up_price, up_remaining)
-            down_buy_size = self.get_grid_trade_size(down_price, down_remaining)
-            logger.debug(f"[GRID] UP: {up_remaining} remaining → buy {up_buy_size} @ ${up_price:.3f} ({int(up_buy_size/max(1,up_remaining)*100) if up_remaining > 0 else 0}%)")
-            logger.debug(f"[GRID] DOWN: {down_remaining} remaining → buy {down_buy_size} @ ${down_price:.3f} ({int(down_buy_size/max(1,down_remaining)*100) if down_remaining > 0 else 0}%)")
-        else:
-            up_buy_size = buy_size
-            down_buy_size = buy_size
+        # Standard buy size
+        up_buy_size = buy_size
+        down_buy_size = buy_size
 
         # POLYMARKET $1 MINIMUM ORDER VALUE ENFORCEMENT
         # Orders must have value >= $1.00, so round up size if needed
@@ -3403,12 +3261,10 @@ class PaperTradingBot:
             down_buy_size = 0
 
         # IMBALANCE ENFORCEMENT: Applies to ALL modes to prevent one-sided exposure
-        # Grid mode uses more permissive limit via get_grid_max_imbalance (min 10, or 20% of position)
-        # Standard mode uses accum_max_imbalance_pct (default 15%)
+        # Uses accum_max_imbalance_pct (default 15%) to limit position imbalance
         #
         # KEY FIX: When buying BOTH sides, check NET imbalance after both trades
         # This allows balanced pair buying even when each side individually exceeds limit
-        mode_label = "[GRID]" if self.accum_mode == "grid_maker" else ""
 
         # ============================================================================
         # IMBALANCE BLOCKING (FIXED: Block BOTH sides when imbalanced)
@@ -4336,25 +4192,12 @@ class PaperTradingBot:
         current_imbalance = int(abs(current_up - current_down))
         current_time = time.time()
 
-        # Call strategy decide
-        action = strategy.decide(
-            up_bid=up_bid,
-            up_ask=up_ask,
-            down_bid=down_bid,
-            down_ask=down_ask,
-            time_remaining=time_remaining_secs,
-            current_imbalance=current_imbalance,
-            current_time=current_time,
-            velocity_bps=velocity_bps,
-        )
-
-        # Check for pending fills in paper mode
+        # Check for pending fills first (before placing new orders)
         if self.trading_mode == "paper" and hasattr(self._engine, 'check_pending_fills'):
             try:
                 current_prices = {"UP": up_ask, "DOWN": down_ask}
                 fills = await self._engine.check_pending_fills(current_prices=current_prices)
                 for fill in fills:
-                    # Notify strategy of fill
                     fill_side = fill.get("side", "")
                     fill_price = fill.get("price", 0)
                     fill_size = int(fill.get("size", 0))
@@ -4370,337 +4213,113 @@ class PaperTradingBot:
         if self.trading_mode == "live":
             await self._verify_fills_via_rest(strategy)
 
-        # If strategy deferred to emergency, let calculus maker handle it
-        if strategy.state.phase == SpreadCapturePhase.EMERGENCY_DEFERRED:
-            logger.info("[SPREADCAP] Deferred to emergency - calculus maker logic will handle")
-            # Reset deferred state so we can retry next cycle if imbalance resolves
-            return
+        # =========================================================================
+        # CONTINUOUS VELOCITY MODE: Use get_quotes() for two-sided quoting
+        # =========================================================================
+        # This replaces the old sequential decide() → single order approach.
+        # Now we generate quotes for BOTH sides with velocity-adjusted offsets.
+        # =========================================================================
 
-        if action is None:
-            # No action needed (waiting for fill, aborted, or at target)
-            phase = strategy.state.phase.value
-            if self._opportunities_checked % 20 == 0:
-                logger.debug(
-                    f"[SPREADCAP] No action | phase={phase} | vel={velocity_bps:.3f}bps | "
-                    f"pos={current_up:.0f}UP/{current_down:.0f}DOWN"
-                )
-            return
-
-        # Unpack action
-        side, price, size = action
-
-        # Auto-size to meet $1.00 minimum order value on BOTH sides
-        # This prevents imbalance when one side is cheap and needs more shares
-        MIN_ORDER_VALUE = 1.0
-        MAX_SIZE_CAP = 15  # Don't auto-size beyond target (avoids hard stop)
-        other_price = down_ask if side == "UP" else up_ask
-
-        # Calculate min shares needed for each side to meet $1 minimum
-        this_min = int(MIN_ORDER_VALUE / price) + 1 if price > 0 and size * price < MIN_ORDER_VALUE else size
-        other_min = int(MIN_ORDER_VALUE / other_price) + 1 if other_price > 0 else size
-
-        # Use the larger to ensure balanced pairs, but cap at target
-        final_size = max(size, this_min, other_min)
-
-        # If market is too skewed (need more shares than target), skip
-        if final_size > MAX_SIZE_CAP:
-            logger.warning(f"[SPREADCAP] Skip - market too skewed: need {final_size} shares, max {MAX_SIZE_CAP} (UP=${up_ask:.2f}, DOWN=${down_ask:.2f})")
-            return
-
-        if final_size > size:
-            logger.info(f"[SPREADCAP] Auto-sizing {side}: {size} → {final_size} shares (balancing both sides for $1 min)")
-            size = final_size
-
-        # Log the decision
-        phase = strategy.state.phase.value
-        logger.info(
-            f"[SPREADCAP] {phase}: {side} {size} @ ${price:.4f} | "
-            f"vel={velocity_bps:.3f}bps | spread=${1-up_ask-down_ask:.4f}"
-        )
-
-        # Execute the order
-        token_id = market.up_token_id if side == "UP" else market.down_token_id
-        best_ask = up_ask if side == "UP" else down_ask
-        best_bid = up_bid if side == "UP" else down_bid
-
-        try:
-            # Disable pending orders for now - use instant fill simulation
-            # Partial fills add complexity; keep it simple for paper testing
-            result = await self._engine.execute_single_side_trade(
-                market=market,
-                side=side,
-                price=price,
-                size=size,
-                best_ask=best_ask,
-                use_pending_orders=False,  # Disabled: instant fill or reject
-            )
-
-            if result.get("success"):
-                filled_size = result.get("filled_size", 0)
-                filled_price = result.get("filled_price", price)
-                order_id = result.get("order_id", "")
-
-                # Track pending order for REST verification backup
-                if order_id and self.trading_mode == "live":
-                    if filled_size < size:  # Not fully filled yet
-                        self._pending_order_ids[order_id] = {
-                            "side": side,
-                            "size": size,
-                            "price": price,
-                            "strategy": "spread_capture",
-                        }
-                    else:
-                        # Fully filled - mark as confirmed
-                        self._confirmed_fills.add(order_id)
-
-                # Notify strategy of fill (if immediate fill)
-                if filled_size > 0:
-                    strategy.on_fill(side=side, price=filled_price, size=int(filled_size))
-                    self._trade_count += 1
-                    self._send_web_update()
-
-                    # Log the trade
-                    await self._log_trade({
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "market_slug": market.slug,
-                        "side": side,
-                        "price": filled_price,
-                        "size": filled_size,
-                        "mode": "spread_capture",
-                        "velocity_bps": velocity_bps,
-                    })
-            else:
-                logger.warning(
-                    f"[SPREADCAP] Order failed: {side} {size} @ ${price:.4f} - "
-                    f"{result.get('error', 'Unknown error')}"
-                )
-
-        except Exception as e:
-            logger.error(f"[SPREADCAP] Order execution error: {e}")
-
-    # =========================================================================
-    # GRID MAKER CYCLE (Gabagool-style two-sided passive market making)
-    # =========================================================================
-
-    async def _run_grid_maker_cycle(
-        self,
-        market,
-        position,
-        current_up: float,
-        current_down: float,
-    ) -> None:
-        """
-        Dedicated trading cycle for Grid Maker strategy (Gabagool-style).
-
-        Posts grid orders on BOTH sides simultaneously:
-        - UP levels: $0.05 to $0.95 in $0.01 increments
-        - DOWN levels: Complementary prices (1 - UP price)
-
-        Unlike spread_capture's entry→hedge cycle, grid_maker:
-        - Posts ALL grid levels at market open + delay
-        - Lets orders fill passively from market flow
-        - Accumulates imbalances naturally (71.2% win rate on trending side)
-        - NO velocity timing - pure passive maker
-
-        Integration:
-        - Uses self._engine.execute_single_side_trade() for order placement
-        - Tracks fills via engine's position tracking
-        - Works for both paper and live modes
-        """
-        if not self._grid_maker_strategy:
-            logger.warning("[GRID] Strategy not initialized")
-            return
-
-        strategy = self._grid_maker_strategy
-        time_remaining_secs = market.time_remaining()
-        market_duration = 15 * 60  # 15-minute markets
-        time_into_market = market_duration - time_remaining_secs
-
-        # Check for rotation
-        if self._rotator.should_rotate():
-            await self._handle_market_rotation(market)
-            return
-
-        # Get orderbook data
-        opportunity = None
-        current_up_cost = position.up_cost if position else 0.0
-        current_down_cost = position.down_cost if position else 0.0
-
-        for attempt in range(self.max_retries):
-            try:
-                opportunity = await self._analyzer.analyze_asymmetric_opportunity(
-                    market=market,
-                    current_up_size=current_up,
-                    current_down_size=current_down,
-                    current_up_cost=current_up_cost,
-                    current_down_cost=current_down_cost,
-                    pair_cost_threshold=1.00,
-                )
-                break
-            except Exception as e:
-                if attempt < self.max_retries - 1:
-                    await asyncio.sleep(0.5)
-
-        if not opportunity or opportunity.up_ask is None or opportunity.down_ask is None:
-            logger.debug("[GRID] No valid opportunity data")
-            return
-
-        # Extract prices
-        up_ask = opportunity.up_ask
-        down_ask = opportunity.down_ask
-        up_bid = opportunity.up_bid or (up_ask * 0.98)
-        down_bid = opportunity.down_bid or (down_ask * 0.98)
-
-        # Update display prices
-        self._last_up_price = up_ask
-        self._last_down_price = down_ask
-        self._last_spread = 1.0 - up_ask - down_ask
-        self._update_live_display()
-
-        current_time = time.time()
-
-        # Get orders to place from strategy
-        orders = strategy.get_orders_to_place(
-            up_best_bid=up_bid,
-            up_best_ask=up_ask,
-            down_best_bid=down_bid,
-            down_best_ask=down_ask,
-            time_into_market=time_into_market,
+        quotes = strategy.get_quotes(
+            up_bid=up_bid,
+            up_ask=up_ask,
+            down_bid=down_bid,
+            down_ask=down_ask,
+            velocity_bps=velocity_bps,
             time_remaining=time_remaining_secs,
             current_time=current_time,
         )
 
-        # =================================================================
-        # FILL DETECTION: Check if any posted grid levels would fill
-        # For MAKER orders: we fill when someone sells TO us (ask <= our bid)
-        # =================================================================
-        for level in strategy.state.up_levels:
-            if level.status == "posted":
-                # MAKER BUY fills when market ask price <= our posted price
-                # (someone willing to sell at or below what we're paying)
-                if up_ask <= level.price:
-                    fill_size = level.size - level.filled_size
-                    if fill_size > 0:
-                        # Execute through engine for proper position tracking
-                        result = await self._engine.execute_single_side_trade(
-                            market=market,
-                            side="UP",
-                            price=level.price,
-                            size=fill_size,
-                            best_ask=up_ask,
-                            use_pending_orders=False,
-                        )
-
-                        if result.get("success"):
-                            filled_size = result.get("filled_size", 0)
-                            filled_price = result.get("filled_price", level.price)
-
-                            if filled_size > 0:
-                                # Pass level.price for matching, filled_price for cost tracking
-                                strategy.on_fill(side="UP", price=filled_price, size=int(filled_size), level_price=level.price)
-                                self._trade_count += 1
-
-                                await self._log_trade({
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                                    "market_slug": market.slug,
-                                    "side": "UP",
-                                    "price": filled_price,
-                                    "size": filled_size,
-                                    "mode": "grid_maker",
-                                    "phase": strategy.state.phase.value,
-                                })
-
-                                logger.info(
-                                    f"[GRID] Fill: UP {filled_size} @ ${filled_price:.3f} | "
-                                    f"ask=${up_ask:.3f} crossed level=${level.price:.2f}"
-                                )
-
-        for level in strategy.state.down_levels:
-            if level.status == "posted":
-                if down_ask <= level.price:
-                    fill_size = level.size - level.filled_size
-                    if fill_size > 0:
-                        result = await self._engine.execute_single_side_trade(
-                            market=market,
-                            side="DOWN",
-                            price=level.price,
-                            size=fill_size,
-                            best_ask=down_ask,
-                            use_pending_orders=False,
-                        )
-
-                        if result.get("success"):
-                            filled_size = result.get("filled_size", 0)
-                            filled_price = result.get("filled_price", level.price)
-
-                            if filled_size > 0:
-                                # Pass level.price for matching, filled_price for cost tracking
-                                strategy.on_fill(side="DOWN", price=filled_price, size=int(filled_size), level_price=level.price)
-                                self._trade_count += 1
-
-                                await self._log_trade({
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                                    "market_slug": market.slug,
-                                    "side": "DOWN",
-                                    "price": filled_price,
-                                    "size": filled_size,
-                                    "mode": "grid_maker",
-                                    "phase": strategy.state.phase.value,
-                                })
-
-                                logger.info(
-                                    f"[GRID] Fill: DOWN {filled_size} @ ${filled_price:.3f} | "
-                                    f"ask=${down_ask:.3f} crossed level=${level.price:.2f}"
-                                )
-
-        # =================================================================
-        # POST NEW ORDERS: Place pending grid levels
-        # Limit orders posted per cycle to avoid overloading API
-        # =================================================================
-        MAX_ORDERS_PER_CYCLE = 10  # Avoid posting 90+ orders at once
-
-        if orders:
+        if not quotes:
+            # No quotes needed (rate limited, target reached, or market ending)
             phase = strategy.state.phase.value
-            orders_to_post = orders[:MAX_ORDERS_PER_CYCLE]
-
-            if len(orders) > MAX_ORDERS_PER_CYCLE:
-                logger.info(
-                    f"[GRID] Posting {len(orders_to_post)}/{len(orders)} grid orders | "
-                    f"phase={phase} | time_into={time_into_market:.0f}s"
+            if self._opportunities_checked % 20 == 0:
+                logger.debug(
+                    f"[SPREADCAP] No quotes | phase={phase} | vel={velocity_bps:.3f}bps | "
+                    f"pos={current_up:.0f}UP/{current_down:.0f}DOWN"
                 )
-            else:
-                logger.info(
-                    f"[GRID] Posting {len(orders_to_post)} grid orders | "
-                    f"phase={phase} | time_into={time_into_market:.0f}s"
-                )
+            return
 
-            for order in orders_to_post:
-                side = order["side"]
-                price = order["price"]
-                size = order["size"]
+        # Log quote generation summary
+        up_quotes = [q for q in quotes if q["side"] == "UP"]
+        down_quotes = [q for q in quotes if q["side"] == "DOWN"]
+        phase = strategy.state.phase.value
+        logger.info(
+            f"[SPREADCAP] {phase}: {len(up_quotes)} UP quotes, {len(down_quotes)} DOWN quotes | "
+            f"vel={velocity_bps:.3f}bps | spread=${1-up_ask-down_ask:.4f}"
+        )
 
-                # Mark as posted in strategy (order is now "live")
-                # In paper mode this simulates the order being on the book
-                # In live mode we would actually call the CLOB API here
-                strategy.on_order_posted(
+        # Execute all quotes
+        for quote in quotes:
+            side = quote["side"]
+            price = quote["price"]
+            size = quote["size"]
+
+            # Auto-size to meet $1.00 minimum order value
+            MIN_ORDER_VALUE = 1.0
+            if price > 0 and size * price < MIN_ORDER_VALUE:
+                new_size = int(MIN_ORDER_VALUE / price) + 1
+                if new_size > size:
+                    logger.debug(f"[SPREADCAP] Auto-sizing {side}: {size} → {new_size} (min $1)")
+                    size = new_size
+
+            best_ask = up_ask if side == "UP" else down_ask
+            best_bid = up_bid if side == "UP" else down_bid
+
+            try:
+                result = await self._engine.execute_single_side_trade(
+                    market=market,
                     side=side,
                     price=price,
-                    order_id=f"grid_{side}_{price:.2f}_{current_time}"
+                    size=size,
+                    best_ask=best_ask,
+                    use_pending_orders=False,
                 )
 
-                logger.debug(f"[GRID] Posted: {side} {size} @ ${price:.2f}")
+                if result.get("success"):
+                    filled_size = result.get("filled_size", 0)
+                    filled_price = result.get("filled_price", price)
+                    order_id = result.get("order_id", "")
 
-            self._send_web_update()
+                    # Track pending order for REST verification backup
+                    if order_id and self.trading_mode == "live":
+                        if filled_size < size:
+                            self._pending_order_ids[order_id] = {
+                                "side": side,
+                                "size": size,
+                                "price": price,
+                                "strategy": "spread_capture",
+                            }
+                        else:
+                            self._confirmed_fills.add(order_id)
 
-        # Log periodic status
-        if self._opportunities_checked % 30 == 0:
-            status = strategy.get_status()
-            logger.info(
-                f"[GRID] Status | phase={status['phase']} | "
-                f"UP={status['up_shares']:.0f} DOWN={status['down_shares']:.0f} | "
-                f"imbalance={status['imbalance']:+.0f} ({status['imbalance_pct']:+.1f}%) | "
-                f"pair_cost=${status['pair_cost']:.4f} | trades={status['total_trades']}"
-            )
+                    # Notify strategy of fill
+                    if filled_size > 0:
+                        strategy.on_fill(side=side, price=filled_price, size=int(filled_size))
+                        self._trade_count += 1
+                        self._send_web_update()
+
+                        await self._log_trade({
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "market_slug": market.slug,
+                            "side": side,
+                            "price": filled_price,
+                            "size": filled_size,
+                            "mode": "spread_capture",
+                            "velocity_bps": velocity_bps,
+                        })
+
+                        logger.info(
+                            f"[SPREADCAP] Filled: {side} {filled_size} @ ${filled_price:.4f}"
+                        )
+                else:
+                    logger.debug(
+                        f"[SPREADCAP] Quote not filled: {side} {size} @ ${price:.4f} - "
+                        f"{result.get('error', 'Price moved')}"
+                    )
+
+            except Exception as e:
+                logger.error(f"[SPREADCAP] Order execution error: {e}")
 
     async def _setup_user_websocket(self) -> bool:
         """
@@ -5253,10 +4872,6 @@ class PaperTradingBot:
                     if self._spread_capture_strategy:
                         self._spread_capture_strategy.reset()
                         logger.info(f"[SPREADCAP] Strategy reset for new market {new_slug}")
-                    # Reset grid maker strategy for new market
-                    if self._grid_maker_strategy:
-                        self._grid_maker_strategy.reset(market_slug=new_slug)
-                        logger.info(f"[GRID] Strategy reset for new market {new_slug}")
                     # CRITICAL: Subscribe WebSocket to new market immediately
                     # (Don't wait for next trading cycle - that causes 2-5s latency gap)
                     if self._orderbook_manager and new_market:
@@ -5393,9 +5008,7 @@ class PaperTradingBot:
         realized = self._engine.get_realized_pnl() if self._engine else 0
 
         # Determine mode label
-        if self.accum_mode == "grid_maker":
-            mode = "Grid Maker"
-        elif self.accum_mode == "calculus_maker":
+        if self.accum_mode == "calculus_maker":
             mode = "Calculus Maker"
         elif self.accum_mode == "fair_value_mm":
             mode = "Fair Value MM"
@@ -5708,67 +5321,9 @@ async def main():
     parser.add_argument(
         '--accum-mode',
         type=str,
-        choices=['standard', 'grid_maker', 'calculus_maker', 'spread_capture'],
+        choices=['standard', 'calculus_maker', 'spread_capture'],
         default='standard',
-        help='Accumulation strategy mode: standard, grid_maker (Gabagool-style), calculus_maker (exponential decay), or spread_capture (velocity based)',
-    )
-
-    # ==========================================================================
-    # GRID MAKER PARAMETERS (used when --accum-mode grid_maker)
-    # Scaling phases based on Gabagool analysis:
-    #   Phase 1 (test):     10 shares, 500 max pos, 300 max imbal
-    #   Phase 2 (validate): 12 shares, 800 max pos, 500 max imbal
-    #   Phase 3 (scale):    15 shares, 1200 max pos, 700 max imbal
-    #   Phase 4 (full):     20 shares, 2000 max pos, 1000 max imbal
-    # ==========================================================================
-    parser.add_argument(
-        '--grid-phase',
-        type=int,
-        choices=[1, 2, 3, 4],
-        default=None,
-        help='Grid scaling phase (1=test, 2=validate, 3=scale, 4=full). Overrides individual grid params.',
-    )
-    parser.add_argument(
-        '--grid-order-size',
-        type=int,
-        default=10,
-        help='Shares per grid level (default: 10, Gabagool uses ~24)',
-    )
-    parser.add_argument(
-        '--grid-min-price',
-        type=float,
-        default=0.10,
-        help='Minimum grid price (default: 0.10)',
-    )
-    parser.add_argument(
-        '--grid-max-price',
-        type=float,
-        default=0.90,
-        help='Maximum grid price (default: 0.90)',
-    )
-    parser.add_argument(
-        '--grid-tick-size',
-        type=float,
-        default=0.01,
-        help='Grid price spacing (default: 0.01)',
-    )
-    parser.add_argument(
-        '--grid-post-delay',
-        type=float,
-        default=5.0,
-        help='Seconds to wait after market open before posting grid (default: 5.0)',
-    )
-    parser.add_argument(
-        '--grid-max-position',
-        type=float,
-        default=500.0,
-        help='Max shares per side (default: 500, Gabagool uses 2000)',
-    )
-    parser.add_argument(
-        '--grid-max-imbalance',
-        type=float,
-        default=300.0,
-        help='Max imbalance before pausing (default: 300, Gabagool uses 1000)',
+        help='Accumulation strategy mode: standard, calculus_maker (exponential decay), or spread_capture (continuous velocity MM)',
     )
 
     parser.add_argument(
@@ -5791,29 +5346,6 @@ async def main():
         # But keep our bot logger at INFO for trade notifications
         logger.setLevel(logging.INFO)
 
-    # Apply grid phase presets if specified
-    grid_order_size = args.grid_order_size
-    grid_max_position = args.grid_max_position
-    grid_max_imbalance = args.grid_max_imbalance
-    grid_min_price = args.grid_min_price
-    grid_max_price = args.grid_max_price
-
-    if args.grid_phase is not None:
-        # Phase presets - conservative Week 1 Gabagool style
-        phase_presets = {
-            1: {"order_size": 5, "max_position": 30, "max_imbalance": 15, "min_price": 0.15, "max_price": 0.85},
-            2: {"order_size": 8, "max_position": 50, "max_imbalance": 25, "min_price": 0.12, "max_price": 0.88},
-            3: {"order_size": 12, "max_position": 100, "max_imbalance": 50, "min_price": 0.10, "max_price": 0.90},
-            4: {"order_size": 20, "max_position": 200, "max_imbalance": 100, "min_price": 0.05, "max_price": 0.95},
-        }
-        preset = phase_presets[args.grid_phase]
-        grid_order_size = preset["order_size"]
-        grid_max_position = preset["max_position"]
-        grid_max_imbalance = preset["max_imbalance"]
-        grid_min_price = preset["min_price"]
-        grid_max_price = preset["max_price"]
-        logger.info(f"[GRID] Using Phase {args.grid_phase} preset: {preset}")
-
     # Create bot
     bot = PaperTradingBot(
         initial_balance=args.balance,
@@ -5829,14 +5361,6 @@ async def main():
         accum_max_share_price=args.accum_max_share_price,
         accum_mode=args.accum_mode,
         max_position_pct=args.max_position_pct,
-        # Grid maker parameters
-        grid_order_size=grid_order_size,
-        grid_min_price=grid_min_price,
-        grid_max_price=grid_max_price,
-        grid_tick_size=args.grid_tick_size,
-        grid_post_delay=args.grid_post_delay,
-        grid_max_position=grid_max_position,
-        grid_max_imbalance=grid_max_imbalance,
         # Quiet mode
         quiet_mode=args.quiet,
         # Trading mode (paper or live)
