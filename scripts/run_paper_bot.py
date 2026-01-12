@@ -4492,10 +4492,10 @@ class PaperTradingBot:
                             f"[SPREADCAP] Filled: {side} {filled_size} @ ${filled_price:.4f}"
                         )
 
-                        # CRITICAL: Sync position after fill to verify actual state
+                        # CRITICAL: Sync position after fill to verify actual state (force=True bypasses rate limit)
                         if self.trading_mode == "live" and hasattr(self._engine, 'sync_position'):
                             try:
-                                await self._engine.sync_position(market)
+                                await self._engine.sync_position(market, force=True)
                             except Exception as sync_err:
                                 logger.debug(f"[SPREADCAP] Post-fill sync failed: {sync_err}")
                 else:

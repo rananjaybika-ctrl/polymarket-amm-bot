@@ -8,6 +8,7 @@ for drop-in replacement.
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Callable
@@ -169,6 +170,10 @@ class LiveTradingEngine:
 
         # WebSocket client for event-driven fill detection (~100ms vs 2s polling)
         self._user_ws: Optional[UserWebSocketClient] = None
+
+        # Rate limiting for position sync (avoid exceeding /positions 15 req/s limit)
+        self._last_position_sync: float = 0.0
+        self._position_sync_cooldown: float = 1.0  # Minimum 1 second between REST syncs
 
         order_type_str = "FOK (Fill-Or-Kill)" if use_fok else "GTC (Good-Til-Cancelled)"
         logger.info(f"LiveTradingEngine initialized: balance=${starting_balance:.2f}, order_type={order_type_str}")
@@ -1275,12 +1280,28 @@ class LiveTradingEngine:
 
         return pnl
 
-    async def sync_position(self, market: BTCMarket) -> Optional[Position]:
+    async def sync_position(self, market: BTCMarket, force: bool = False) -> Optional[Position]:
         """
         Sync position from chain for a market.
 
         Fetches actual holdings from Polymarket API and updates local tracking.
+        Rate-limited to avoid exceeding /positions API limit (15 req/s).
+
+        Args:
+            market: Market to sync position for
+            force: If True, bypass rate limiting (use after fills for verification)
+
+        Returns:
+            Position if holdings exist, None otherwise
         """
+        # Rate limiting: don't sync more than once per cooldown period
+        now = time.time()
+        if not force and (now - self._last_position_sync) < self._position_sync_cooldown:
+            # Return cached position
+            return self._positions.get(market.slug)
+
+        self._last_position_sync = now
+
         try:
             up_balance = await self.client.get_position_balance(market.up_token_id)
             down_balance = await self.client.get_position_balance(market.down_token_id)
