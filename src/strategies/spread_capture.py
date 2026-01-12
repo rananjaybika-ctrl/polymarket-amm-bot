@@ -79,7 +79,7 @@ DEFAULT_HEDGE_WAIT = 30.0       # LEGACY: Base hedge wait time
 MAX_WAIT_TIME = 60.0            # LEGACY: Maximum wait time
 
 # Grid configuration
-DEFAULT_GRID_LEVELS = 3         # Number of price levels per side
+DEFAULT_GRID_LEVELS = 1         # Number of price levels per side
 GRID_SPACING = 0.01             # $0.01 between grid levels
 
 # Inventory management (from Telegram alpha)

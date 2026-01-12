@@ -304,7 +304,7 @@ class SpreadCaptureBotConfig(BaseModel):
 
     # Continuous Velocity Mode parameters (NEW - replaces sequential mode)
     base_size: int = 10                   # Base order size per quote level
-    grid_levels: int = 3                  # Number of price levels per side
+    grid_levels: int = 1                  # Number of price levels per side
     max_imbalance_pct: float = 0.10       # Max inventory imbalance (10%)
 
     # Spread Capture specific parameters (legacy support)
@@ -312,6 +312,7 @@ class SpreadCaptureBotConfig(BaseModel):
     target_shares: int = 15               # Total target per market
     min_profit: float = 0.005             # Minimum profit per pair (profit ceiling)
     max_share_price: float = 0.95         # Never buy above this
+    enable_cycling: bool = False          # If False, stop at target; if True, keep cycling
 
     # Shared parameters
     hard_max_imbalance: int = 10          # Defer to emergency above this
