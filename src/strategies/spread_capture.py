@@ -63,10 +63,13 @@ VELOCITY_STRONG = 0.10          # Strong movement - more aggressive adjustment
 VELOCITY_PULL_THRESHOLD = 0.05  # LEGACY: For backward compatibility with tests
 
 # Quote offsets (from best_bid)
-BASE_OFFSET = 0.015             # Neutral offset: best_bid - 0.015
-TIGHT_OFFSET = 0.01             # Aggressive offset when buying underpriced side
+# Formula: our_bid = best_bid - offset
+# Negative offset = bid ABOVE best_bid (very aggressive)
+# Positive offset = bid BELOW best_bid (conservative)
+BASE_OFFSET = 0.02              # Neutral offset: best_bid - 0.02
+TIGHT_OFFSET = -0.01            # AGGRESSIVE: bid ABOVE best_bid for winner (best_bid + 0.01)
 WIDE_OFFSET = 0.02              # Conservative offset when avoiding overpriced side
-VERY_WIDE_OFFSET = 0.03         # Very conservative during strong adverse velocity
+VERY_WIDE_OFFSET = 0.04         # CONSERVATIVE: bid far below for loser (best_bid - 0.04)
 
 # LEGACY constants for backward compatibility
 DEFAULT_ENTRY_OFFSET = 0.01     # LEGACY: Fixed entry offset
@@ -90,6 +93,7 @@ DEFAULT_BASE_SIZE = 10
 DEFAULT_TARGET_SHARES = 100     # Total target per market
 DEFAULT_MIN_PROFIT = 0.005
 DEFAULT_MAX_SHARE_PRICE = 0.95
+DEFAULT_ENABLE_CYCLING = False  # If False, stop at target; if True, keep cycling
 
 # Timing
 MIN_TIME_REMAINING = 60         # Don't place new orders with <60s left
@@ -119,6 +123,17 @@ class SpreadCapturePhase(Enum):
     EMERGENCY_DEFERRED = "emergency_deferred"  # LEGACY: Deferred due to high imbalance
 
 
+class VelocityZone(Enum):
+    """Velocity zones for auto order pulling.
+
+    When velocity crosses zone boundaries, orders are pulled and regenerated
+    with optimal offsets for the new zone.
+    """
+    NEUTRAL = "neutral"      # abs(vel) < 5 bps - use BASE_OFFSET for both
+    MODERATE = "moderate"    # 5-10 bps - use TIGHT/WIDE offsets
+    STRONG = "strong"        # > 10 bps - use TIGHT/VERY_WIDE offsets
+
+
 # =============================================================================
 # STATE DATACLASS
 # =============================================================================
@@ -144,6 +159,7 @@ class SpreadCaptureState:
     last_velocity: float = 0.0
     last_up_offset: float = 0.0
     last_down_offset: float = 0.0
+    last_velocity_zone: "VelocityZone" = None  # Initialized in post_init
 
     # Statistics
     total_up_fills: int = 0
@@ -248,6 +264,7 @@ class SpreadCaptureStrategy:
         max_imbalance_shares: int = DEFAULT_MAX_IMBALANCE_SHARES,
         min_profit: float = DEFAULT_MIN_PROFIT,
         max_share_price: float = DEFAULT_MAX_SHARE_PRICE,
+        enable_cycling: bool = DEFAULT_ENABLE_CYCLING,
         # LEGACY parameters (aliases)
         entry_size: Optional[int] = None,
         entry_offset: float = DEFAULT_ENTRY_OFFSET,
@@ -267,6 +284,11 @@ class SpreadCaptureStrategy:
         self.max_imbalance_shares = max_imbalance_shares
         self.min_profit = min_profit
         self.max_share_price = max_share_price
+        self.enable_cycling = enable_cycling
+
+        # Auto-pull configuration (internal, not exposed to frontend)
+        self.enable_auto_pull: bool = True   # Pull orders on velocity zone transitions
+        self.pull_mode: str = "both"         # "both" or "adverse_only"
 
         # LEGACY attributes
         self.entry_offset = entry_offset
@@ -274,11 +296,12 @@ class SpreadCaptureStrategy:
         self.emergency_imbalance_threshold = max_imbalance_shares  # Alias
 
         self.state = SpreadCaptureState()
+        self.state.last_velocity_zone = VelocityZone.NEUTRAL  # Initialize zone
         self._completed_pairs: List[Dict[str, Any]] = []
 
         logger.info(
             f"[SPREADCAP] Initialized: base_size={base_size}, grid_levels={grid_levels}, "
-            f"max_imbalance={max_imbalance_pct:.0%}, target={target_shares}"
+            f"max_imbalance={max_imbalance_pct:.0%}, target={target_shares}, cycling={enable_cycling}"
         )
 
     # =========================================================================
@@ -378,6 +401,57 @@ class SpreadCaptureStrategy:
         else:  # BTC falling
             return (WIDE_OFFSET, TIGHT_OFFSET)
 
+    def check_velocity_zone_transition(
+        self,
+        velocity_bps: float
+    ) -> Tuple["VelocityZone", bool, List[str]]:
+        """
+        Check if velocity crossed a zone boundary.
+
+        Used for auto-pulling orders when market conditions change significantly.
+        When zone changes, stale orders at old offsets should be cancelled and
+        regenerated with new optimal offsets.
+
+        Args:
+            velocity_bps: Current BTC velocity in basis points per second
+
+        Returns:
+            Tuple of (current_zone, zone_changed, sides_to_pull)
+
+        Pull Modes:
+            "both"         - Pull UP + DOWN on any zone transition (clean slate)
+            "adverse_only" - Pull only the adverse side (legacy behavior)
+        """
+        abs_vel = abs(velocity_bps)
+
+        # Determine current zone
+        if abs_vel < VELOCITY_THRESHOLD:  # 0.05 bps
+            new_zone = VelocityZone.NEUTRAL
+        elif abs_vel < VELOCITY_STRONG:   # 0.10 bps
+            new_zone = VelocityZone.MODERATE
+        else:
+            new_zone = VelocityZone.STRONG
+
+        old_zone = self.state.last_velocity_zone
+        zone_changed = (new_zone != old_zone)
+
+        sides_to_pull: List[str] = []
+        if zone_changed and self.enable_auto_pull:
+            if self.pull_mode == "both":
+                # Pull ALL orders for clean slate repricing
+                sides_to_pull = ["UP", "DOWN"]
+            elif self.pull_mode == "adverse_only":
+                # Legacy: only pull the side getting overpriced
+                if new_zone != VelocityZone.NEUTRAL:
+                    if velocity_bps > 0:  # Rising - DOWN is adverse
+                        sides_to_pull = ["DOWN"]
+                    else:  # Falling - UP is adverse
+                        sides_to_pull = ["UP"]
+
+        # Update state
+        self.state.last_velocity_zone = new_zone
+        return (new_zone, zone_changed, sides_to_pull)
+
     # =========================================================================
     # MAIN ENTRY POINT: GET QUOTES
     # =========================================================================
@@ -419,13 +493,18 @@ class SpreadCaptureStrategy:
             logger.debug(f"[SPREADCAP] Skipping: {time_remaining:.0f}s remaining")
             return []
 
-        # Check if target reached
-        total_fills = s.total_up_fills + s.total_down_fills
-        if total_fills >= self.target_shares * 2:  # Both sides
-            if s.phase != SpreadCapturePhase.COMPLETE:
-                s.phase = SpreadCapturePhase.COMPLETE
-                logger.info(f"[SPREADCAP] Target reached: {total_fills} fills")
-            return []
+        # Check if target reached (both sides have target_shares)
+        # When cycling is disabled: stop when CURRENT position reaches target on both sides
+        # When cycling is enabled: keep going (pairs get settled, position resets)
+        if not self.enable_cycling:
+            if s.up_shares >= self.target_shares and s.down_shares >= self.target_shares:
+                if s.phase != SpreadCapturePhase.COMPLETE:
+                    s.phase = SpreadCapturePhase.COMPLETE
+                    logger.info(
+                        f"[SPREADCAP] Target reached: UP={s.up_shares}, DOWN={s.down_shares} "
+                        f"(cycling disabled, stopping)"
+                    )
+                return []
 
         # Rate limit quote generation
         if current_time - s.last_quote_time < QUOTE_REFRESH_INTERVAL:
@@ -805,6 +884,9 @@ class SpreadCaptureStrategy:
                 "up": s.last_up_offset,
                 "down": s.last_down_offset,
             },
+            # Configuration
+            "enable_cycling": self.enable_cycling,
+            "target_shares": self.target_shares,
         }
 
     def get_completed_cycles(self) -> List[Dict[str, Any]]:
@@ -821,6 +903,7 @@ class SpreadCaptureStrategy:
         self.state.total_profit = total_profit
         self.state.total_pairs_matched = total_pairs
         self.state.markets_traded = markets
+        self.state.last_velocity_zone = VelocityZone.NEUTRAL  # Reset zone
 
         self._completed_pairs = []
         logger.info(f"[SPREADCAP] Reset for market #{markets}")
@@ -830,7 +913,8 @@ class SpreadCaptureStrategy:
             f"SpreadCaptureStrategy("
             f"base_size={self.base_size}, "
             f"grid_levels={self.grid_levels}, "
-            f"max_imbalance={self.max_imbalance_pct:.0%})"
+            f"max_imbalance={self.max_imbalance_pct:.0%}, "
+            f"cycling={self.enable_cycling})"
         )
 
 

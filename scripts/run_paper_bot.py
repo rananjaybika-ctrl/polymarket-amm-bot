@@ -484,6 +484,7 @@ class PaperTradingBot:
         spread_base_size: int = 10,           # Base order size per quote level
         spread_grid_levels: int = 3,          # Number of price levels per side
         spread_max_imbalance_pct: float = 0.10,  # Max inventory imbalance (10%)
+        spread_enable_cycling: bool = False,  # If False, stop at target; if True, keep cycling
     ):
         self.initial_balance = initial_balance
         self.trading_mode = trading_mode
@@ -552,6 +553,7 @@ class PaperTradingBot:
         self.spread_base_size = spread_base_size
         self.spread_grid_levels = spread_grid_levels
         self.spread_max_imbalance_pct = spread_max_imbalance_pct
+        self.spread_enable_cycling = spread_enable_cycling
 
         # Track order replacements per side for chase count
         self._replacement_count: dict[str, int] = {}  # "market_slug_SIDE" -> count
@@ -640,6 +642,7 @@ class PaperTradingBot:
                 base_size=self.spread_base_size,
                 grid_levels=self.spread_grid_levels,
                 max_imbalance_pct=self.spread_max_imbalance_pct,
+                enable_cycling=self.spread_enable_cycling,
                 # Legacy params (for backward compatibility)
                 target_shares=self.accum_target_shares,
                 max_imbalance_shares=self.hard_max_imbalance,
@@ -648,7 +651,8 @@ class PaperTradingBot:
             logger.info(
                 f"[SPREADCAP] Continuous velocity mode initialized: "
                 f"base_size={self.spread_base_size}, grid_levels={self.spread_grid_levels}, "
-                f"max_imbalance={self.spread_max_imbalance_pct*100:.0f}%, target={self.accum_target_shares}"
+                f"max_imbalance={self.spread_max_imbalance_pct*100:.0f}%, target={self.accum_target_shares}, "
+                f"cycling={self.spread_enable_cycling}"
             )
 
         # Telegram notifications and remote control
@@ -1134,6 +1138,7 @@ class PaperTradingBot:
         base_size = config.get("base_size", config.get("entry_size", 10))
         grid_levels = config.get("grid_levels", 3)
         max_imbalance_pct = config.get("max_imbalance_pct", 0.10)
+        enable_cycling = config.get("enable_cycling", False)
 
         return cls(
             initial_balance=config.get("starting_balance", 500.0),
@@ -1143,6 +1148,7 @@ class PaperTradingBot:
             spread_base_size=base_size,
             spread_grid_levels=grid_levels,
             spread_max_imbalance_pct=max_imbalance_pct,
+            spread_enable_cycling=enable_cycling,
             # Spread Capture specific parameters (legacy support)
             calc_min_shares=config.get("entry_size", 5),  # Entry size per order
             accum_target_shares=config.get("target_shares", 15),  # Total target
@@ -1769,6 +1775,12 @@ class PaperTradingBot:
             pass
         return None
 
+    def _get_spread_capture_profit(self) -> float:
+        """Get cumulative profit from merged pairs (spread_capture cycling mode)."""
+        if self._spread_capture_strategy:
+            return self._spread_capture_strategy.state.total_profit
+        return 0.0
+
     def _build_web_state(self) -> dict:
         """Build trading state as JSON for web UI."""
         market = self._rotator.current_market if self._rotator else None
@@ -1814,6 +1826,7 @@ class PaperTradingBot:
             "balance": self._engine.balance if self._engine else 0,
             "target_shares": self.accum_target_shares,
             "realized_pnl": self._engine.get_realized_pnl() if self._engine else 0,
+            "merged_pair_profit": self._get_spread_capture_profit(),  # Profit from cycling mode
         }
 
         if position:
@@ -4188,6 +4201,23 @@ class PaperTradingBot:
             if trend_signal:
                 velocity_bps = trend_signal.velocity_bps
 
+        # Check for velocity zone transition and auto-pull stale orders
+        zone, zone_changed, sides_to_pull = strategy.check_velocity_zone_transition(velocity_bps)
+
+        if zone_changed:
+            logger.info(f"[SPREADCAP] Velocity zone: {zone.value} (vel={velocity_bps:.3f}bps)")
+
+        # Pull orders on zone transition (default: both sides for clean slate)
+        if sides_to_pull and hasattr(self._engine, 'cancel_pending_order'):
+            for side in sides_to_pull:
+                pending_key = f"{market.slug}_{side}"
+                try:
+                    cancelled = await self._engine.cancel_pending_order(pending_key)
+                    if cancelled:
+                        logger.info(f"[SPREADCAP] Auto-pulled {side} order (zone transition)")
+                except Exception as e:
+                    logger.debug(f"[SPREADCAP] Pull failed for {side}: {e}")
+
         # Calculate current imbalance
         current_imbalance = int(abs(current_up - current_down))
         current_time = time.time()
@@ -4273,7 +4303,7 @@ class PaperTradingBot:
                     price=price,
                     size=size,
                     best_ask=best_ask,
-                    use_pending_orders=False,
+                    use_pending_orders=True,  # Enable for zone-based order pulling
                 )
 
                 if result.get("success"):

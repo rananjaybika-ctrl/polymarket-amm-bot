@@ -468,6 +468,16 @@ function updateLiveData(modeName, data) {
         realizedEl.classList.add(realizedPnl >= 0 ? 'profit' : 'loss');
     }
 
+    // Merged Pair Profit (from cycling mode)
+    const mergedEl = document.getElementById(`${modeName}-merged-profit`);
+    if (mergedEl) {
+        const mergedProfit = metrics.merged_pair_profit || 0;
+        const mergedSign = mergedProfit >= 0 ? '+' : '';
+        mergedEl.textContent = `${mergedSign}$${mergedProfit.toFixed(2)}`;
+        mergedEl.classList.remove('profit', 'loss');
+        mergedEl.classList.add(mergedProfit >= 0 ? 'profit' : 'loss');
+    }
+
 }
 
 function setElementText(id, value) {
@@ -591,7 +601,8 @@ function getSpreadCaptureConfig() {
         max_daily_loss: parseFloat(document.getElementById('spread-capture-max-loss').value) || 0,
         // NEW: Continuous velocity mode parameters
         grid_levels: parseInt(document.getElementById('spread-capture-grid-levels').value) || 3,
-        max_imbalance_pct: parseFloat(document.getElementById('spread-capture-imbalance-pct').value) || 0.10
+        max_imbalance_pct: parseFloat(document.getElementById('spread-capture-imbalance-pct').value) || 0.10,
+        enable_cycling: document.getElementById('spread-capture-enable-cycling').checked
     };
 }
 
