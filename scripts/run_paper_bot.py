@@ -81,6 +81,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Silence noisy HTTP loggers (these flood logs with every API request)
+for noisy_logger in ['httpx', 'httpcore', 'hpack', 'urllib3', 'websockets']:
+    logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
 
 # ==============================================================================
 # SHARED STRIKE FILE - Ensures all strategies use same strike for resolution
@@ -4206,17 +4210,47 @@ class PaperTradingBot:
 
         if zone_changed:
             logger.info(f"[SPREADCAP] Velocity zone: {zone.value} (vel={velocity_bps:.3f}bps)")
+            # Log zone transition to CSV for traceability
+            self._log_event_csv(
+                market_slug=market.slug,
+                event_type="ZONE_TRANSITION",
+                trade_side=zone.value.upper(),
+                trade_mode="SPREAD_CAPTURE",
+                size_requested=0,
+                size_filled=0,
+                price=velocity_bps,  # Store velocity in price field
+                cost=0,
+                position=position,
+                status=f"vel={velocity_bps:.3f}bps",
+            )
 
         # Pull orders on zone transition (default: both sides for clean slate)
+        pulled_count = 0
         if sides_to_pull and hasattr(self._engine, 'cancel_pending_order'):
             for side in sides_to_pull:
                 pending_key = f"{market.slug}_{side}"
                 try:
                     cancelled = await self._engine.cancel_pending_order(pending_key)
                     if cancelled:
+                        pulled_count += 1
                         logger.info(f"[SPREADCAP] Auto-pulled {side} order (zone transition)")
                 except Exception as e:
                     logger.debug(f"[SPREADCAP] Pull failed for {side}: {e}")
+
+        # Log order pulls to CSV
+        if pulled_count > 0:
+            self._log_event_csv(
+                market_slug=market.slug,
+                event_type="ORDER_PULL",
+                trade_side=",".join(sides_to_pull),
+                trade_mode="SPREAD_CAPTURE",
+                size_requested=pulled_count,
+                size_filled=pulled_count,
+                price=0,
+                cost=0,
+                position=position,
+                status=f"zone={zone.value}",
+            )
 
         # Calculate current imbalance
         current_imbalance = int(abs(current_up - current_down))
