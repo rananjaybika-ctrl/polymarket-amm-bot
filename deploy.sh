@@ -36,18 +36,15 @@ rsync -avz --delete \
     -e "ssh -i $AWS_KEY" \
     "$LOCAL_PATH" "$REMOTE_PATH"
 
-# 3. Restart bot
+# 3. NO AUTO-RESTART (safety: don't start trading on deploy)
 echo ""
-echo "[3/4] Restarting bot..."
-ssh -i "$AWS_KEY" "ubuntu@$AWS_IP" 'sudo systemctl restart polymarket-bot'
-
-# 4. Verify
-echo ""
-echo "[4/4] Verifying..."
-sleep 2
-ssh -i "$AWS_KEY" "ubuntu@$AWS_IP" 'sudo systemctl status polymarket-bot --no-pager | head -10'
-
+echo "[3/3] Files synced successfully (bot NOT restarted)"
 echo ""
 echo "=== Deploy Complete ==="
 echo "Dashboard: http://$AWS_IP:8000"
-echo "Logs: ssh -i $AWS_KEY ubuntu@$AWS_IP 'journalctl -u polymarket-bot -f'"
+echo ""
+echo "To restart bot manually:"
+echo "  ssh -i $AWS_KEY ubuntu@$AWS_IP 'sudo systemctl restart polymarket-bot'"
+echo ""
+echo "To check status:"
+echo "  ssh -i $AWS_KEY ubuntu@$AWS_IP 'sudo systemctl status polymarket-bot'"

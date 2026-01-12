@@ -2603,8 +2603,68 @@ class PaperTradingBot:
 
             self._is_new_market = False
 
-        # Get current position
-        position = self._engine.get_position(market)
+        # ============================================================================
+        # GET ACTUAL POSITION (CRITICAL: Use REST API in live mode, not internal cache)
+        # ============================================================================
+        # In live mode, sync_position() calls Polymarket REST API to get actual holdings.
+        # This prevents the bug where internal cache resets after pair matching.
+        # ============================================================================
+        if self.trading_mode == "live" and hasattr(self._engine, 'sync_position'):
+            try:
+                position = await self._engine.sync_position(market)
+                if not position:
+                    position = self._engine.get_position(market)
+                logger.debug(f"[LIVE] REST sync: UP={position.up_size if position else 0}, DOWN={position.down_size if position else 0}")
+            except Exception as e:
+                logger.warning(f"[LIVE] Position sync failed, using cache: {e}")
+                position = self._engine.get_position(market)
+        else:
+            position = self._engine.get_position(market)
+
+        # ============================================================================
+        # PROCESS WEBSOCKET FILL QUEUE (live mode only)
+        # ============================================================================
+        # WebSocket fills are queued for async processing. Process them now to ensure
+        # position and strategy state are up-to-date before making trading decisions.
+        # ============================================================================
+        if self.trading_mode == "live" and hasattr(self, '_ws_fill_queue'):
+            fills_processed = 0
+            while not self._ws_fill_queue.empty():
+                try:
+                    ws_fill = self._ws_fill_queue.get_nowait()
+                    fill_side = ws_fill.get("side")
+                    fill_size = ws_fill.get("size", 0)
+                    fill_price = ws_fill.get("price", 0)
+
+                    if fill_side and fill_size > 0:
+                        logger.info(f"[WS_FILL] Processing: {fill_side} {fill_size} @ ${fill_price:.4f}")
+
+                        # Update position tracking
+                        if position and hasattr(position, 'add_fill'):
+                            position.add_fill(fill_side, fill_size, fill_price)
+
+                        # Notify strategy of fill
+                        if self._spread_capture_strategy:
+                            self._spread_capture_strategy.on_fill(
+                                side=fill_side,
+                                price=fill_price,
+                                size=int(fill_size)
+                            )
+                        fills_processed += 1
+                except asyncio.QueueEmpty:
+                    break
+                except Exception as e:
+                    logger.error(f"[WS_FILL] Error processing: {e}")
+
+            if fills_processed > 0:
+                logger.info(f"[WS_FILL] Processed {fills_processed} queued fills")
+                # Re-sync position after processing fills
+                if hasattr(self._engine, 'sync_position'):
+                    try:
+                        position = await self._engine.sync_position(market)
+                    except Exception:
+                        pass
+
         current_up = position.up_size if position else 0.0
         current_down = position.down_size if position else 0.0
         current_up_cost = position.up_cost if position else 0.0
@@ -4150,13 +4210,64 @@ class PaperTradingBot:
         strategy = self._spread_capture_strategy
         time_remaining_secs = market.time_remaining()
 
+        # =========================================================================
+        # CRITICAL: Process WebSocket fills FIRST (before any trading decisions)
+        # =========================================================================
+        if self.trading_mode == "live" and hasattr(self, '_ws_fill_queue'):
+            fills_processed = 0
+            while not self._ws_fill_queue.empty():
+                try:
+                    ws_fill = self._ws_fill_queue.get_nowait()
+                    fill_side = ws_fill.get("side")
+                    fill_size = int(ws_fill.get("size", 0))
+                    fill_price = ws_fill.get("price", 0)
+
+                    if fill_side and fill_size > 0:
+                        strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
+                        fills_processed += 1
+                        logger.info(f"[WS_FILL] {fill_side} {fill_size} @ ${fill_price:.4f}")
+                except asyncio.QueueEmpty:
+                    break
+                except Exception as e:
+                    logger.debug(f"[WS_FILL] Queue error: {e}")
+
+            if fills_processed > 0:
+                logger.info(f"[WS_FILL] Processed {fills_processed} WebSocket fills")
+
+        # =========================================================================
+        # CRITICAL: Re-sync position from REST API (get ACTUAL Polymarket holdings)
+        # =========================================================================
+        if self.trading_mode == "live" and hasattr(self._engine, 'sync_position'):
+            try:
+                synced_pos = await self._engine.sync_position(market)
+                if synced_pos:
+                    position = synced_pos
+                    current_up = position.up_size
+                    current_down = position.down_size
+                    logger.debug(f"[SPREADCAP] REST sync: UP={current_up}, DOWN={current_down}")
+            except Exception as e:
+                logger.warning(f"[SPREADCAP] Position sync failed: {e}")
+
+        # =========================================================================
+        # HARD TARGET CHECK (using REST-synced position, not strategy internal state)
+        # =========================================================================
+        if current_up >= self.accum_target_shares:
+            logger.info(f"[SPREADCAP] UP at target ({current_up:.0f}/{self.accum_target_shares})")
+        if current_down >= self.accum_target_shares:
+            logger.info(f"[SPREADCAP] DOWN at target ({current_down:.0f}/{self.accum_target_shares})")
+
         # Check for rotation
         if self._rotator.should_rotate():
             await self._handle_market_rotation(market)
             return
 
-        # Check if we've hit target shares (let strategy handle internally)
+        # Check if we've hit target shares on BOTH sides (using REST-synced position)
         if current_up >= self.accum_target_shares and current_down >= self.accum_target_shares:
+            logger.info(
+                f"[SPREADCAP] HARD TARGET REACHED via REST: "
+                f"UP={current_up:.0f}/{self.accum_target_shares}, "
+                f"DOWN={current_down:.0f}/{self.accum_target_shares}"
+            )
             if self._rotator.should_rotate():
                 await self._handle_market_rotation(market)
             return
@@ -4380,6 +4491,13 @@ class PaperTradingBot:
                         logger.info(
                             f"[SPREADCAP] Filled: {side} {filled_size} @ ${filled_price:.4f}"
                         )
+
+                        # CRITICAL: Sync position after fill to verify actual state
+                        if self.trading_mode == "live" and hasattr(self._engine, 'sync_position'):
+                            try:
+                                await self._engine.sync_position(market)
+                            except Exception as sync_err:
+                                logger.debug(f"[SPREADCAP] Post-fill sync failed: {sync_err}")
                 else:
                     logger.debug(
                         f"[SPREADCAP] Quote not filled: {side} {size} @ ${price:.4f} - "
