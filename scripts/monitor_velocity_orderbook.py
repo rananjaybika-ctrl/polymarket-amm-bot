@@ -8,7 +8,7 @@ Collects data to understand:
 3. How does Binance price correlate with Polymarket orderbook (Chainlink lag)?
 
 Usage:
-    python scripts/monitor_zscore_velocity.py --duration 15
+    python scripts/monitor_velocity_orderbook.py --duration 15
     # Monitors for 15 minutes (1 market cycle)
 
 Output:

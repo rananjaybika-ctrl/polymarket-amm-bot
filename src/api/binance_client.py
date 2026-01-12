@@ -415,7 +415,7 @@ class BinanceClient:
         Calculate volatility ratio: short-term vol / long-term vol.
 
         This measures whether the market is MORE or LESS volatile than usual
-        RIGHT NOW, unlike z-score which measures total move from strike.
+        RIGHT NOW (relative volatility vs absolute price movement).
 
         Interpretation:
             ratio > 1.5: Market is spiking (more volatile than usual)

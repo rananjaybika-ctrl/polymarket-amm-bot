@@ -139,7 +139,7 @@ class TrendDetector:
             # In flat conditions, no clear favorite
             favored_side = "UP" if price_vs_strike >= 0 else "DOWN"
 
-        # Determine state from velocity (not z-score)
+        # Determine state from velocity
         if abs_velocity >= self.VELOCITY_EXTREME:
             state = TrendState.EXTREME
             confidence = 0.95
