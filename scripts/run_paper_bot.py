@@ -4093,7 +4093,7 @@ class PaperTradingBot:
         self._event_pull_market = market_slug
         engine = self._engine
 
-        def on_velocity_threshold(velocity_bps: float, direction: str, trend_state: str) -> None:
+        def on_velocity_threshold(velocity_bps: float, direction: str) -> None:
             """
             Callback fired when velocity crosses STRONG threshold.
 
