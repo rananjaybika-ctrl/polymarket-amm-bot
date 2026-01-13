@@ -212,8 +212,8 @@ class OrderbookManager:
         """
         Rotate subscription to new market.
 
-        Clears old cache and subscribes to new tokens.
-        CRITICAL: subscribe() REPLACES entire subscription list.
+        CRITICAL: Polymarket WebSocket doesn't properly switch subscriptions.
+        Must reconnect WebSocket entirely to get fresh subscription for new tokens.
         """
         new_tokens = [new_market.up_token_id, new_market.down_token_id]
 
@@ -222,12 +222,38 @@ class OrderbookManager:
             if old_token not in new_tokens:
                 await self.cache.clear(old_token)
 
-        # Subscribe to new tokens
-        success = await self._subscribe_tokens(new_tokens)
-        if success:
-            self._current_tokens = set(new_tokens)
-            logger.info(f"Rotated to market: {new_market.slug}")
-        return success
+        # CRITICAL: Reconnect WebSocket for reliable subscription switch
+        # Polymarket WS keeps sending old token data if you just subscribe()
+        if self._running:
+            logger.info(f"[ROTATION] Reconnecting WebSocket for {new_market.slug}")
+
+            # Cancel old ws_task
+            if self._ws_task:
+                self._ws_task.cancel()
+                try:
+                    await self._ws_task
+                except asyncio.CancelledError:
+                    pass
+
+            # Disconnect and reconnect
+            await self.ws_client.disconnect()
+            await asyncio.sleep(0.3)  # Brief pause for clean disconnect
+
+            connected = await self.ws_client.connect()
+            if connected:
+                self._ws_task = asyncio.create_task(self.ws_client.run())
+                # Subscribe to new tokens on fresh connection
+                success = await self.ws_client.subscribe(new_tokens)
+                if success:
+                    self._current_tokens = set(new_tokens)
+                    logger.info(f"[ROTATION] WebSocket reconnected and subscribed to {new_market.slug}")
+                    return True
+                else:
+                    logger.warning(f"[ROTATION] Subscribe failed after reconnect")
+            else:
+                logger.warning(f"[ROTATION] WebSocket reconnect failed, using REST fallback")
+
+        return False
 
     async def _subscribe_tokens(self, token_ids: List[str]) -> bool:
         """Subscribe to tokens."""
