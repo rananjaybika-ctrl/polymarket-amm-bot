@@ -696,7 +696,8 @@ class MarketFinder:
         """
         Get a specific market by its slug.
 
-        Uses CLOB API as primary source, Gamma API as fallback.
+        For btc-updown-15m markets: Uses Gamma API (CLOB doesn't index these)
+        For other markets: Uses CLOB API with Gamma fallback.
         Results are cached for 30 seconds.
 
         Args:
@@ -710,13 +711,22 @@ class MarketFinder:
         if cached:
             return cached
 
-        # PRIORITY 1: Try CLOB API (more reliable)
+        # BTC 15-minute markets are ONLY in Gamma API, not CLOB
+        # CLOB's /markets endpoint doesn't include btc-updown-15m markets
+        if "btc-updown-15m" in slug:
+            market = await self._get_market_from_gamma(slug)
+            if market:
+                self._add_to_cache(slug, market)
+                return market
+            logger.warning(f"[MARKET_FINDER] Gamma failed for {slug}")
+            return None
+
+        # For other markets: Try CLOB first, then Gamma
         market = await self._get_market_from_clob(slug)
         if market:
             self._add_to_cache(slug, market)
             return market
 
-        # PRIORITY 2: Fallback to Gamma API
         logger.debug(f"[FALLBACK] CLOB failed for {slug}, trying Gamma")
         market = await self._get_market_from_gamma(slug)
         if market:

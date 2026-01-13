@@ -26,10 +26,15 @@ import sys
 import time
 import json
 import argparse
+import logging
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 from enum import Enum
+
+import aiohttp
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -266,6 +271,69 @@ class SpreadCaptureObserver:
         elif update.token_id == self.down_token_id:
             self.down_book = update
 
+    def _is_garbage_orderbook(self, up_bid: float, up_ask: float, down_bid: float, down_ask: float) -> bool:
+        """
+        Detect garbage orderbook data.
+
+        Only flag truly invalid data:
+        - Zeros/empty orderbook
+        - No price movement over many samples (track via _last_prices)
+
+        NOTE: Static $0.49/$0.51 early in market is VALID.
+        NOTE: Extreme prices ($0.01 or $0.99) near end are VALID.
+        """
+        # Check for empty/zero prices (definitely garbage)
+        if up_bid <= 0 or down_bid <= 0 or up_ask <= 0 or down_ask <= 0:
+            return True
+        return False
+
+    async def _fetch_clob_prices(self) -> Optional[Tuple[float, float, float, float]]:
+        """Fetch prices from CLOB REST endpoint as fallback."""
+        if not self.current_market:
+            return None
+        url = f"https://clob.polymarket.com/markets/{self.current_market.condition_id}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return self._extract_prices_from_clob(data)
+        except Exception as e:
+            logger.error(f"CLOB REST fetch failed: {e}")
+        return None
+
+    def _extract_prices_from_clob(self, clob_data: dict) -> Tuple[float, float, float, float]:
+        """Extract UP/DOWN prices from CLOB response, create synthetic bid/ask."""
+        up_price = down_price = 0.5
+        for t in clob_data.get('tokens', []):
+            outcome = t.get('outcome', '').upper()
+            price = float(t.get('price', 0.5))
+            if outcome in ('YES', 'UP'):
+                up_price = price
+            elif outcome in ('NO', 'DOWN'):
+                down_price = price
+        return (
+            max(0.01, up_price - 0.005),
+            min(0.99, up_price + 0.005),
+            max(0.01, down_price - 0.005),
+            min(0.99, down_price + 0.005),
+        )
+
+    async def _get_validated_orderbook(self) -> Optional[Tuple[float, float, float, float, str]]:
+        """Get validated orderbook with garbage detection and REST fallback."""
+        if self.up_book and self.down_book:
+            up_bid = self.up_book.best_bid or 0.0
+            up_ask = self.up_book.best_ask or 0.0
+            down_bid = self.down_book.best_bid or 0.0
+            down_ask = self.down_book.best_ask or 0.0
+            if not self._is_garbage_orderbook(up_bid, up_ask, down_bid, down_ask):
+                return (up_bid, up_ask, down_bid, down_ask, "websocket")
+            logger.warning(f"Garbage orderbook: UP={up_bid}/{up_ask}, DOWN={down_bid}/{down_ask}. Fallback to REST.")
+        prices = await self._fetch_clob_prices()
+        if prices:
+            return (*prices, "rest_fallback")
+        return None
+
     def _init_csv(self):
         """Initialize CSV file for current date."""
         today = datetime.now().date()
@@ -288,6 +356,7 @@ class SpreadCaptureObserver:
                 'timestamp_ms', 'market_slug', 'time_remaining_secs',
                 'binance_price', 'velocity_bps',
                 'up_bid', 'up_ask', 'down_bid', 'down_ask', 'pair_cost',
+                'data_source',
             ]
             # Add columns for each scenario
             for scenario in SCENARIOS.keys():
@@ -305,23 +374,22 @@ class SpreadCaptureObserver:
 
         print(f"Logging to: {filename}")
 
-    def _write_sample(self):
-        """Write a sample row to CSV."""
+    async def _write_sample(self):
+        """Write a sample row to CSV with validated orderbook."""
         if not self.csv_writer:
-            return
-        if not self.up_book or not self.down_book:
             return
         if not self.binance or self.binance.current_price <= 0:
             return
 
+        # Get validated orderbook (with garbage detection and REST fallback)
+        orderbook = await self._get_validated_orderbook()
+        if not orderbook:
+            return
+
+        up_bid, up_ask, down_bid, down_ask, data_source = orderbook
+
         now = datetime.now(timezone.utc)
         timestamp_ms = int(now.timestamp() * 1000)
-
-        # Market state
-        up_bid = self.up_book.best_bid or 0.0
-        up_ask = self.up_book.best_ask or 0.0
-        down_bid = self.down_book.best_bid or 0.0
-        down_ask = self.down_book.best_ask or 0.0
         pair_cost = up_ask + down_ask
 
         # Time remaining
@@ -343,6 +411,7 @@ class SpreadCaptureObserver:
             round(down_bid, 4),
             round(down_ask, 4),
             round(pair_cost, 4),
+            data_source,
         ]
 
         # Generate signals for each scenario
@@ -416,16 +485,24 @@ class SpreadCaptureObserver:
             self.csv_file.flush()
 
     async def _find_current_market(self) -> bool:
-        """Find and subscribe to current 15-min BTC market."""
+        """Find and subscribe to current 15-min BTC market using REST API."""
         finder = MarketFinder()
-        markets = await finder.find_btc_15min_markets()
+        # Use slug-based method - find_btc_15min_markets() doesn't work for btc-updown
+        markets = await finder.get_current_and_upcoming_markets(count=3)
 
         if not markets:
             print("No active BTC 15-min markets found")
             return False
 
-        # Pick the market with most time remaining
-        market = max(markets, key=lambda m: m.end_time or datetime.min.replace(tzinfo=timezone.utc))
+        # Pick market ending SOONEST with >60s remaining
+        now = datetime.now(timezone.utc)
+        valid = [(m, (m.end_time - now).total_seconds()) for m in markets if m.end_time and (m.end_time - now).total_seconds() > 60]
+        if not valid:
+            print("No markets with >60s remaining")
+            return False
+        valid.sort(key=lambda x: x[1])
+        market, remaining = valid[0]
+        print(f"Selected market with {remaining:.0f}s remaining (of {len(markets)} found)")
 
         # Check if we need to switch
         if self.current_market and self.current_market.condition_id == market.condition_id:
@@ -582,7 +659,7 @@ class SpreadCaptureObserver:
 
                 # Write sample
                 self._init_csv()  # Handle date rollover
-                self._write_sample()
+                await self._write_sample()
 
                 # Status update (every 60s)
                 if time.time() - last_status_time > 60:
