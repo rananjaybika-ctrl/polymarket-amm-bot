@@ -451,8 +451,8 @@ class SpreadCaptureObserver:
                 entry_would_fill = False
                 hedge_would_fill = False
 
-            # Entry signal: pair cost < $1.00 and velocity signal
-            entry_signal = pair_cost < 1.00 and entry_side != "NONE"
+            # Entry signal: velocity signal (pair_cost is a RESULT, not a gate)
+            entry_signal = entry_side != "NONE"
 
             # Track theoretical fills (only if both would fill)
             if entry_signal and entry_would_fill and hedge_would_fill:
