@@ -454,13 +454,17 @@ class SpreadCaptureObserver:
             # Entry signal: velocity signal (pair_cost is a RESULT, not a gate)
             entry_signal = entry_side != "NONE"
 
-            # Track theoretical fills (only if both would fill)
-            if entry_signal and entry_would_fill and hedge_would_fill:
+            # Track theoretical fills INDEPENDENTLY (strategy quotes both sides)
+            # Each side fills when our bid would execute, regardless of other side
+            if entry_would_fill:
                 if entry_side == "UP":
                     pos.add_fill("UP", entry_price, self.trade_size)
-                    pos.add_fill("DOWN", hedge_price, self.trade_size)
-                else:
+                elif entry_side == "DOWN":
                     pos.add_fill("DOWN", entry_price, self.trade_size)
+            if hedge_would_fill:
+                if entry_side == "UP":
+                    pos.add_fill("DOWN", hedge_price, self.trade_size)
+                elif entry_side == "DOWN":
                     pos.add_fill("UP", hedge_price, self.trade_size)
 
             prefix = scenario_name[:4]
