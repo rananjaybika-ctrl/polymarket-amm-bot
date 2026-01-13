@@ -241,6 +241,7 @@ class SpreadCaptureObserver:
         # Orderbook cache (updated by WebSocket)
         self.up_book: Optional[BookUpdate] = None
         self.down_book: Optional[BookUpdate] = None
+        self._subscription_time = 0.0
 
         # Theoretical positions per scenario
         self.positions: Dict[str, TheoreticalPosition] = {
@@ -266,10 +267,12 @@ class SpreadCaptureObserver:
 
     def _on_book_update(self, update: BookUpdate):
         """Handle Polymarket orderbook update."""
+        # Only accept updates for current market's tokens
         if update.token_id == self.up_token_id:
             self.up_book = update
         elif update.token_id == self.down_token_id:
             self.down_book = update
+        # Ignore updates for old tokens (after market rotation)
 
     def _is_garbage_orderbook(self, up_bid: float, up_ask: float, down_bid: float, down_ask: float) -> bool:
         """
@@ -328,7 +331,7 @@ class SpreadCaptureObserver:
             down_ask = self.down_book.best_ask or 0.0
             if not self._is_garbage_orderbook(up_bid, up_ask, down_bid, down_ask):
                 return (up_bid, up_ask, down_bid, down_ask, "websocket")
-            logger.warning(f"Garbage orderbook: UP={up_bid}/{up_ask}, DOWN={down_bid}/{down_ask}. Fallback to REST.")
+        # Fallback to REST
         prices = await self._fetch_clob_prices()
         if prices:
             return (*prices, "rest_fallback")
@@ -508,29 +511,50 @@ class SpreadCaptureObserver:
         if self.current_market and self.current_market.condition_id == market.condition_id:
             return True
 
-        print(f"\nSwitching to market: {market.slug}")
-        print(f"  UP token: {market.up_token_id[:16]}...")
-        print(f"  DOWN token: {market.down_token_id[:16]}...")
-
-        # Unsubscribe from old tokens
-        if self.up_token_id and self.poly_ws:
-            await self.poly_ws.unsubscribe([self.up_token_id, self.down_token_id])
+        print(f"\nSwitching to market: {market.slug}", flush=True)
+        print(f"  UP token: {market.up_token_id[:16]}...", flush=True)
+        print(f"  DOWN token: {market.down_token_id[:16]}...", flush=True)
 
         # Reset positions for new market
         for pos in self.positions.values():
             pos.reset()
 
-        # Update state
-        self.current_market = market
+        # Update state to new market
         self.up_token_id = market.up_token_id
         self.down_token_id = market.down_token_id
+        self.current_market = market
         self.market_end_time = market.end_time
         self.up_book = None
         self.down_book = None
 
-        # Subscribe to new tokens
+        # CRITICAL: Polymarket WebSocket doesn't properly switch subscriptions
+        # Must reconnect to get fresh subscription for new tokens
         if self.poly_ws:
-            await self.poly_ws.subscribe([self.up_token_id, self.down_token_id])
+            print("  Reconnecting WebSocket for new market...", flush=True)
+            await self.poly_ws.disconnect()
+            await asyncio.sleep(0.5)
+            await self.poly_ws.connect()
+            # Restart the WebSocket event loop
+            if hasattr(self, '_ws_task') and self._ws_task:
+                self._ws_task.cancel()
+                try:
+                    await self._ws_task
+                except asyncio.CancelledError:
+                    pass
+            self._ws_task = asyncio.create_task(self.poly_ws.run())
+            # Subscribe to new market tokens
+            result = await self.poly_ws.subscribe([self.up_token_id, self.down_token_id])
+            print(f"  Subscribe result: {result}", flush=True)
+
+        # Wait for first orderbook data
+        print("  Waiting for orderbook data...", flush=True)
+        for i in range(30):  # 3 seconds max
+            if self.up_book and self.down_book:
+                print(f"  Got orderbook after {i * 100}ms", flush=True)
+                break
+            await asyncio.sleep(0.1)
+        else:
+            print("  No WebSocket data after 3s, using REST fallback", flush=True)
 
         return True
 
@@ -598,7 +622,7 @@ class SpreadCaptureObserver:
         await self.poly_ws.connect()
 
         # Start WebSocket event loop in background
-        ws_task = asyncio.create_task(self.poly_ws.run())
+        self._ws_task = asyncio.create_task(self.poly_ws.run())
         print("  Polymarket WebSocket connected")
 
         # Find initial market
@@ -675,7 +699,8 @@ class SpreadCaptureObserver:
 
         finally:
             # Cleanup
-            ws_task.cancel()
+            if hasattr(self, '_ws_task') and self._ws_task:
+                self._ws_task.cancel()
             if self.csv_file:
                 self.csv_file.flush()
                 self.csv_file.close()
