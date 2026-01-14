@@ -44,56 +44,20 @@ from src.services.market_finder import MarketFinder
 
 
 # =============================================================================
-# PARAMETER SCENARIOS
+# 6-ZONE VELOCITY CONFIGURATION (MATCHES LIVE TRADING)
 # =============================================================================
 
-@dataclass
-class ScenarioParams:
-    """Parameters for a strategy scenario."""
-    name: str
-    velocity_threshold: float  # bps/sec to trigger directional offset
-    velocity_strong: float     # bps/sec for strong signal
-    base_offset: float         # Neutral zone offset
-    tight_offset: float        # Aggressive offset (negative = bid above best_bid)
-    wide_offset: float         # Conservative offset
-    very_wide_offset: float    # Very conservative offset
-
-
-SCENARIOS = {
-    "default": ScenarioParams(
-        name="default",
-        velocity_threshold=0.05,
-        velocity_strong=0.10,
-        base_offset=0.02,
-        tight_offset=-0.01,
-        wide_offset=0.02,
-        very_wide_offset=0.04,
-    ),
-    "conservative": ScenarioParams(
-        name="conservative",
-        velocity_threshold=0.08,
-        velocity_strong=0.15,
-        base_offset=0.025,
-        tight_offset=0.00,
-        wide_offset=0.03,
-        very_wide_offset=0.05,
-    ),
-    "aggressive": ScenarioParams(
-        name="aggressive",
-        velocity_threshold=0.03,
-        velocity_strong=0.07,
-        base_offset=0.015,
-        tight_offset=-0.02,
-        wide_offset=0.015,
-        very_wide_offset=0.03,
-    ),
+VELOCITY_ZONES = {
+    'neutral':      {'vel_min': 0.00, 'vel_max': 0.05, 'pair_target': 0.97, 'winner_offset': -0.01},
+    'moderate':     {'vel_min': 0.05, 'vel_max': 0.10, 'pair_target': 0.97, 'winner_offset': -0.01},
+    'strong':       {'vel_min': 0.10, 'vel_max': 0.30, 'pair_target': 0.96, 'winner_offset':  0.00},
+    'very_strong':  {'vel_min': 0.30, 'vel_max': 0.50, 'pair_target': 0.95, 'winner_offset': +0.01},
+    'extreme':      {'vel_min': 0.50, 'vel_max': 1.00, 'pair_target': 0.94, 'winner_offset': +0.01},
+    'super_strong': {'vel_min': 1.00, 'vel_max': 99.0, 'pair_target': 0.93, 'winner_offset': +0.02},
 }
 
-
-class VelocityZone(Enum):
-    NEUTRAL = "neutral"
-    MODERATE = "moderate"
-    STRONG = "strong"
+# Use single scenario matching live trading
+SCENARIOS = {"live": None}  # Kept for compatibility with position tracking
 
 
 # =============================================================================
@@ -166,69 +130,83 @@ class RestingOrders:
 @dataclass
 class EntryState:
     """
-    Track entry fill and fixed hedge target per scenario.
+    Track entry fill and hedge target per scenario (matches live trading).
 
-    Key insight: Once entry fills, lock the hedge target and don't recalculate.
-    This prevents the "chasing down" bug where hedge bid keeps dropping.
+    Key insight: Hedge target can TIGHTEN but never loosen when velocity strengthens.
     """
     entry_filled: bool = False
     entry_side: Optional[str] = None
     entry_price: float = 0.0
-    hedge_target: float = 0.0
+    entry_velocity_dir: Optional[str] = None  # Track velocity direction at entry
+    entry_zone: str = ""  # Zone at entry time
+    initial_hedge_target: float = 0.0  # Target at entry (for logging)
+    locked_hedge_target: float = 0.0  # Current (tightened) target
     hedge_filled: bool = False
+    tighten_count: int = 0  # Number of times target was tightened
 
     def reset(self):
         """Reset for new market."""
         self.entry_filled = False
         self.entry_side = None
         self.entry_price = 0.0
-        self.hedge_target = 0.0
+        self.entry_velocity_dir = None
+        self.entry_zone = ""
+        self.initial_hedge_target = 0.0
+        self.locked_hedge_target = 0.0
         self.hedge_filled = False
+        self.tighten_count = 0
 
 
 # =============================================================================
-# SIGNAL GENERATOR
+# SIGNAL GENERATOR (6-ZONE - MATCHES LIVE TRADING)
 # =============================================================================
 
-def get_velocity_zone(velocity_bps: float, params: ScenarioParams) -> VelocityZone:
-    """Determine velocity zone for given params."""
+def get_velocity_zone(velocity_bps: float) -> str:
+    """Get velocity zone name based on absolute velocity (matches live trading)."""
     abs_vel = abs(velocity_bps)
-    if abs_vel < params.velocity_threshold:
-        return VelocityZone.NEUTRAL
-    elif abs_vel < params.velocity_strong:
-        return VelocityZone.MODERATE
-    else:
-        return VelocityZone.STRONG
+    for zone_name, zone in VELOCITY_ZONES.items():
+        if zone['vel_min'] <= abs_vel < zone['vel_max']:
+            return zone_name
+    return 'super_strong'
 
 
-def get_offsets(velocity_bps: float, params: ScenarioParams, inventory_bias: float = 0) -> tuple:
+def get_zone_params(velocity_bps: float) -> Tuple[str, float, float]:
+    """Get zone parameters for current velocity.
+
+    Returns:
+        (zone_name, pair_target, winner_offset)
     """
-    Get (up_offset, down_offset) for given velocity and params.
-    Mirrors spread_capture.py logic.
+    zone_name = get_velocity_zone(velocity_bps)
+    zone = VELOCITY_ZONES[zone_name]
+    return zone_name, zone['pair_target'], zone['winner_offset']
+
+
+def maybe_tighten_hedge_target(entry_state: EntryState, velocity_bps: float) -> bool:
     """
-    abs_velocity = abs(velocity_bps)
+    Check if hedge target should be tightened (matches live trading).
 
-    # Neutral zone - use inventory to decide
-    if abs_velocity < params.velocity_threshold:
-        if abs(inventory_bias) <= 2:
-            return (params.tight_offset, params.tight_offset)
-        elif inventory_bias > 0:
-            return (params.tight_offset, params.wide_offset)
-        else:
-            return (params.wide_offset, params.tight_offset)
+    ONLY TIGHTEN (lower), NEVER LOOSEN.
+    Only tighten when velocity strengthens in SAME direction as entry.
+    """
+    if not entry_state.entry_filled or entry_state.hedge_filled:
+        return False
 
-    # Strong velocity
-    if abs_velocity > params.velocity_strong:
-        if velocity_bps > 0:  # BTC rising
-            return (params.tight_offset, params.very_wide_offset)
-        else:  # BTC falling
-            return (params.very_wide_offset, params.tight_offset)
+    # Check velocity direction
+    current_dir = "UP" if velocity_bps > 0 else "DOWN"
+    if current_dir != entry_state.entry_velocity_dir:
+        return False  # Velocity flipped, don't tighten
 
-    # Moderate velocity
-    if velocity_bps > 0:  # BTC rising
-        return (params.tight_offset, params.wide_offset)
-    else:  # BTC falling
-        return (params.wide_offset, params.tight_offset)
+    # Calculate new target based on current zone
+    zone_name, pair_target, _ = get_zone_params(velocity_bps)
+    new_target = pair_target - entry_state.entry_price
+    new_target = max(0.01, min(0.95, new_target))
+
+    # ONLY TIGHTEN (lower), NEVER LOOSEN
+    if new_target < entry_state.locked_hedge_target:
+        entry_state.locked_hedge_target = new_target
+        entry_state.tighten_count += 1
+        return True
+    return False
 
 
 def would_fill(our_bid: float, best_bid: float, best_ask: float) -> bool:
@@ -410,18 +388,13 @@ class SpreadCaptureObserver:
                 'binance_price', 'velocity_bps',
                 'up_bid', 'up_ask', 'down_bid', 'down_ask', 'pair_cost',
                 'data_source',
+                # Live trading columns (6-zone system)
+                'velocity_zone', 'pair_target', 'winner_offset',
+                'entry_signal', 'entry_side', 'entry_bid',
+                'initial_hedge_target', 'locked_hedge_target', 'tighten_count',
+                'would_fill_entry', 'would_fill_hedge',
+                'up_pos', 'down_pos', 'pairs', 'locked_profit',
             ]
-            # Add columns for each scenario
-            for scenario in SCENARIOS.keys():
-                prefix = scenario[:4]  # default->defa, conservative->cons, aggressive->aggr
-                headers.extend([
-                    f'{prefix}_zone', f'{prefix}_entry_signal', f'{prefix}_entry_side',
-                    f'{prefix}_up_offset', f'{prefix}_down_offset',
-                    f'{prefix}_entry_price', f'{prefix}_hedge_price',
-                    f'{prefix}_would_fill_entry', f'{prefix}_would_fill_hedge',
-                    f'{prefix}_up_pos', f'{prefix}_down_pos',
-                    f'{prefix}_pairs', f'{prefix}_locked_profit',
-                ])
             self.csv_writer.writerow(headers)
             self.csv_file.flush()
 
@@ -467,118 +440,119 @@ class SpreadCaptureObserver:
             data_source,
         ]
 
-        # Generate signals for each scenario
-        for scenario_name, params in SCENARIOS.items():
-            pos = self.positions[scenario_name]
-            inventory_bias = pos.up_shares - pos.down_shares
+        # Generate signals using 6-zone system (matches live trading)
+        pos = self.positions["live"]
+        entry_state = self.entry_states["live"]
 
-            # Get velocity zone and offsets
-            zone = get_velocity_zone(velocity_bps, params)
-            up_offset, down_offset = get_offsets(velocity_bps, params, inventory_bias)
+        # Get zone parameters for current velocity
+        zone_name, pair_target, winner_offset = get_zone_params(velocity_bps)
 
-            # Calculate bid prices
-            entry_price_up = max(0.01, min(0.95, up_bid - up_offset))
-            entry_price_down = max(0.01, min(0.95, down_bid - down_offset))
+        # Determine entry side based on velocity direction (velocity_threshold = 0.05 in neutral zone)
+        if velocity_bps > VELOCITY_ZONES['neutral']['vel_max']:
+            entry_side = "UP"  # BTC rising, bet UP
+        elif velocity_bps < -VELOCITY_ZONES['neutral']['vel_max']:
+            entry_side = "DOWN"  # BTC falling, bet DOWN
+        else:
+            entry_side = "NONE"  # Neutral zone, no entry
 
-            # Determine entry side (buy predicted winner first)
-            if velocity_bps > params.velocity_threshold:
-                entry_side = "UP"
-                entry_price = entry_price_up
-                hedge_price = entry_price_down
-                entry_would_fill = would_fill(entry_price_up, up_bid, up_ask)
-                hedge_would_fill = would_fill(entry_price_down, down_bid, down_ask)
-            elif velocity_bps < -params.velocity_threshold:
-                entry_side = "DOWN"
-                entry_price = entry_price_down
-                hedge_price = entry_price_up
-                entry_would_fill = would_fill(entry_price_down, down_bid, down_ask)
-                hedge_would_fill = would_fill(entry_price_up, up_bid, up_ask)
-            else:
-                # Neutral - no directional signal
-                entry_side = "NONE"
-                entry_price = 0.0
-                hedge_price = 0.0
-                entry_would_fill = False
-                hedge_would_fill = False
+        # Entry signal: directional velocity signal
+        entry_signal = entry_side != "NONE"
 
-            # Entry signal: velocity signal (pair_cost is a RESULT, not a gate)
-            entry_signal = entry_side != "NONE"
+        # Calculate entry bid using CORRECT formula: best_bid + winner_offset
+        # (Matches live trading logic in spread_capture.py)
+        if entry_side == "UP":
+            entry_bid = up_bid + winner_offset
+            entry_bid = min(entry_bid, up_ask - 0.001)  # Stay below ask (maker)
+            entry_bid = max(0.01, min(0.95, entry_bid))
+        elif entry_side == "DOWN":
+            entry_bid = down_bid + winner_offset
+            entry_bid = min(entry_bid, down_ask - 0.001)
+            entry_bid = max(0.01, min(0.95, entry_bid))
+        else:
+            entry_bid = 0.0
 
-            # Get entry state for this scenario (FIXED HEDGE LOGIC)
-            entry_state = self.entry_states[scenario_name]
+        # Fill tracking
+        up_filled = False
+        down_filled = False
+        entry_would_fill = False
+        hedge_would_fill = False
 
-            # FIXED HEDGE LOGIC:
-            # 1. Entry fills ONCE per market when signal + price crosses spread
-            # 2. Hedge target is FIXED at entry time: target_pair_cost - entry_price
-            # 3. Hedge fills when ask drops to our FIXED target (no chasing)
-
-            up_filled = False
-            down_filled = False
-
-            # ENTRY LOGIC: Only set entry once per market
-            if not entry_state.entry_filled and entry_side != "NONE":
-                # Check if entry would fill (tight bid crosses spread)
-                if entry_side == "UP" and entry_would_fill:
+        # ENTRY LOGIC: Fill once per market when bid is competitive
+        if not entry_state.entry_filled and entry_side != "NONE":
+            if entry_side == "UP":
+                entry_would_fill = would_fill(entry_bid, up_bid, up_ask)
+                if entry_would_fill:
                     entry_state.entry_filled = True
                     entry_state.entry_side = "UP"
                     entry_state.entry_price = up_ask  # Fill at ask
-                    # FIXED HEDGE TARGET: Set once, never change
-                    target_pair_cost = 0.97  # 3% edge target
-                    entry_state.hedge_target = target_pair_cost - entry_state.entry_price
-                    entry_state.hedge_target = max(0.01, min(0.95, entry_state.hedge_target))
+                    entry_state.entry_velocity_dir = "UP"
+                    entry_state.entry_zone = zone_name
+                    # Hedge target = pair_target - entry_price (zone-specific!)
+                    entry_state.initial_hedge_target = pair_target - entry_state.entry_price
+                    entry_state.initial_hedge_target = max(0.01, min(0.95, entry_state.initial_hedge_target))
+                    entry_state.locked_hedge_target = entry_state.initial_hedge_target
                     pos.add_fill("UP", entry_state.entry_price, self.trade_size)
                     up_filled = True
-                elif entry_side == "DOWN" and entry_would_fill:
+            elif entry_side == "DOWN":
+                entry_would_fill = would_fill(entry_bid, down_bid, down_ask)
+                if entry_would_fill:
                     entry_state.entry_filled = True
                     entry_state.entry_side = "DOWN"
-                    entry_state.entry_price = down_ask  # Fill at ask
-                    target_pair_cost = 0.97
-                    entry_state.hedge_target = target_pair_cost - entry_state.entry_price
-                    entry_state.hedge_target = max(0.01, min(0.95, entry_state.hedge_target))
+                    entry_state.entry_price = down_ask
+                    entry_state.entry_velocity_dir = "DOWN"
+                    entry_state.entry_zone = zone_name
+                    entry_state.initial_hedge_target = pair_target - entry_state.entry_price
+                    entry_state.initial_hedge_target = max(0.01, min(0.95, entry_state.initial_hedge_target))
+                    entry_state.locked_hedge_target = entry_state.initial_hedge_target
                     pos.add_fill("DOWN", entry_state.entry_price, self.trade_size)
                     down_filled = True
 
-            # HEDGE LOGIC: Check against FIXED target (doesn't change!)
-            if entry_state.entry_filled and not entry_state.hedge_filled:
-                if entry_state.entry_side == "UP":
-                    # Hedge is DOWN side - check if DOWN ask <= our FIXED target
-                    if down_ask <= entry_state.hedge_target:
-                        entry_state.hedge_filled = True
-                        pos.add_fill("DOWN", down_ask, self.trade_size)
-                        down_filled = True
-                        hedge_price = down_ask  # Update for logging
-                else:
-                    # Hedge is UP side - check if UP ask <= our FIXED target
-                    if up_ask <= entry_state.hedge_target:
-                        entry_state.hedge_filled = True
-                        pos.add_fill("UP", up_ask, self.trade_size)
-                        up_filled = True
-                        hedge_price = up_ask  # Update for logging
+        # HEDGE TIGHTENING: Check if velocity strengthened (matches live trading)
+        if entry_state.entry_filled and not entry_state.hedge_filled:
+            maybe_tighten_hedge_target(entry_state, velocity_bps)
 
-            # Update would_fill flags for CSV logging
-            entry_would_fill = up_filled if entry_state.entry_side == "UP" else down_filled if entry_state.entry_side == "DOWN" else False
-            hedge_would_fill = down_filled if entry_state.entry_side == "UP" else up_filled if entry_state.entry_side == "DOWN" else False
+        # HEDGE FILL: Check against locked (possibly tightened) target
+        if entry_state.entry_filled and not entry_state.hedge_filled:
+            if entry_state.entry_side == "UP":
+                # Hedge is DOWN side - check if DOWN ask <= locked target
+                hedge_would_fill = down_ask <= entry_state.locked_hedge_target
+                if hedge_would_fill:
+                    entry_state.hedge_filled = True
+                    pos.add_fill("DOWN", down_ask, self.trade_size)
+                    down_filled = True
+            else:
+                # Hedge is UP side - check if UP ask <= locked target
+                hedge_would_fill = up_ask <= entry_state.locked_hedge_target
+                if hedge_would_fill:
+                    entry_state.hedge_filled = True
+                    pos.add_fill("UP", up_ask, self.trade_size)
+                    up_filled = True
 
-            # Update hedge_price for logging if we have a fixed target
-            if entry_state.entry_filled:
-                hedge_price = entry_state.hedge_target
+        # Update fill flags for logging
+        if entry_state.entry_side == "UP":
+            entry_would_fill = up_filled
+            hedge_would_fill = down_filled
+        elif entry_state.entry_side == "DOWN":
+            entry_would_fill = down_filled
+            hedge_would_fill = up_filled
 
-            prefix = scenario_name[:4]
-            row.extend([
-                zone.value,
-                entry_signal,
-                entry_side,
-                round(up_offset, 4),
-                round(down_offset, 4),
-                round(entry_price, 4),
-                round(hedge_price, 4),
-                entry_would_fill,
-                hedge_would_fill,
-                round(pos.up_shares, 1),
-                round(pos.down_shares, 1),
-                pos.pairs,
-                round(pos.locked_profit, 4),
-            ])
+        row.extend([
+            zone_name,
+            round(pair_target, 2),
+            round(winner_offset, 2),
+            entry_signal,
+            entry_side,
+            round(entry_bid, 4),
+            round(entry_state.initial_hedge_target, 4) if entry_state.entry_filled else 0.0,
+            round(entry_state.locked_hedge_target, 4) if entry_state.entry_filled else 0.0,
+            entry_state.tighten_count,
+            entry_would_fill,
+            hedge_would_fill,
+            round(pos.up_shares, 1),
+            round(pos.down_shares, 1),
+            pos.pairs,
+            round(pos.locked_profit, 4),
+        ])
 
         self.csv_writer.writerow(row)
         self.sample_count += 1
@@ -701,10 +675,10 @@ class SpreadCaptureObserver:
         print(f"Duration: {'continuous' if self.continuous else f'{self.duration_hours}h'}")
         print(f"Sample interval: {self.sample_interval_ms}ms")
         print(f"Output: {self.output_dir}/")
-        print(f"\nScenarios:")
-        for name, params in SCENARIOS.items():
-            print(f"  {name}: vel_thresh={params.velocity_threshold}, "
-                  f"tight={params.tight_offset}, wide={params.wide_offset}")
+        print(f"\n6-Zone Configuration (matches live trading):")
+        for zone_name, zone in VELOCITY_ZONES.items():
+            print(f"  {zone_name}: vel={zone['vel_min']:.2f}-{zone['vel_max']:.2f}, "
+                  f"pair_target={zone['pair_target']:.2f}, winner_offset={zone['winner_offset']:+.2f}")
         print()
 
         # Initialize Binance WebSocket
@@ -750,20 +724,10 @@ class SpreadCaptureObserver:
         # Initialize CSV
         self._init_csv()
 
-        # Save params
+        # Save 6-zone params (matches live trading)
         params_file = f"{self.output_dir}/spread_capture_params.json"
         with open(params_file, 'w') as f:
-            json.dump({
-                name: {
-                    "velocity_threshold": p.velocity_threshold,
-                    "velocity_strong": p.velocity_strong,
-                    "base_offset": p.base_offset,
-                    "tight_offset": p.tight_offset,
-                    "wide_offset": p.wide_offset,
-                    "very_wide_offset": p.very_wide_offset,
-                }
-                for name, p in SCENARIOS.items()
-            }, f, indent=2)
+            json.dump(VELOCITY_ZONES, f, indent=2)
 
         last_status_time = time.time()
         last_market_check = time.time()

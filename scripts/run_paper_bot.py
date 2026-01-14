@@ -485,8 +485,8 @@ class PaperTradingBot:
         session_start_utc: Optional[datetime] = None,
         session_end_utc: Optional[datetime] = None,
         # NEW: Spread Capture continuous velocity mode parameters
-        spread_base_size: int = 10,           # Base order size per quote level
-        spread_grid_levels: int = 3,          # Number of price levels per side
+        spread_base_size: int = 15,           # Total shares across grid (15 / 3 = 5 per level)
+        spread_grid_levels: int = 3,          # 3 orders of 5 shares each
         spread_max_imbalance_pct: float = 0.10,  # Max inventory imbalance (10%)
         spread_enable_cycling: bool = False,  # If False, stop at target; if True, keep cycling
     ):
