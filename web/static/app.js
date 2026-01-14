@@ -639,7 +639,7 @@ async function handleStart(modeName) {
 
     // Confirm live trading
     if (config.mode === 'live') {
-        if (!confirm(`You are about to start LIVE ${modeName.toUpperCase()} trading. Are you sure?`)) {
+        if (!confirm(`⚠️ LIVE TRADING - Real money at risk!\n\nProceed with ${modeName.toUpperCase()}?`)) {
             return;
         }
     }

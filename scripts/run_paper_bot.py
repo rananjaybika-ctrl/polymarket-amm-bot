@@ -2394,6 +2394,41 @@ class PaperTradingBot:
                 self._engine.set_user_websocket(self._user_ws)
                 logger.info("[LIVE] UserWebSocketClient injected into LiveTradingEngine (~100ms fills)")
 
+            # CRITICAL: Sync actual position from Polymarket BEFORE trading
+            logger.info("[LIVE] Syncing actual position from Polymarket...")
+            try:
+                # Get current market to sync position for
+                current_market = await self._rotator.get_current_market() if hasattr(self._rotator, 'get_current_market') else None
+                if current_market and hasattr(self._engine, 'sync_position'):
+                    synced_pos = await self._engine.sync_position(current_market, force=True)
+                    if synced_pos:
+                        logger.info(f"[LIVE] Position synced: UP={synced_pos.up_size:.0f}, DOWN={synced_pos.down_size:.0f}")
+                    else:
+                        logger.info("[LIVE] No existing position found")
+            except Exception as e:
+                logger.warning(f"[LIVE] Failed to sync position at startup: {e}")
+
+            # CRITICAL: Cancel ALL open orders to start fresh
+            logger.info("[LIVE] Cancelling any existing open orders...")
+            try:
+                if hasattr(self._engine, 'client'):
+                    open_orders = await self._engine.client.get_open_orders()
+                    if open_orders:
+                        cancelled = 0
+                        for order in open_orders:
+                            order_id = order.get('id')
+                            if order_id:
+                                try:
+                                    await self._engine.client.cancel_order(order_id)
+                                    cancelled += 1
+                                except Exception as cancel_err:
+                                    logger.warning(f"[LIVE] Failed to cancel order {order_id[:16]}...: {cancel_err}")
+                        logger.info(f"[LIVE] Cancelled {cancelled} existing orders")
+                    else:
+                        logger.info("[LIVE] No open orders to cancel")
+            except Exception as e:
+                logger.warning(f"[LIVE] Failed to check/cancel open orders: {e}")
+
         # Start rotator session
         if not await self._rotator.start_session():
             logger.error("Failed to start session - no markets available")
@@ -4236,15 +4271,38 @@ class PaperTradingBot:
 
         # =========================================================================
         # CRITICAL: Re-sync position from REST API (get ACTUAL Polymarket holdings)
+        # AND SYNC TO STRATEGY'S INTERNAL STATE (for rebalancing to work!)
         # =========================================================================
         if self.trading_mode == "live" and hasattr(self._engine, 'sync_position'):
             try:
                 synced_pos = await self._engine.sync_position(market)
                 if synced_pos:
                     position = synced_pos
-                    current_up = position.up_size
-                    current_down = position.down_size
-                    logger.debug(f"[SPREADCAP] REST sync: UP={current_up}, DOWN={current_down}")
+                    # FIXED: Use round() not int() to avoid truncation errors
+                    # int(4.9222) = 4, but round(4.9222) = 5
+                    current_up = round(position.up_size)
+                    current_down = round(position.down_size)
+
+                    # CRITICAL: Sync REST position INTO strategy's internal state
+                    # This is what rebalancing checks - it MUST match reality!
+                    old_up = strategy.state.up_shares
+                    old_down = strategy.state.down_shares
+
+                    if current_up != old_up or current_down != old_down:
+                        strategy.state.up_shares = current_up
+                        strategy.state.down_shares = current_down
+                        strategy.state.up_cost = position.up_cost
+                        strategy.state.down_cost = position.down_cost
+                        # FIXED: Use position's avg price directly (already correct after sync_balances fix)
+                        # Don't recalculate - that caused the $0.75 bug
+                        strategy.state.up_avg_price = position.up_avg_price
+                        strategy.state.down_avg_price = position.down_avg_price
+                        logger.info(
+                            f"[SPREADCAP] SYNCED strategy state: "
+                            f"UP {old_up}→{current_up}, DOWN {old_down}→{current_down}"
+                        )
+                    else:
+                        logger.debug(f"[SPREADCAP] REST sync: UP={current_up}, DOWN={current_down}")
             except Exception as e:
                 logger.warning(f"[SPREADCAP] Position sync failed: {e}")
 

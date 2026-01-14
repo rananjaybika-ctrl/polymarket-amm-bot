@@ -1,5 +1,5 @@
 [Unit]
-Description=Polymarket AMM Trading Bot
+Description=Polymarket Trading Bot - Web Dashboard
 After=network.target
 
 [Service]
@@ -8,22 +8,21 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/polymarket-amm-bot
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/home/ubuntu/polymarket-amm-bot/.env
-# CRITICAL: Check kill switch BEFORE starting - if exists, refuse to start
-ExecStartPre=/bin/sh -c 'test ! -f /home/ubuntu/polymarket-amm-bot/.kill_switch || (echo "Kill switch active - refusing to start" && exit 1)'
-ExecStart=/home/ubuntu/polymarket-amm-bot/venv/bin/python scripts/run_paper_bot.py --trading-mode live --accum-mode calculus_maker
-# Changed from on-failure to no - manual control only
-Restart=no
-RestartSec=10
-StandardOutput=append:/home/ubuntu/polymarket-amm-bot/logs/bot.log
-StandardError=append:/home/ubuntu/polymarket-amm-bot/logs/bot.log
+
+# Start ONLY the web server - trading is started via web UI
+# This ensures frontend stays up even when trading is stopped
+ExecStart=/home/ubuntu/polymarket-amm-bot/venv/bin/uvicorn web.server:app --host 0.0.0.0 --port 8000
+
+# ALWAYS restart web server - frontend should be always-on
+Restart=always
+RestartSec=5
+
+StandardOutput=append:/home/ubuntu/polymarket-amm-bot/logs/server.log
+StandardError=append:/home/ubuntu/polymarket-amm-bot/logs/server.log
 
 # Resource limits
 MemoryMax=1G
 CPUQuota=50%
-
-# Auto-restart on failure
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target

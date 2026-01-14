@@ -26,6 +26,7 @@ import asyncio
 import csv
 import sys
 import os
+import random
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -60,8 +61,12 @@ logger = logging.getLogger(__name__)
 VELOCITY_PULL_THRESHOLD = 0.05  # bps/sec - threshold for velocity decisions
 MAX_HEDGE_WAIT_SECS = 120.0     # Force hedge after this time
 GATE_DURATION = 5.0             # Wait 5s at market open
-ENTRY_OFFSET = 0.01             # Place at best_bid - 0.01
-HEDGE_OFFSET = 0.01             # Place at best_bid - 0.01
+FILL_TIMEOUT = 60.0             # Timeout for fill simulation (was 30s)
+FILL_PROB_BASE = 0.02           # Base fill probability per 100ms when close to ask
+MARKET_DURATION = 900           # 15-minute markets in seconds
+
+# NOTE: Entry/hedge offset now uses dynamic get_mispricing_threshold() from strategy
+# instead of fixed offset - matches actual calculus_maker.py behavior
 
 
 # =============================================================================
@@ -132,23 +137,28 @@ class CompletedCycle:
     # Entry
     entry_side: str
     entry_price: float
+    entry_size: int              # Position size (from dynamic sizing)
     entry_decisions_count: int   # How many SKIPs before ENTER
     entry_velocity_at_fill: float
     first_skipped_price: float   # Price at first skip (baseline)
     entry_improvement_bps: float # (first_skipped - actual) * 10000
     time_to_entry_fill_ms: float
+    entry_threshold: float       # Dynamic threshold at entry time
     # Hedge
     hedge_side: str
     hedge_price: float
+    hedge_size: int              # Position size (from dynamic sizing)
     hedge_decisions_count: int   # How many LET_RIDEs before HEDGE
     hedge_velocity_at_fill: float
     hedge_reason: str            # "reversal" or "force_timeout"
     immediate_hedge_price: float # What we would have paid immediately
     hedge_improvement_bps: float # (immediate - actual) * 10000
     time_to_hedge_fill_ms: float
+    hedge_threshold: float       # Dynamic threshold at hedge time
     # Result
     pair_cost: float
     profit: float                # 1.0 - pair_cost
+    profit_dollars: float        # profit * size (actual P&L)
     total_time_ms: float         # Entry to hedge completion
 
 
@@ -198,6 +208,11 @@ class CalcMakerVelocitySim:
 
         # Error tracking: unhedged positions
         self.unhedged_entries: List[Dict[str, Any]] = []  # Track entry fills without hedge
+
+        # Incremental save - generate timestamp once at start
+        self._run_timestamp: str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._cycles_csv_path: Optional[Path] = None
+        self._last_saved_cycle: int = 0  # Track which cycles have been saved
 
     def _on_book_update(self, update: BookUpdate):
         """Callback for WebSocket book updates."""
@@ -251,6 +266,44 @@ class CalcMakerVelocitySim:
             expensive_side=expensive_side,
         ))
 
+    def _save_cycle_incremental(self, cycle: CompletedCycle):
+        """
+        Save a completed cycle to CSV immediately (incremental save).
+        This prevents data loss if the script crashes or disconnects.
+        """
+        # Initialize CSV file on first cycle
+        if self._cycles_csv_path is None:
+            self._cycles_csv_path = self.output_dir / f"calc_velocity_sim_{self._run_timestamp}.csv"
+            with open(self._cycles_csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'cycle_id', 'market_slug', 'timestamp',
+                    'entry_side', 'entry_price', 'entry_size', 'entry_threshold',
+                    'entry_decisions', 'entry_improvement_bps',
+                    'first_skipped_price', 'time_to_entry_fill_ms',
+                    'hedge_side', 'hedge_price', 'hedge_size', 'hedge_threshold',
+                    'hedge_decisions', 'hedge_improvement_bps',
+                    'hedge_reason', 'immediate_hedge_price', 'time_to_hedge_fill_ms',
+                    'pair_cost', 'profit', 'profit_dollars', 'total_time_ms'
+                ])
+            logger.info(f"[SAVE] Created incremental CSV: {self._cycles_csv_path}")
+
+        # Append this cycle
+        with open(self._cycles_csv_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                cycle.cycle_id, cycle.market_slug, cycle.timestamp,
+                cycle.entry_side, cycle.entry_price, cycle.entry_size, cycle.entry_threshold,
+                cycle.entry_decisions_count, cycle.entry_improvement_bps,
+                cycle.first_skipped_price, cycle.time_to_entry_fill_ms,
+                cycle.hedge_side, cycle.hedge_price, cycle.hedge_size, cycle.hedge_threshold,
+                cycle.hedge_decisions_count, cycle.hedge_improvement_bps,
+                cycle.hedge_reason, cycle.immediate_hedge_price, cycle.time_to_hedge_fill_ms,
+                cycle.pair_cost, cycle.profit, cycle.profit_dollars, cycle.total_time_ms
+            ])
+
+        self._last_saved_cycle = cycle.cycle_id
+
     async def initialize(self):
         """Initialize all clients."""
         logger.info("Initializing Calc Maker Velocity Simulator...")
@@ -296,25 +349,64 @@ class CalcMakerVelocitySim:
 
         return markets[0] if markets else None
 
-    async def _simulate_fill(self, side: str, bid_price: float, timeout: float = 60.0) -> Optional[SimulatedFill]:
+    async def _simulate_fill(self, side: str, bid_price: float, timeout: float = None) -> Optional[SimulatedFill]:
         """
         Simulate maker fill using real orderbook data.
-        Fill when best_ask <= our bid price.
+
+        More realistic fill model:
+        1. Instant fill if best_ask <= bid_price (crossed market)
+        2. Probability-based fill when close to ask (simulates takers hitting our bid)
+        3. Higher probability when closer to ask, lower when further
+
+        This better models real market dynamics where someone can cross the spread
+        to hit our bid even if ask hasn't dropped to our level.
         """
+        if timeout is None:
+            timeout = FILL_TIMEOUT
+
         start_time = time.time()
 
         while (time.time() - start_time) < timeout:
             book = self._up_book if side == "UP" else self._down_book
             best_ask = book.best_ask if book and book.best_ask is not None else 1.0
+            best_bid = book.best_bid if book and book.best_bid is not None else 0.0
 
+            # Case 1: Instant fill if ask crossed down to our bid
             if best_ask <= bid_price:
                 fill_time = time.time()
                 return SimulatedFill(
                     side=side,
-                    price=bid_price,  # Maker fill at our price
+                    price=bid_price,
                     filled_at=fill_time,
                     time_to_fill_ms=(fill_time - start_time) * 1000,
                 )
+
+            # Case 2: Probability-based fill (simulates taker hitting our bid)
+            # Higher probability when:
+            # - Our bid is close to best_ask (tight spread)
+            # - Our bid is at or above best_bid (we're competitive)
+            distance_to_ask = best_ask - bid_price
+
+            if distance_to_ask <= 0.03:  # Only if within 3 cents of ask
+                # Fill probability decreases with distance
+                # At distance 0: ~8% per 100ms
+                # At distance 0.01: ~4% per 100ms
+                # At distance 0.02: ~2% per 100ms
+                # At distance 0.03: ~1% per 100ms
+                fill_prob = FILL_PROB_BASE * (1 / (distance_to_ask * 50 + 0.5))
+
+                # Bonus if we're at or above best_bid (competitive)
+                if bid_price >= best_bid:
+                    fill_prob *= 1.5
+
+                if random.random() < fill_prob:
+                    fill_time = time.time()
+                    return SimulatedFill(
+                        side=side,
+                        price=bid_price,
+                        filled_at=fill_time,
+                        time_to_fill_ms=(fill_time - start_time) * 1000,
+                    )
 
             await asyncio.sleep(0.1)  # Check every 100ms
 
@@ -385,14 +477,21 @@ class CalcMakerVelocitySim:
             # ENTER NOW - velocity reversal detected!
             logger.info(f"[ENTRY] Reversal detected: vel={velocity_bps:.3f}bps after {entry_decisions} skips")
 
-            # Place entry order at best_bid - offset
-            entry_bid = (up_bid if expensive_side == "UP" else down_bid) - ENTRY_OFFSET
+            # Place entry order using dynamic threshold and sizing (matches calculus_maker.py)
+            time_remaining = market.time_remaining()
+            entry_threshold = self.strategy.get_threshold(time_remaining)
+            entry_size = self.strategy.get_size(time_remaining)
+            best_bid = up_bid if expensive_side == "UP" else down_bid
+            entry_bid = best_bid - entry_threshold
             entry_bid = max(0.01, round(entry_bid, 2))
 
-            entry_fill = await self._simulate_fill(expensive_side, entry_bid, timeout=30.0)
+            logger.debug(f"[ENTRY] t_rem={time_remaining:.0f}s, threshold={entry_threshold:.4f}, "
+                        f"size={entry_size}, bid={best_bid:.3f} -> entry_bid={entry_bid:.3f}")
+
+            entry_fill = await self._simulate_fill(expensive_side, entry_bid, timeout=FILL_TIMEOUT)
 
             if not entry_fill:
-                logger.warning(f"[ENTRY] Fill timeout after 30s, aborting cycle")
+                logger.warning(f"[ENTRY] Fill timeout after {FILL_TIMEOUT:.0f}s, aborting cycle")
                 return None
 
             # Record entry decision
@@ -486,12 +585,19 @@ class CalcMakerVelocitySim:
             # HEDGE NOW - velocity reversal or timeout!
             logger.info(f"[HEDGE] Trigger: {reason} after {hedge_decisions} rides, vel={velocity_bps:.3f}bps")
 
-            # Place hedge order at best_bid - offset
-            hedge_bid = (down_bid if expensive_side == "UP" else up_bid) - HEDGE_OFFSET
+            # Place hedge order using dynamic threshold and sizing (matches calculus_maker.py)
+            hedge_time_remaining = market.time_remaining()
+            hedge_threshold = self.strategy.get_threshold(hedge_time_remaining)
+            hedge_size = self.strategy.get_size(hedge_time_remaining)
+            hedge_best_bid = down_bid if expensive_side == "UP" else up_bid
+            hedge_bid = hedge_best_bid - hedge_threshold
             hedge_bid = max(0.01, min(hedge_bid, max_hedge_price))
             hedge_bid = round(hedge_bid, 2)
 
-            hedge_fill = await self._simulate_fill(cheap_side, hedge_bid, timeout=30.0)
+            logger.debug(f"[HEDGE] t_rem={hedge_time_remaining:.0f}s, threshold={hedge_threshold:.4f}, "
+                        f"size={hedge_size}, bid={hedge_best_bid:.3f} -> hedge_bid={hedge_bid:.3f}")
+
+            hedge_fill = await self._simulate_fill(cheap_side, hedge_bid, timeout=FILL_TIMEOUT)
 
             if not hedge_fill:
                 # Hedge fill timeout - only ERROR if >15 minutes unhedged
@@ -510,7 +616,7 @@ class CalcMakerVelocitySim:
                         'reason': 'spillover_15min',
                     })
                 else:
-                    logger.warning(f"[HEDGE] Fill timeout after 30s (unhedged {time_unhedged:.0f}s)")
+                    logger.warning(f"[HEDGE] Fill timeout after {FILL_TIMEOUT:.0f}s (unhedged {time_unhedged:.0f}s)")
                 return None
 
             # Record hedge decision
@@ -554,6 +660,11 @@ class CalcMakerVelocitySim:
         pair_cost = entry_fill.price + hedge_fill.price
         profit = 1.0 - pair_cost
 
+        # Use min(entry_size, hedge_size) for actual position size
+        # (in reality both sides should match for a complete pair)
+        position_size = min(entry_size, hedge_size)
+        profit_dollars = profit * position_size
+
         # Calculate improvements in basis points
         baseline_entry = first_skipped_price if first_skipped_price else entry_fill.price
         entry_improvement_bps = (baseline_entry - entry_fill.price) * 10000
@@ -565,27 +676,35 @@ class CalcMakerVelocitySim:
             timestamp=time.time(),
             entry_side=expensive_side,
             entry_price=entry_fill.price,
+            entry_size=entry_size,
             entry_decisions_count=entry_decisions,
             entry_velocity_at_fill=velocity_bps,
             first_skipped_price=baseline_entry,
             entry_improvement_bps=entry_improvement_bps,
             time_to_entry_fill_ms=entry_fill.time_to_fill_ms,
+            entry_threshold=entry_threshold,
             hedge_side=cheap_side,
             hedge_price=hedge_fill.price,
+            hedge_size=hedge_size,
             hedge_decisions_count=hedge_decisions,
             hedge_velocity_at_fill=velocity_bps,
             hedge_reason="reversal" if "reversal" in reason.lower() else "force_timeout",
             immediate_hedge_price=immediate_hedge_price,
             hedge_improvement_bps=hedge_improvement_bps,
             time_to_hedge_fill_ms=hedge_fill.time_to_fill_ms,
+            hedge_threshold=hedge_threshold,
             pair_cost=pair_cost,
             profit=profit,
+            profit_dollars=profit_dollars,
             total_time_ms=(time.time() - cycle_start) * 1000,
         )
         self.completed_cycles.append(cycle)
 
-        logger.info(f"[CYCLE {self._cycle_count}] Complete: pair=${pair_cost:.3f}, "
-                   f"profit=${profit:.3f}, entry_improve={entry_improvement_bps:.1f}bps, "
+        # Save immediately (incremental) to prevent data loss on disconnect
+        self._save_cycle_incremental(cycle)
+
+        logger.info(f"[CYCLE {self._cycle_count}] Complete: size={position_size}, pair=${pair_cost:.3f}, "
+                   f"profit=${profit:.3f} (${profit_dollars:.2f}), entry_improve={entry_improvement_bps:.1f}bps, "
                    f"hedge_improve={hedge_improvement_bps:.1f}bps")
 
         return cycle
@@ -745,29 +864,37 @@ class CalcMakerVelocitySim:
 
     def _write_results(self):
         """Write CSV and print summary statistics."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Use the same timestamp from run start for consistency
+        timestamp = self._run_timestamp
 
-        # Write cycles CSV
-        cycles_path = self.output_dir / f"calc_velocity_sim_{timestamp}.csv"
-        with open(cycles_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                'cycle_id', 'market_slug', 'timestamp',
-                'entry_side', 'entry_price', 'entry_decisions', 'entry_improvement_bps',
-                'first_skipped_price', 'time_to_entry_fill_ms',
-                'hedge_side', 'hedge_price', 'hedge_decisions', 'hedge_improvement_bps',
-                'hedge_reason', 'immediate_hedge_price', 'time_to_hedge_fill_ms',
-                'pair_cost', 'profit', 'total_time_ms'
-            ])
-            for c in self.completed_cycles:
+        # Cycles CSV already saved incrementally - just get the path
+        cycles_path = self._cycles_csv_path or self.output_dir / f"calc_velocity_sim_{timestamp}.csv"
+
+        # If no cycles were saved incrementally, write them now (fallback)
+        if self._cycles_csv_path is None and self.completed_cycles:
+            with open(cycles_path, 'w', newline='') as f:
+                writer = csv.writer(f)
                 writer.writerow([
-                    c.cycle_id, c.market_slug, c.timestamp,
-                    c.entry_side, c.entry_price, c.entry_decisions_count, c.entry_improvement_bps,
-                    c.first_skipped_price, c.time_to_entry_fill_ms,
-                    c.hedge_side, c.hedge_price, c.hedge_decisions_count, c.hedge_improvement_bps,
-                    c.hedge_reason, c.immediate_hedge_price, c.time_to_hedge_fill_ms,
-                    c.pair_cost, c.profit, c.total_time_ms
+                    'cycle_id', 'market_slug', 'timestamp',
+                    'entry_side', 'entry_price', 'entry_size', 'entry_threshold',
+                    'entry_decisions', 'entry_improvement_bps',
+                    'first_skipped_price', 'time_to_entry_fill_ms',
+                    'hedge_side', 'hedge_price', 'hedge_size', 'hedge_threshold',
+                    'hedge_decisions', 'hedge_improvement_bps',
+                    'hedge_reason', 'immediate_hedge_price', 'time_to_hedge_fill_ms',
+                    'pair_cost', 'profit', 'profit_dollars', 'total_time_ms'
                 ])
+                for c in self.completed_cycles:
+                    writer.writerow([
+                        c.cycle_id, c.market_slug, c.timestamp,
+                        c.entry_side, c.entry_price, c.entry_size, c.entry_threshold,
+                        c.entry_decisions_count, c.entry_improvement_bps,
+                        c.first_skipped_price, c.time_to_entry_fill_ms,
+                        c.hedge_side, c.hedge_price, c.hedge_size, c.hedge_threshold,
+                        c.hedge_decisions_count, c.hedge_improvement_bps,
+                        c.hedge_reason, c.immediate_hedge_price, c.time_to_hedge_fill_ms,
+                        c.pair_cost, c.profit, c.profit_dollars, c.total_time_ms
+                    ])
 
         # Write decisions CSV (detailed)
         decisions_path = self.output_dir / f"calc_velocity_decisions_{timestamp}.csv"
@@ -826,12 +953,31 @@ class CalcMakerVelocitySim:
 
         profitable_count = sum(1 for c in self.completed_cycles if c.profit > 0)
 
+        # Position sizing stats
+        avg_entry_size = sum(c.entry_size for c in self.completed_cycles) / n
+        avg_hedge_size = sum(c.hedge_size for c in self.completed_cycles) / n
+        total_profit_dollars = sum(c.profit_dollars for c in self.completed_cycles)
+        avg_profit_dollars = total_profit_dollars / n
+
+        # Threshold stats
+        avg_entry_threshold = sum(c.entry_threshold for c in self.completed_cycles) / n
+        avg_hedge_threshold = sum(c.hedge_threshold for c in self.completed_cycles) / n
+
         print(f"Total cycles: {n}")
         print(f"Profitable: {profitable_count}/{n} ({100*profitable_count/n:.1f}%)")
         print(f"")
-        print(f"Avg pair cost: ${avg_pair_cost:.4f}")
-        print(f"Avg profit: ${avg_profit:.4f}")
-        print(f"Total profit: ${sum(c.profit for c in self.completed_cycles):.4f}")
+        print(f"PROFIT SUMMARY:")
+        print(f"  Avg pair cost: ${avg_pair_cost:.4f}")
+        print(f"  Avg profit/share: ${avg_profit:.4f}")
+        print(f"  Total profit/share: ${sum(c.profit for c in self.completed_cycles):.4f}")
+        print(f"  Avg profit/cycle: ${avg_profit_dollars:.2f}")
+        print(f"  Total profit ($): ${total_profit_dollars:.2f}")
+        print(f"")
+        print(f"POSITION SIZING (dynamic, matches calculus_maker.py):")
+        print(f"  Avg entry size: {avg_entry_size:.1f} shares")
+        print(f"  Avg hedge size: {avg_hedge_size:.1f} shares")
+        print(f"  Avg entry threshold: {avg_entry_threshold:.4f}")
+        print(f"  Avg hedge threshold: {avg_hedge_threshold:.4f}")
         print(f"")
         print(f"VELOCITY TIMING EFFECTIVENESS:")
         print(f"  Entry improvement: {avg_entry_improvement:.2f} bps avg")

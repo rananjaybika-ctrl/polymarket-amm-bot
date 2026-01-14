@@ -496,9 +496,29 @@ class Position:
         """
         Sync balances from chain state.
 
-        Note: This updates balances but not costs/averages.
-        Use when reconciling with on-chain state.
+        FIXED: Scales costs proportionally AND recalculates avg prices.
+        This preserves the avg price when chain balance differs slightly.
         """
+        # Adjust UP cost proportionally to preserve avg price
+        if self.up_balance > 0 and up_balance > 0 and up_balance != self.up_balance:
+            ratio = up_balance / self.up_balance
+            self.up_total_cost = self.up_total_cost * ratio
+            # Recalculate avg price from new cost/balance
+            self.up_avg_price = self.up_total_cost / up_balance
+        elif up_balance == 0:
+            self.up_total_cost = 0.0
+            self.up_avg_price = 0.0
+
+        # Adjust DOWN cost proportionally to preserve avg price
+        if self.down_balance > 0 and down_balance > 0 and down_balance != self.down_balance:
+            ratio = down_balance / self.down_balance
+            self.down_total_cost = self.down_total_cost * ratio
+            # Recalculate avg price from new cost/balance
+            self.down_avg_price = self.down_total_cost / down_balance
+        elif down_balance == 0:
+            self.down_total_cost = 0.0
+            self.down_avg_price = 0.0
+
         self.up_balance = up_balance
         self.down_balance = down_balance
         self.updated_at = datetime.now(timezone.utc)

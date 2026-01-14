@@ -1268,6 +1268,221 @@ class PaperTradingEngine:
             "total_trades": len(self._trades),
         }
 
+    # =========================================================================
+    # GRID MAKER SIMULATION (Gabagool-style fills based on market flow)
+    # =========================================================================
+
+    def get_grid_fill_probability(
+        self,
+        price: float,
+        side: str,
+        btc_pct_from_strike: float,
+    ) -> float:
+        """
+        Calculate fill probability for a grid order based on price attractiveness
+        and market regime.
+
+        Key insight from Gabagool analysis:
+        - When BTC far from strike, one side becomes "worthless" (10-30%)
+        - Holders panic sell that worthless side
+        - Grid bids on that side get swept
+
+        Args:
+            price: Our bid price
+            side: "UP" or "DOWN"
+            btc_pct_from_strike: BTC price vs strike as percentage (positive = above)
+
+        Returns:
+            Fill probability (0.0 to 1.0)
+        """
+        base_prob = 0.15  # Base probability per tick
+
+        # =================================================================
+        # PRICE ATTRACTIVENESS: Cheaper bids are more attractive to sellers
+        # =================================================================
+        if price < 0.20:
+            price_mult = 3.0  # Very attractive - panic sellers will hit this
+        elif price < 0.30:
+            price_mult = 2.5
+        elif price < 0.40:
+            price_mult = 1.8
+        elif price > 0.80:
+            price_mult = 2.5  # Also attractive during opposite trend
+        elif price > 0.70:
+            price_mult = 2.0
+        elif price > 0.60:
+            price_mult = 1.5
+        else:
+            price_mult = 1.0  # Mid-range prices
+
+        # =================================================================
+        # MARKET REGIME: Which side is being dumped based on BTC position
+        # =================================================================
+        # When BTC above strike → DOWN is worthless → DOWN gets dumped
+        # When BTC below strike → UP is worthless → UP gets dumped
+
+        if side == "DOWN" and btc_pct_from_strike > 0.01:
+            # BTC above strike - DOWN is being dumped
+            # Higher BTC = more panic selling of DOWN
+            regime_mult = 1.5 + min(2.5, abs(btc_pct_from_strike) * 30)
+        elif side == "UP" and btc_pct_from_strike < -0.01:
+            # BTC below strike - UP is being dumped
+            regime_mult = 1.5 + min(2.5, abs(btc_pct_from_strike) * 30)
+        elif abs(btc_pct_from_strike) < 0.01:
+            # BTC near strike - balanced fills
+            regime_mult = 1.0
+        else:
+            # We're on the "winning" side - less likely to fill
+            regime_mult = 0.5
+
+        final_prob = min(0.85, base_prob * price_mult * regime_mult)
+
+        logger.debug(
+            f"Grid fill prob: {side} @ ${price:.2f}, BTC {btc_pct_from_strike:+.2%}, "
+            f"price_mult={price_mult:.1f}, regime_mult={regime_mult:.1f}, prob={final_prob:.0%}"
+        )
+
+        return final_prob
+
+    async def simulate_grid_fills(
+        self,
+        market: BTCMarket,
+        grid_levels: List[Dict[str, Any]],
+        btc_pct_from_strike: float,
+        up_ask: float,
+        down_ask: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        Simulate grid fills based on market flow (Gabagool-style).
+
+        This replaces the simple "ask <= bid" fill logic with realistic
+        market flow simulation:
+        1. Calculate fill probability based on price + regime
+        2. Simulate burst fills (taker sweeps multiple levels)
+        3. Fill cheap side more when BTC moves
+
+        Args:
+            market: BTCMarket being traded
+            grid_levels: List of grid levels [{"side": "UP", "price": 0.50, "size": 10}, ...]
+            btc_pct_from_strike: BTC position relative to strike
+            up_ask: Current UP best ask
+            down_ask: Current DOWN best ask
+
+        Returns:
+            List of fills [{"side": "UP", "price": 0.50, "size": 10, "filled_price": 0.49}, ...]
+        """
+        fills = []
+
+        # =================================================================
+        # DETERMINE SWEEP PROBABILITY based on market regime
+        # =================================================================
+        # When BTC moves significantly, takers sweep multiple levels
+        if abs(btc_pct_from_strike) > 0.05:
+            sweep_probability = 0.6  # High chance of multi-level sweep
+            max_levels_per_sweep = 6
+        elif abs(btc_pct_from_strike) > 0.02:
+            sweep_probability = 0.4
+            max_levels_per_sweep = 4
+        else:
+            sweep_probability = 0.2  # Near strike - less sweeping
+            max_levels_per_sweep = 2
+
+        # Determine which side is "cheap" (being dumped)
+        if btc_pct_from_strike > 0.01:
+            cheap_side = "DOWN"
+        elif btc_pct_from_strike < -0.01:
+            cheap_side = "UP"
+        else:
+            cheap_side = None  # Both sides roughly equal
+
+        # =================================================================
+        # SIMULATE SWEEP on cheap side
+        # =================================================================
+        if cheap_side and random.random() < sweep_probability:
+            # Get fillable levels on cheap side, sorted by price (best for seller first)
+            cheap_levels = [
+                l for l in grid_levels
+                if l.get("side") == cheap_side and l.get("status") == "posted"
+            ]
+
+            if cheap_levels:
+                # Sort by price descending (highest bids filled first by sellers)
+                cheap_levels.sort(key=lambda x: x.get("price", 0), reverse=True)
+
+                # Sweep 1 to max_levels
+                num_to_fill = random.randint(1, min(max_levels_per_sweep, len(cheap_levels)))
+
+                for level in cheap_levels[:num_to_fill]:
+                    fill_size = level.get("size", 10)
+                    bid_price = level.get("price", 0.50)
+
+                    # Fill at bid price or slightly better (seller hits our bid)
+                    best_ask = down_ask if cheap_side == "DOWN" else up_ask
+                    if best_ask < bid_price:
+                        # Market crossed - fill at market price
+                        filled_price = best_ask
+                    else:
+                        # Fill at our bid
+                        filled_price = bid_price
+
+                    fills.append({
+                        "side": cheap_side,
+                        "price": bid_price,
+                        "size": fill_size,
+                        "filled_price": filled_price,
+                        "sweep": True,
+                    })
+
+                    logger.info(
+                        f"[GRID_SIM] Sweep fill: {cheap_side} {fill_size} @ ${filled_price:.3f} "
+                        f"(bid=${bid_price:.2f}, BTC {btc_pct_from_strike:+.2%})"
+                    )
+
+        # =================================================================
+        # INDIVIDUAL FILLS on both sides based on probability
+        # =================================================================
+        for level in grid_levels:
+            if level.get("status") != "posted":
+                continue
+
+            side = level.get("side", "")
+            price = level.get("price", 0)
+            size = level.get("size", 10)
+
+            # Skip if already filled in sweep
+            already_filled = any(
+                f["side"] == side and abs(f["price"] - price) < 0.001
+                for f in fills
+            )
+            if already_filled:
+                continue
+
+            # Calculate fill probability
+            fill_prob = self.get_grid_fill_probability(price, side, btc_pct_from_strike)
+
+            if random.random() < fill_prob:
+                best_ask = down_ask if side == "DOWN" else up_ask
+
+                if best_ask < price:
+                    filled_price = best_ask
+                else:
+                    filled_price = price
+
+                fills.append({
+                    "side": side,
+                    "price": price,
+                    "size": size,
+                    "filled_price": filled_price,
+                    "sweep": False,
+                })
+
+                logger.info(
+                    f"[GRID_SIM] Prob fill: {side} {size} @ ${filled_price:.3f} "
+                    f"(prob={fill_prob:.0%})"
+                )
+
+        return fills
+
     def reset(self) -> None:
         """Reset simulation to initial state."""
         self._balance = self.initial_balance

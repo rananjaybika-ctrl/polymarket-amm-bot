@@ -84,7 +84,7 @@ GRID_SPACING = 0.01             # $0.01 between grid levels
 
 # Inventory management (from Telegram alpha)
 DEFAULT_MAX_IMBALANCE_PCT = 0.10  # 10% max imbalance
-DEFAULT_MAX_IMBALANCE_SHARES = 50  # Absolute cap on imbalance
+DEFAULT_MAX_IMBALANCE_SHARES = 10  # Absolute cap on imbalance (tightened from 50)
 FORCE_REBALANCE_OFFSET = 0.005    # Tighter offset when force-buying lagging side
 
 # Polymarket constraints
@@ -364,7 +364,7 @@ class SpreadCaptureStrategy:
 
     def calculate_offsets(self, velocity_bps: float) -> Tuple[float, float]:
         """
-        Calculate quote offsets based on velocity.
+        Calculate quote offsets based on velocity AND current inventory.
 
         THIS IS THE CRITICAL LOGIC - THE CORRECT WAY:
 
@@ -376,6 +376,11 @@ class SpreadCaptureStrategy:
             - UP will get cheaper (overpriced NOW) → WIDEN UP bid
             - DOWN will get more expensive (underpriced NOW) → TIGHTEN DOWN bid
 
+        INVENTORY ADJUSTMENT (from Telegram alpha):
+            - If imbalanced, be MORE aggressive on lagging side
+            - "amount of down shares can only be 10% more than up shares"
+            - When neutral velocity, use inventory to break tie
+
         Args:
             velocity_bps: Current BTC velocity in basis points per second
 
@@ -383,10 +388,23 @@ class SpreadCaptureStrategy:
             (up_offset, down_offset) - offsets from best_bid
         """
         abs_velocity = abs(velocity_bps)
+        s = self.state
 
-        # Neutral zone - no directional bias
+        # Calculate inventory bias: positive = need more UP, negative = need more DOWN
+        inventory_bias = s.down_shares - s.up_shares  # If DOWN > UP, bias > 0 (need UP)
+
+        # Neutral zone - USE INVENTORY TO DECIDE
         if abs_velocity < VELOCITY_THRESHOLD:
-            return (BASE_OFFSET, BASE_OFFSET)
+            # If balanced, be aggressive on BOTH sides to get fills
+            if abs(inventory_bias) <= 2:
+                # Both sides aggressive when balanced - get fills on both
+                return (TIGHT_OFFSET, TIGHT_OFFSET)
+            elif inventory_bias > 0:
+                # Need more UP (have more DOWN) - aggressive UP, passive DOWN
+                return (TIGHT_OFFSET, WIDE_OFFSET)
+            else:
+                # Need more DOWN (have more UP) - passive UP, aggressive DOWN
+                return (WIDE_OFFSET, TIGHT_OFFSET)
 
         # Strong velocity - more aggressive adjustment
         if abs_velocity > VELOCITY_STRONG:
@@ -437,16 +455,22 @@ class SpreadCaptureStrategy:
 
         sides_to_pull: List[str] = []
         if zone_changed and self.enable_auto_pull:
-            if self.pull_mode == "both":
-                # Pull ALL orders for clean slate repricing
+            # RESTING ORDER FIX: Don't pull orders when transitioning TO neutral.
+            # Let resting bids stay on the book - they can fill when price moves favorably.
+            # Only pull when moving FROM neutral (need new directional offsets) or
+            # between directional zones (significant repricing needed).
+            if new_zone == VelocityZone.NEUTRAL:
+                # Going TO neutral - let orders rest, don't pull
+                sides_to_pull = []
+            elif self.pull_mode == "both":
+                # Moving away from neutral OR between directional zones - reprice both
                 sides_to_pull = ["UP", "DOWN"]
             elif self.pull_mode == "adverse_only":
                 # Legacy: only pull the side getting overpriced
-                if new_zone != VelocityZone.NEUTRAL:
-                    if velocity_bps > 0:  # Rising - DOWN is adverse
-                        sides_to_pull = ["DOWN"]
-                    else:  # Falling - UP is adverse
-                        sides_to_pull = ["UP"]
+                if velocity_bps > 0:  # Rising - DOWN is adverse
+                    sides_to_pull = ["DOWN"]
+                else:  # Falling - UP is adverse
+                    sides_to_pull = ["UP"]
 
         # Update state
         self.state.last_velocity_zone = new_zone

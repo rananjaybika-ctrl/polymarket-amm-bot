@@ -146,6 +146,46 @@ class TheoreticalPosition:
         self.down_cost = 0.0
 
 
+@dataclass
+class RestingOrders:
+    """
+    Track resting orders that haven't filled yet.
+
+    Key insight: A hedge bid placed earlier should fill when ask drops to our price,
+    even if velocity has since gone neutral. This tracks outstanding orders.
+    """
+    up_bid: Optional[float] = None
+    down_bid: Optional[float] = None
+
+    def reset(self):
+        """Reset for new market."""
+        self.up_bid = None
+        self.down_bid = None
+
+
+@dataclass
+class EntryState:
+    """
+    Track entry fill and fixed hedge target per scenario.
+
+    Key insight: Once entry fills, lock the hedge target and don't recalculate.
+    This prevents the "chasing down" bug where hedge bid keeps dropping.
+    """
+    entry_filled: bool = False
+    entry_side: Optional[str] = None
+    entry_price: float = 0.0
+    hedge_target: float = 0.0
+    hedge_filled: bool = False
+
+    def reset(self):
+        """Reset for new market."""
+        self.entry_filled = False
+        self.entry_side = None
+        self.entry_price = 0.0
+        self.hedge_target = 0.0
+        self.hedge_filled = False
+
+
 # =============================================================================
 # SIGNAL GENERATOR
 # =============================================================================
@@ -246,6 +286,16 @@ class SpreadCaptureObserver:
         # Theoretical positions per scenario
         self.positions: Dict[str, TheoreticalPosition] = {
             name: TheoreticalPosition() for name in SCENARIOS.keys()
+        }
+
+        # Resting orders per scenario (tracks bids that haven't filled yet)
+        self.resting_orders: Dict[str, RestingOrders] = {
+            name: RestingOrders() for name in SCENARIOS.keys()
+        }
+
+        # Entry states per scenario (tracks fixed hedge targets)
+        self.entry_states: Dict[str, EntryState] = {
+            name: EntryState() for name in SCENARIOS.keys()
         }
 
         # CSV logging
@@ -454,18 +504,64 @@ class SpreadCaptureObserver:
             # Entry signal: velocity signal (pair_cost is a RESULT, not a gate)
             entry_signal = entry_side != "NONE"
 
-            # Track theoretical fills INDEPENDENTLY (strategy quotes both sides)
-            # Each side fills when our bid would execute, regardless of other side
-            if entry_would_fill:
-                if entry_side == "UP":
-                    pos.add_fill("UP", entry_price, self.trade_size)
-                elif entry_side == "DOWN":
-                    pos.add_fill("DOWN", entry_price, self.trade_size)
-            if hedge_would_fill:
-                if entry_side == "UP":
-                    pos.add_fill("DOWN", hedge_price, self.trade_size)
-                elif entry_side == "DOWN":
-                    pos.add_fill("UP", hedge_price, self.trade_size)
+            # Get entry state for this scenario (FIXED HEDGE LOGIC)
+            entry_state = self.entry_states[scenario_name]
+
+            # FIXED HEDGE LOGIC:
+            # 1. Entry fills ONCE per market when signal + price crosses spread
+            # 2. Hedge target is FIXED at entry time: target_pair_cost - entry_price
+            # 3. Hedge fills when ask drops to our FIXED target (no chasing)
+
+            up_filled = False
+            down_filled = False
+
+            # ENTRY LOGIC: Only set entry once per market
+            if not entry_state.entry_filled and entry_side != "NONE":
+                # Check if entry would fill (tight bid crosses spread)
+                if entry_side == "UP" and entry_would_fill:
+                    entry_state.entry_filled = True
+                    entry_state.entry_side = "UP"
+                    entry_state.entry_price = up_ask  # Fill at ask
+                    # FIXED HEDGE TARGET: Set once, never change
+                    target_pair_cost = 0.97  # 3% edge target
+                    entry_state.hedge_target = target_pair_cost - entry_state.entry_price
+                    entry_state.hedge_target = max(0.01, min(0.95, entry_state.hedge_target))
+                    pos.add_fill("UP", entry_state.entry_price, self.trade_size)
+                    up_filled = True
+                elif entry_side == "DOWN" and entry_would_fill:
+                    entry_state.entry_filled = True
+                    entry_state.entry_side = "DOWN"
+                    entry_state.entry_price = down_ask  # Fill at ask
+                    target_pair_cost = 0.97
+                    entry_state.hedge_target = target_pair_cost - entry_state.entry_price
+                    entry_state.hedge_target = max(0.01, min(0.95, entry_state.hedge_target))
+                    pos.add_fill("DOWN", entry_state.entry_price, self.trade_size)
+                    down_filled = True
+
+            # HEDGE LOGIC: Check against FIXED target (doesn't change!)
+            if entry_state.entry_filled and not entry_state.hedge_filled:
+                if entry_state.entry_side == "UP":
+                    # Hedge is DOWN side - check if DOWN ask <= our FIXED target
+                    if down_ask <= entry_state.hedge_target:
+                        entry_state.hedge_filled = True
+                        pos.add_fill("DOWN", down_ask, self.trade_size)
+                        down_filled = True
+                        hedge_price = down_ask  # Update for logging
+                else:
+                    # Hedge is UP side - check if UP ask <= our FIXED target
+                    if up_ask <= entry_state.hedge_target:
+                        entry_state.hedge_filled = True
+                        pos.add_fill("UP", up_ask, self.trade_size)
+                        up_filled = True
+                        hedge_price = up_ask  # Update for logging
+
+            # Update would_fill flags for CSV logging
+            entry_would_fill = up_filled if entry_state.entry_side == "UP" else down_filled if entry_state.entry_side == "DOWN" else False
+            hedge_would_fill = down_filled if entry_state.entry_side == "UP" else up_filled if entry_state.entry_side == "DOWN" else False
+
+            # Update hedge_price for logging if we have a fixed target
+            if entry_state.entry_filled:
+                hedge_price = entry_state.hedge_target
 
             prefix = scenario_name[:4]
             row.extend([
@@ -519,9 +615,13 @@ class SpreadCaptureObserver:
         print(f"  UP token: {market.up_token_id[:16]}...", flush=True)
         print(f"  DOWN token: {market.down_token_id[:16]}...", flush=True)
 
-        # Reset positions for new market
+        # Reset positions, resting orders, and entry states for new market
         for pos in self.positions.values():
             pos.reset()
+        for resting in self.resting_orders.values():
+            resting.reset()
+        for entry_state in self.entry_states.values():
+            entry_state.reset()
 
         # Update state to new market
         self.up_token_id = market.up_token_id

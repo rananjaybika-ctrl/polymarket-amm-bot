@@ -63,6 +63,13 @@ class Config:
         )
         self.chain_id: int = int(os.getenv("CHAIN_ID", "137"))  # Polygon mainnet
 
+        # CLOB API credentials (for User WebSocket - real-time fill notifications)
+        # These are the same as Builder Relayer credentials
+        # Get from: https://polymarket.com/settings?tab=builder
+        self.polymarket_api_key: str = os.getenv("POLYMARKET_API_KEY", "") or os.getenv("BUILDER_API_KEY", "")
+        self.polymarket_secret: str = os.getenv("POLYMARKET_SECRET", "") or os.getenv("BUILDER_SECRET", "")
+        self.polymarket_passphrase: str = os.getenv("POLYMARKET_PASSPHRASE", "") or os.getenv("BUILDER_PASSPHRASE", "")
+
         # === WALLET TYPE ===
         # "eoa" = standard MetaMask/hardware wallet (default)
         # "magic" = email login (Magic wallet) - requires FUNDER_ADDRESS

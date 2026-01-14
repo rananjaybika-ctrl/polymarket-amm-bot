@@ -108,22 +108,15 @@ def activate_kill_switch(reason: str = "manual") -> bool:
         )
         logger.critical(f"[KILL SWITCH] Activated: {reason}")
 
-        # Try to disable systemd service (may fail if not on systemd)
-        try:
-            subprocess.run(
-                ["sudo", "systemctl", "stop", "polymarket-bot"],
-                capture_output=True,
-                timeout=10
-            )
-            subprocess.run(
-                ["sudo", "systemctl", "disable", "polymarket-bot"],
-                capture_output=True,
-                timeout=10
-            )
-            logger.critical("[KILL SWITCH] systemd service stopped and disabled")
-        except Exception as e:
-            # Not on systemd or no permissions - that's ok, kill file still works
-            logger.warning(f"[KILL SWITCH] Could not disable systemd: {e}")
+        # NOTE: We NO LONGER stop systemd service here!
+        # The web server (uvicorn) runs in the same service as the trading tasks.
+        # Stopping systemd would kill the frontend, which is NOT what we want.
+        # The kill file alone is sufficient to prevent auto-restart of trading.
+        #
+        # If you need to fully stop everything including web server, use:
+        #   sudo systemctl stop polymarket-bot
+        # from the command line.
+        logger.info("[KILL SWITCH] Kill file created - trading will not auto-restart")
 
         return True
     except Exception as e:
