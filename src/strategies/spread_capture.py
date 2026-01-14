@@ -146,6 +146,11 @@ DEFAULT_MIN_PROFIT = 0.005
 DEFAULT_MAX_SHARE_PRICE = 0.95
 DEFAULT_ENABLE_CYCLING = False  # If False, stop at target; if True, keep cycling
 
+# Zone filtering - only trade when velocity >= min_velocity_bps
+# Set to 0.30 for zones 4-6 only (very_strong, extreme, super_strong)
+# Set to 0.0 for all zones (default)
+DEFAULT_MIN_VELOCITY_BPS = 0.0  # 0.0 = all zones, 0.30 = zones 4-6 only
+
 # Timing
 MIN_TIME_REMAINING = 60         # Don't place new orders with <60s left
 QUOTE_REFRESH_INTERVAL = 0.5    # Refresh quotes every 500ms
@@ -329,6 +334,7 @@ class SpreadCaptureStrategy:
         min_profit: float = DEFAULT_MIN_PROFIT,
         max_share_price: float = DEFAULT_MAX_SHARE_PRICE,
         enable_cycling: bool = DEFAULT_ENABLE_CYCLING,
+        min_velocity_bps: float = DEFAULT_MIN_VELOCITY_BPS,  # Zone filter: 0.30 = zones 4-6 only
         # LEGACY parameters (aliases)
         entry_size: Optional[int] = None,
         entry_offset: float = DEFAULT_ENTRY_OFFSET,
@@ -349,6 +355,7 @@ class SpreadCaptureStrategy:
         self.min_profit = min_profit
         self.max_share_price = max_share_price
         self.enable_cycling = enable_cycling
+        self.min_velocity_bps = min_velocity_bps  # Zone filter threshold
 
         # LEGACY attributes
         self.entry_offset = entry_offset
@@ -359,9 +366,10 @@ class SpreadCaptureStrategy:
         self.state.last_velocity_zone = VelocityZone.NEUTRAL  # Initialize zone
         self._completed_pairs: List[Dict[str, Any]] = []
 
+        zone_info = f", min_vel={min_velocity_bps:.2f}" if min_velocity_bps > 0 else ""
         logger.info(
             f"[SPREADCAP] Initialized: base_size={base_size}, grid_levels={grid_levels}, "
-            f"max_imbalance={max_imbalance_pct:.0%}, target={target_shares}, cycling={enable_cycling}"
+            f"max_imbalance={max_imbalance_pct:.0%}, target={target_shares}, cycling={enable_cycling}{zone_info}"
         )
 
     # =========================================================================
@@ -732,6 +740,18 @@ class SpreadCaptureStrategy:
         if time_remaining < MIN_TIME_REMAINING:
             logger.debug(f"[SPREADCAP] Skipping: {time_remaining:.0f}s remaining")
             return []
+
+        # Zone filter: skip low-velocity zones for NEW entries only
+        # If we already have a position (first_fill_side set), allow hedging to continue
+        if self.min_velocity_bps > 0 and s.first_fill_side is None:
+            if abs(velocity_bps) < self.min_velocity_bps:
+                # Log occasionally to avoid spam
+                if int(current_time) % 10 == 0:
+                    zone = self.get_velocity_zone_name(velocity_bps)
+                    logger.debug(
+                        f"[SPREADCAP] Skipping zone '{zone}': |{velocity_bps:.3f}| < {self.min_velocity_bps:.2f}"
+                    )
+                return []
 
         # Check if target reached (both sides have target_shares)
         # When cycling is disabled: stop when CURRENT position reaches target on both sides

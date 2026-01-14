@@ -489,6 +489,7 @@ class PaperTradingBot:
         spread_grid_levels: int = 3,          # 3 orders of 5 shares each
         spread_max_imbalance_pct: float = 0.10,  # Max inventory imbalance (10%)
         spread_enable_cycling: bool = False,  # If False, stop at target; if True, keep cycling
+        spread_min_velocity_bps: float = 0.30,  # Only trade zones 4-6 (velocity >= 0.30)
     ):
         self.initial_balance = initial_balance
         self.trading_mode = trading_mode
@@ -558,6 +559,7 @@ class PaperTradingBot:
         self.spread_grid_levels = spread_grid_levels
         self.spread_max_imbalance_pct = spread_max_imbalance_pct
         self.spread_enable_cycling = spread_enable_cycling
+        self.spread_min_velocity_bps = spread_min_velocity_bps
 
         # Track order replacements per side for chase count
         self._replacement_count: dict[str, int] = {}  # "market_slug_SIDE" -> count
@@ -647,16 +649,18 @@ class PaperTradingBot:
                 grid_levels=self.spread_grid_levels,
                 max_imbalance_pct=self.spread_max_imbalance_pct,
                 enable_cycling=self.spread_enable_cycling,
+                min_velocity_bps=self.spread_min_velocity_bps,  # Zone filter
                 # Legacy params (for backward compatibility)
                 target_shares=self.accum_target_shares,
                 max_imbalance_shares=self.hard_max_imbalance,
                 min_profit=0.005,
             )
+            zone_info = f", min_velocity={self.spread_min_velocity_bps:.2f} (zones 4-6)" if self.spread_min_velocity_bps > 0 else ""
             logger.info(
                 f"[SPREADCAP] Continuous velocity mode initialized: "
                 f"base_size={self.spread_base_size}, grid_levels={self.spread_grid_levels}, "
                 f"max_imbalance={self.spread_max_imbalance_pct*100:.0f}%, target={self.accum_target_shares}, "
-                f"cycling={self.spread_enable_cycling}"
+                f"cycling={self.spread_enable_cycling}{zone_info}"
             )
 
         # Telegram notifications and remote control
@@ -2353,6 +2357,8 @@ class PaperTradingBot:
             logger.info(f"  - Base size: {self.spread_base_size} shares per level")
             logger.info(f"  - Grid levels: {self.spread_grid_levels} per side")
             logger.info(f"  - Max imbalance: {self.spread_max_imbalance_pct*100:.0f}%")
+            if self.spread_min_velocity_bps > 0:
+                logger.info(f"  - Min velocity: {self.spread_min_velocity_bps:.2f} bps (zones 4-6 only)")
         else:
             # Calculate actual max imbalance from percentage
             max_imbal = max(int(self.accum_max_imbalance_pct * self.accum_target_shares), 2)
