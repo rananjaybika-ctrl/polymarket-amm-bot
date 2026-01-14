@@ -4264,16 +4264,17 @@ class PaperTradingBot:
                 except asyncio.QueueEmpty:
                     break
                 except Exception as e:
-                    logger.debug(f"[WS_FILL] Queue error: {e}")
+                    logger.warning(f"[WS_FILL] Queue error: {e}")  # Promoted from debug
 
             if fills_processed > 0:
                 logger.info(f"[WS_FILL] Processed {fills_processed} WebSocket fills")
 
         # =========================================================================
-        # CRITICAL: Re-sync position from REST API (get ACTUAL Polymarket holdings)
+        # CRITICAL: Re-sync position from engine (get actual holdings)
         # AND SYNC TO STRATEGY'S INTERNAL STATE (for rebalancing to work!)
+        # Now enabled for BOTH live AND paper modes to prevent state drift
         # =========================================================================
-        if self.trading_mode == "live" and hasattr(self._engine, 'sync_position'):
+        if hasattr(self._engine, 'sync_position'):
             try:
                 synced_pos = await self._engine.sync_position(market)
                 if synced_pos:
@@ -4393,32 +4394,47 @@ class PaperTradingBot:
                 status=f"vel={velocity_bps:.3f}bps",
             )
 
-        # Pull orders on zone transition (default: both sides for clean slate)
-        pulled_count = 0
-        if sides_to_pull and hasattr(self._engine, 'cancel_pending_order'):
-            for side in sides_to_pull:
-                pending_key = f"{market.slug}_{side}"
+        # ZONE TRANSITION PULLING: DISABLED
+        # Simulation proved pulling on zone transitions destroys performance
+        # (31/33 orders pulled = -$33 loss vs +$32.70 profit without pulling)
+        #
+        # HEDGE TARGET TIGHTENING: ENABLED
+        # When velocity strengthens in entry direction, tighten hedge target
+        # This requires pulling the existing hedge order and reposting at tighter price
+        # Backtest: +$6.30 profit with tightening vs without
+
+        # Check if hedge target should be tightened (requires pulling hedge order)
+        should_pull_hedge, old_target, new_target = strategy.check_hedge_target_change(velocity_bps)
+
+        if should_pull_hedge and strategy.state.first_fill_side:
+            # Determine hedge side (opposite of entry)
+            hedge_side = "DOWN" if strategy.state.first_fill_side == "UP" else "UP"
+
+            # Cancel existing hedge order
+            if hasattr(self._engine, 'cancel_pending_order'):
+                pending_key = f"{market.slug}_{hedge_side}"
                 try:
                     cancelled = await self._engine.cancel_pending_order(pending_key)
                     if cancelled:
-                        pulled_count += 1
-                        logger.info(f"[SPREADCAP] Auto-pulled {side} order (zone transition)")
+                        logger.info(
+                            f"[SPREADCAP] Hedge order pulled: {hedge_side} "
+                            f"${old_target:.4f} → ${new_target:.4f}"
+                        )
                 except Exception as e:
-                    logger.debug(f"[SPREADCAP] Pull failed for {side}: {e}")
+                    logger.warning(f"[SPREADCAP] Failed to cancel hedge order: {e}")
 
-        # Log order pulls to CSV
-        if pulled_count > 0:
+            # Log to CSV for traceability
             self._log_event_csv(
                 market_slug=market.slug,
-                event_type="ORDER_PULL",
-                trade_side=",".join(sides_to_pull),
+                event_type="HEDGE_TIGHTEN",
+                trade_side=hedge_side,
                 trade_mode="SPREAD_CAPTURE",
-                size_requested=pulled_count,
-                size_filled=pulled_count,
-                price=0,
-                cost=0,
+                size_requested=0,
+                size_filled=0,
+                price=new_target,
+                cost=old_target,  # Store old target in cost field
                 position=position,
-                status=f"zone={zone.value}",
+                status=f"tightened ${old_target:.4f}->${new_target:.4f}",
             )
 
         # Calculate current imbalance
@@ -4426,6 +4442,7 @@ class PaperTradingBot:
         current_time = time.time()
 
         # Check for pending fills first (before placing new orders)
+        # DEDUPLICATION: Paper mode uses _confirmed_fills to avoid double-counting
         if self.trading_mode == "paper" and hasattr(self._engine, 'check_pending_fills'):
             try:
                 current_prices = {"UP": up_ask, "DOWN": down_ask}
@@ -4434,13 +4451,20 @@ class PaperTradingBot:
                     fill_side = fill.get("side", "")
                     fill_price = fill.get("price", 0)
                     fill_size = int(fill.get("size", 0))
+                    # Generate fill ID for deduplication (use order_id if available, else synthetic)
+                    fill_id = fill.get("order_id", f"paper_{fill_side}_{fill_price:.4f}_{fill_size}")
                     if fill_side and fill_price > 0:
+                        # Skip if already processed
+                        if fill_id in self._confirmed_fills:
+                            logger.debug(f"[SPREADCAP] Skipping duplicate fill: {fill_id}")
+                            continue
+                        self._confirmed_fills.add(fill_id)
                         strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
                         logger.info(
                             f"[SPREADCAP] Fill detected: {fill_side} {fill_size} @ ${fill_price:.4f}"
                         )
             except Exception as e:
-                logger.debug(f"[SPREADCAP] Error checking fills: {e}")
+                logger.warning(f"[SPREADCAP] Error checking fills: {e}")  # Promoted from debug
 
         # REST API backup verification for live mode (catches missed WebSocket fills)
         if self.trading_mode == "live":
@@ -4747,7 +4771,7 @@ class PaperTradingBot:
                         orders_to_remove.append(order_id)
 
             except Exception as e:
-                logger.debug(f"[REST_VERIFY] Error checking order {order_id[:16]}...: {e}")
+                logger.warning(f"[REST_VERIFY] Error checking order {order_id[:16]}...: {e}")  # Promoted from debug
 
         # Clean up processed orders
         for order_id in orders_to_remove:
@@ -5116,6 +5140,40 @@ class PaperTradingBot:
                     if self._spread_capture_strategy:
                         self._spread_capture_strategy.reset()
                         logger.info(f"[SPREADCAP] Strategy reset for new market {new_slug}")
+
+                    # CRITICAL: Clear WebSocket fill queue to avoid stale fills from old market
+                    if hasattr(self, '_ws_fill_queue'):
+                        stale_count = 0
+                        while not self._ws_fill_queue.empty():
+                            try:
+                                self._ws_fill_queue.get_nowait()
+                                stale_count += 1
+                            except asyncio.QueueEmpty:
+                                break
+                        if stale_count > 0:
+                            logger.info(f"[WS_CLEANUP] Cleared {stale_count} stale fills from old market queue")
+
+                    # Clear confirmed fills set to allow fresh deduplication for new market
+                    if hasattr(self, '_confirmed_fills'):
+                        old_count = len(self._confirmed_fills)
+                        self._confirmed_fills.clear()
+                        if old_count > 0:
+                            logger.info(f"[WS_CLEANUP] Cleared {old_count} old fill IDs from deduplication set")
+
+                    # Clear pending order tracking for old market
+                    if hasattr(self, '_pending_order_ids'):
+                        old_count = len(self._pending_order_ids)
+                        self._pending_order_ids.clear()
+                        if old_count > 0:
+                            logger.info(f"[WS_CLEANUP] Cleared {old_count} pending order IDs from old market")
+
+                    # Clear user WebSocket watched orders for old market
+                    if self._user_ws and hasattr(self._user_ws, '_watched_orders'):
+                        old_count = len(self._user_ws._watched_orders)
+                        self._user_ws._watched_orders.clear()
+                        if old_count > 0:
+                            logger.info(f"[WS_CLEANUP] Cleared {old_count} watched orders from user WebSocket")
+
                     # CRITICAL: Subscribe WebSocket to new market immediately
                     # (Don't wait for next trading cycle - that causes 2-5s latency gap)
                     if self._orderbook_manager and new_market:

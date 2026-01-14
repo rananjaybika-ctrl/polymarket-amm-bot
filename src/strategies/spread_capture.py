@@ -57,10 +57,61 @@ logger = logging.getLogger(__name__)
 # CONSTANTS (including LEGACY constants for backward compatibility)
 # =============================================================================
 
-# Velocity thresholds (basis points per second)
-VELOCITY_THRESHOLD = 0.05       # Threshold for quote adjustment
-VELOCITY_STRONG = 0.10          # Strong movement - more aggressive adjustment
+# DEPRECATED: Old velocity thresholds - use VELOCITY_ZONES dict instead
+# Kept for backward compatibility with tests and check_velocity_zone_transition()
+VELOCITY_THRESHOLD = 0.05       # DEPRECATED: Use VELOCITY_ZONES['neutral']['vel_max']
+VELOCITY_STRONG = 0.10          # DEPRECATED: Use VELOCITY_ZONES['strong']['vel_min']
 VELOCITY_PULL_THRESHOLD = 0.05  # LEGACY: For backward compatibility with tests
+
+# Multi-zone velocity configuration with dynamic hedge targets and offsets
+# Key insight: Higher velocity = more confidence = more aggressive entry, tighter hedge
+#
+# winner_offset: Added to best_bid for ENTRY side (winner)
+#   - Negative = bid BELOW best_bid (conservative, slow fill)
+#   - Positive = bid ABOVE best_bid (aggressive, fast fill)
+#
+# loser_offset: Added to best_bid for HEDGE side (loser) - used as fallback
+#   - Always negative = bid below best_bid (wait for price drop)
+#
+# hedge_target = pair_target - entry_price (primary hedge pricing)
+VELOCITY_ZONES = {
+    'neutral': {
+        'vel_min': 0.00, 'vel_max': 0.05,
+        'pair_target': 0.97,
+        'winner_offset': -0.01,  # Conservative entry
+        'loser_offset': -0.01,
+    },
+    'moderate': {
+        'vel_min': 0.05, 'vel_max': 0.10,
+        'pair_target': 0.97,
+        'winner_offset': -0.01,  # Still conservative
+        'loser_offset': -0.02,
+    },
+    'strong': {
+        'vel_min': 0.10, 'vel_max': 0.30,
+        'pair_target': 0.96,
+        'winner_offset': 0.00,   # At best_bid
+        'loser_offset': -0.04,
+    },
+    'very_strong': {
+        'vel_min': 0.30, 'vel_max': 0.50,
+        'pair_target': 0.95,
+        'winner_offset': +0.01,  # Aggressive - above best_bid
+        'loser_offset': -0.06,
+    },
+    'extreme': {
+        'vel_min': 0.50, 'vel_max': 1.00,
+        'pair_target': 0.94,
+        'winner_offset': +0.01,  # Aggressive
+        'loser_offset': -0.07,
+    },
+    'super_strong': {
+        'vel_min': 1.00, 'vel_max': 99.0,
+        'pair_target': 0.93,
+        'winner_offset': +0.02,  # Most aggressive - fast fill
+        'loser_offset': -0.08,
+    },
+}
 
 # Quote offsets (from best_bid)
 # Formula: our_bid = best_bid - offset
@@ -124,10 +175,15 @@ class SpreadCapturePhase(Enum):
 
 
 class VelocityZone(Enum):
-    """Velocity zones for auto order pulling.
+    """Velocity zones for zone transition LOGGING (order pulling disabled).
 
-    When velocity crosses zone boundaries, orders are pulled and regenerated
-    with optimal offsets for the new zone.
+    NOTE: This 3-zone enum is used ONLY for logging zone transitions.
+    Order pulling was disabled because simulation proved it destroys performance.
+
+    For ACTIVE hedge target calculations, use VELOCITY_ZONES dict (6 zones)
+    and the string-based current_velocity_zone field instead.
+
+    This enum is kept for backward compatibility and zone transition logging.
     """
     NEUTRAL = "neutral"      # abs(vel) < 5 bps - use BASE_OFFSET for both
     MODERATE = "moderate"    # 5-10 bps - use TIGHT/WIDE offsets
@@ -159,7 +215,7 @@ class SpreadCaptureState:
     last_velocity: float = 0.0
     last_up_offset: float = 0.0
     last_down_offset: float = 0.0
-    last_velocity_zone: "VelocityZone" = None  # Initialized in post_init
+    last_velocity_zone: "VelocityZone" = None  # 3-zone enum for logging only (see VelocityZone docstring)
 
     # Statistics
     total_up_fills: int = 0
@@ -171,6 +227,14 @@ class SpreadCaptureState:
     # Tracking
     quotes_generated: int = 0
     markets_traded: int = 0
+
+    # Dynamic hedge target tracking (uses 6-zone VELOCITY_ZONES dict, NOT VelocityZone enum)
+    # Key rule: Only tighten hedge target, never loosen
+    first_fill_side: Optional[str] = None           # Which side filled first ("UP" or "DOWN")
+    first_fill_price: float = 0.0                   # Price of first fill
+    first_fill_velocity_dir: Optional[str] = None   # Velocity direction at first fill ("UP" or "DOWN")
+    locked_hedge_target: Optional[float] = None     # Current hedge target (only tightens)
+    current_velocity_zone: Optional[str] = None     # 6-zone string from VELOCITY_ZONES (active system)
 
     # LEGACY attributes for backward compatibility
     entry_side: Optional[str] = None      # LEGACY: "UP" or "DOWN"
@@ -286,10 +350,6 @@ class SpreadCaptureStrategy:
         self.max_share_price = max_share_price
         self.enable_cycling = enable_cycling
 
-        # Auto-pull configuration (internal, not exposed to frontend)
-        self.enable_auto_pull: bool = True   # Pull orders on velocity zone transitions
-        self.pull_mode: str = "both"         # "both" or "adverse_only"
-
         # LEGACY attributes
         self.entry_offset = entry_offset
         self.hedge_offset = hedge_offset
@@ -348,7 +408,13 @@ class SpreadCaptureStrategy:
         return min(wait, MAX_WAIT_TIME)
 
     def should_pull_entry(self, velocity_bps: float, entry_side: str) -> bool:
-        """LEGACY: Check if entry should be pulled due to adverse velocity.
+        """DEPRECATED: Order pulling disabled - simulation proved it destroys performance.
+
+        This method is unused. Order pulling was disabled because:
+        - 31/33 orders were pulled before filling
+        - Result: -$33 loss instead of +$32.70 profit
+
+        Kept for backward compatibility only.
 
         UP entry: adverse if velocity < -VELOCITY_PULL_THRESHOLD
         DOWN entry: adverse if velocity > VELOCITY_PULL_THRESHOLD
@@ -359,90 +425,255 @@ class SpreadCaptureStrategy:
             return velocity_bps > VELOCITY_PULL_THRESHOLD
 
     # =========================================================================
-    # CORE: VELOCITY-BASED QUOTE ADJUSTMENT
+    # DYNAMIC HEDGE TARGET (Multi-zone tightening)
     # =========================================================================
 
-    def calculate_offsets(self, velocity_bps: float) -> Tuple[float, float]:
+    def get_velocity_zone_name(self, velocity_bps: float) -> str:
+        """Get the velocity zone name for given velocity."""
+        abs_vel = abs(velocity_bps)
+        for zone_name, zone in VELOCITY_ZONES.items():
+            if zone['vel_min'] <= abs_vel < zone['vel_max']:
+                return zone_name
+        return 'super_strong'  # Default for very high velocity
+
+    def get_pair_target_for_velocity(self, velocity_bps: float) -> float:
+        """Get the target pair cost for current velocity zone.
+
+        Higher velocity = more confidence = tighter (lower) pair target.
         """
-        Calculate quote offsets based on velocity AND current inventory.
+        zone_name = self.get_velocity_zone_name(velocity_bps)
+        return VELOCITY_ZONES[zone_name]['pair_target']
 
-        THIS IS THE CRITICAL LOGIC - THE CORRECT WAY:
+    def calculate_hedge_target(self, entry_price: float, velocity_bps: float) -> float:
+        """Calculate hedge target price based on entry and current velocity zone.
 
-        When BTC RISING (velocity > 0):
-            - UP will get more expensive (underpriced NOW) → TIGHTEN UP bid
-            - DOWN will get cheaper (overpriced NOW) → WIDEN DOWN bid
+        Formula: hedge_target = pair_target - entry_price
 
-        When BTC FALLING (velocity < 0):
-            - UP will get cheaper (overpriced NOW) → WIDEN UP bid
-            - DOWN will get more expensive (underpriced NOW) → TIGHTEN DOWN bid
+        Example:
+            entry_price = $0.52
+            velocity = 0.8 bps (extreme zone, pair_target = 0.94)
+            hedge_target = 0.94 - 0.52 = $0.42
+        """
+        pair_target = self.get_pair_target_for_velocity(velocity_bps)
+        hedge_target = pair_target - entry_price
+        return max(0.01, min(0.95, hedge_target))
 
-        INVENTORY ADJUSTMENT (from Telegram alpha):
-            - If imbalanced, be MORE aggressive on lagging side
-            - "amount of down shares can only be 10% more than up shares"
-            - When neutral velocity, use inventory to break tie
+    def record_first_fill(self, side: str, price: float, velocity_bps: float) -> None:
+        """Record first fill and initialize hedge target.
+
+        Called on first fill to establish:
+        1. Which side is "entry" vs "hedge"
+        2. Initial hedge target based on velocity zone
+        3. Velocity direction to track for tightening
+        """
+        s = self.state
+        if s.first_fill_side is not None:
+            return  # Already recorded
+
+        s.first_fill_side = side.upper()
+        s.first_fill_price = price
+        s.first_fill_velocity_dir = "UP" if velocity_bps > 0 else "DOWN"
+        s.current_velocity_zone = self.get_velocity_zone_name(velocity_bps)
+
+        # Set initial hedge target
+        s.locked_hedge_target = self.calculate_hedge_target(price, velocity_bps)
+
+        logger.info(
+            f"[SPREADCAP] First fill: {side} @ ${price:.4f}, vel={velocity_bps:.2f}bps "
+            f"({s.current_velocity_zone}), hedge_target=${s.locked_hedge_target:.4f}"
+        )
+
+    def maybe_tighten_hedge_target(self, velocity_bps: float) -> bool:
+        """Tighten hedge target if velocity strengthened in entry direction.
+
+        KEY RULE: Only tighten, NEVER loosen.
+
+        Returns True if target was tightened.
+        """
+        s = self.state
+        if s.first_fill_side is None or s.locked_hedge_target is None:
+            return False
+
+        # Check if velocity is still in the same direction as at entry
+        current_vel_dir = "UP" if velocity_bps > 0 else "DOWN"
+        if current_vel_dir != s.first_fill_velocity_dir:
+            return False  # Velocity flipped, don't tighten
+
+        # Calculate new target based on current velocity
+        new_target = self.calculate_hedge_target(s.first_fill_price, velocity_bps)
+
+        # ONLY TIGHTEN (lower target), NEVER LOOSEN
+        if new_target < s.locked_hedge_target:
+            old_target = s.locked_hedge_target
+            old_zone = s.current_velocity_zone
+            s.locked_hedge_target = new_target
+            s.current_velocity_zone = self.get_velocity_zone_name(velocity_bps)
+
+            logger.info(
+                f"[SPREADCAP] Hedge target tightened: ${old_target:.4f} ({old_zone}) "
+                f"-> ${new_target:.4f} ({s.current_velocity_zone})"
+            )
+            return True
+
+        return False
+
+    def get_current_hedge_target(self) -> Optional[float]:
+        """Get current locked hedge target, or None if no entry yet."""
+        return self.state.locked_hedge_target
+
+    def check_hedge_target_change(self, velocity_bps: float) -> Tuple[bool, Optional[float], Optional[float]]:
+        """
+        Check if hedge target should be tightened and order pulled.
+
+        This method is called by the bot runner to determine if the existing
+        hedge order should be cancelled and replaced with a new order at a
+        tighter (lower) price.
+
+        RULE: Only tighten, NEVER loosen.
 
         Args:
             velocity_bps: Current BTC velocity in basis points per second
 
         Returns:
-            (up_offset, down_offset) - offsets from best_bid
+            Tuple of (should_pull, old_target, new_target)
+            - should_pull: True if hedge order should be cancelled and replaced
+            - old_target: Previous hedge target (for logging)
+            - new_target: New tightened hedge target
         """
-        abs_velocity = abs(velocity_bps)
         s = self.state
+        if s.first_fill_side is None or s.locked_hedge_target is None:
+            return (False, None, None)
 
-        # Calculate inventory bias: positive = need more UP, negative = need more DOWN
-        inventory_bias = s.down_shares - s.up_shares  # If DOWN > UP, bias > 0 (need UP)
+        # Only tighten if velocity is in same direction as at entry
+        current_vel_dir = "UP" if velocity_bps > 0 else "DOWN"
+        if current_vel_dir != s.first_fill_velocity_dir:
+            return (False, None, None)
 
-        # Neutral zone - USE INVENTORY TO DECIDE
-        if abs_velocity < VELOCITY_THRESHOLD:
-            # If balanced, be aggressive on BOTH sides to get fills
+        # Calculate new target based on current velocity zone
+        new_target = self.calculate_hedge_target(s.first_fill_price, velocity_bps)
+
+        # ONLY TIGHTEN (lower target), NEVER LOOSEN
+        if new_target < s.locked_hedge_target:
+            old_target = s.locked_hedge_target
+            old_zone = s.current_velocity_zone
+            s.locked_hedge_target = new_target
+            s.current_velocity_zone = self.get_velocity_zone_name(velocity_bps)
+
+            logger.info(
+                f"[SPREADCAP] Hedge target tightened: ${old_target:.4f} ({old_zone}) "
+                f"-> ${new_target:.4f} ({s.current_velocity_zone}) - PULL REQUIRED"
+            )
+            return (True, old_target, new_target)
+
+        return (False, None, None)
+
+    # =========================================================================
+    # CORE: VELOCITY-BASED QUOTE ADJUSTMENT
+    # =========================================================================
+
+    def calculate_offsets(self, velocity_bps: float) -> Tuple[float, float]:
+        """
+        Calculate quote offsets based on velocity zone.
+
+        Uses 6-zone VELOCITY_ZONES for zone-specific offsets:
+        - winner_offset: For entry side (velocity direction)
+        - loser_offset: For hedge side (opposite direction)
+
+        Higher velocity = more confidence = more aggressive entry offset.
+
+        Args:
+            velocity_bps: Current BTC velocity in basis points per second
+
+        Returns:
+            (up_offset, down_offset) - offsets to ADD to best_bid
+        """
+        s = self.state
+        zone_name = self.get_velocity_zone_name(velocity_bps)
+        zone_config = VELOCITY_ZONES.get(zone_name, VELOCITY_ZONES['moderate'])
+
+        winner_offset = zone_config['winner_offset']
+        loser_offset = zone_config['loser_offset']
+
+        # NEUTRAL ZONE: Use inventory to break ties
+        if zone_name == 'neutral':
+            inventory_bias = s.down_shares - s.up_shares  # positive = need UP
             if abs(inventory_bias) <= 2:
-                # Both sides aggressive when balanced - get fills on both
-                return (TIGHT_OFFSET, TIGHT_OFFSET)
+                # Balanced - use winner_offset on both for fills
+                return (winner_offset, winner_offset)
             elif inventory_bias > 0:
-                # Need more UP (have more DOWN) - aggressive UP, passive DOWN
-                return (TIGHT_OFFSET, WIDE_OFFSET)
+                # Need UP - aggressive UP, passive DOWN
+                return (winner_offset, loser_offset)
             else:
-                # Need more DOWN (have more UP) - passive UP, aggressive DOWN
-                return (WIDE_OFFSET, TIGHT_OFFSET)
+                # Need DOWN - passive UP, aggressive DOWN
+                return (loser_offset, winner_offset)
 
-        # Strong velocity - more aggressive adjustment
-        if abs_velocity > VELOCITY_STRONG:
-            if velocity_bps > 0:  # BTC rising strongly
-                return (TIGHT_OFFSET, VERY_WIDE_OFFSET)
-            else:  # BTC falling strongly
-                return (VERY_WIDE_OFFSET, TIGHT_OFFSET)
+        # DIRECTIONAL: Winner gets winner_offset, loser gets loser_offset
+        if velocity_bps > 0:  # BTC rising → UP is winner
+            return (winner_offset, loser_offset)
+        else:  # BTC falling → DOWN is winner
+            return (loser_offset, winner_offset)
 
-        # Moderate velocity
-        if velocity_bps > 0:  # BTC rising
-            return (TIGHT_OFFSET, WIDE_OFFSET)
-        else:  # BTC falling
-            return (WIDE_OFFSET, TIGHT_OFFSET)
+    def calculate_entry_bid(self, best_bid: float, best_ask: float,
+                            velocity_bps: float) -> float:
+        """
+        Calculate LIMIT ORDER entry bid price for winner side.
+
+        CRITICAL: Must stay below ask to remain MAKER and avoid taker fees.
+        Higher velocity = more confidence = bid closer to ask for faster fill.
+
+        Formula: entry_bid = best_bid + winner_offset
+        Clamped to stay below ask by at least 0.001.
+
+        Args:
+            best_bid: Current best bid price
+            best_ask: Current best ask price
+            velocity_bps: Current BTC velocity in basis points per second
+
+        Returns:
+            entry_bid: Price to post LIMIT order at (always < best_ask)
+        """
+        zone_name = self.get_velocity_zone_name(velocity_bps)
+        zone_config = VELOCITY_ZONES.get(zone_name, VELOCITY_ZONES['moderate'])
+        winner_offset = zone_config['winner_offset']
+
+        entry_bid = best_bid + winner_offset
+
+        # NEVER cross the spread - stay below ask to remain MAKER
+        max_bid = best_ask - 0.001
+        entry_bid = min(entry_bid, max_bid)
+
+        # Clamp to valid price range
+        entry_bid = max(0.01, min(0.95, entry_bid))
+
+        return entry_bid
 
     def check_velocity_zone_transition(
         self,
         velocity_bps: float
     ) -> Tuple["VelocityZone", bool, List[str]]:
         """
-        Check if velocity crossed a zone boundary.
+        Check if velocity crossed a zone boundary (for LOGGING only).
 
-        Used for auto-pulling orders when market conditions change significantly.
-        When zone changes, stale orders at old offsets should be cancelled and
-        regenerated with new optimal offsets.
+        NOTE: Zone transition pulling is DISABLED. Simulation proved pulling destroys
+        performance (31/33 orders pulled = -$33 loss).
+
+        This method is used for:
+        1. LOGGING zone transitions for analysis
+        2. Tracking last_velocity_zone state
+
+        Order pulling is handled separately via check_hedge_target_change() which
+        only pulls hedge orders when tightening (not on zone transitions).
 
         Args:
             velocity_bps: Current BTC velocity in basis points per second
 
         Returns:
             Tuple of (current_zone, zone_changed, sides_to_pull)
-
-        Pull Modes:
-            "both"         - Pull UP + DOWN on any zone transition (clean slate)
-            "adverse_only" - Pull only the adverse side (legacy behavior)
+            - sides_to_pull is always empty (zone pulling disabled)
         """
         abs_vel = abs(velocity_bps)
 
-        # Determine current zone
+        # Determine current zone (3-zone for logging compatibility)
         if abs_vel < VELOCITY_THRESHOLD:  # 0.05 bps
             new_zone = VelocityZone.NEUTRAL
         elif abs_vel < VELOCITY_STRONG:   # 0.10 bps
@@ -453,24 +684,9 @@ class SpreadCaptureStrategy:
         old_zone = self.state.last_velocity_zone
         zone_changed = (new_zone != old_zone)
 
+        # Zone pulling is DISABLED - always return empty list
+        # Hedge pulling is handled by check_hedge_target_change() instead
         sides_to_pull: List[str] = []
-        if zone_changed and self.enable_auto_pull:
-            # RESTING ORDER FIX: Don't pull orders when transitioning TO neutral.
-            # Let resting bids stay on the book - they can fill when price moves favorably.
-            # Only pull when moving FROM neutral (need new directional offsets) or
-            # between directional zones (significant repricing needed).
-            if new_zone == VelocityZone.NEUTRAL:
-                # Going TO neutral - let orders rest, don't pull
-                sides_to_pull = []
-            elif self.pull_mode == "both":
-                # Moving away from neutral OR between directional zones - reprice both
-                sides_to_pull = ["UP", "DOWN"]
-            elif self.pull_mode == "adverse_only":
-                # Legacy: only pull the side getting overpriced
-                if velocity_bps > 0:  # Rising - DOWN is adverse
-                    sides_to_pull = ["DOWN"]
-                else:  # Falling - UP is adverse
-                    sides_to_pull = ["UP"]
 
         # Update state
         self.state.last_velocity_zone = new_zone
@@ -538,6 +754,11 @@ class SpreadCaptureStrategy:
         s.last_velocity = velocity_bps
         s.phase = SpreadCapturePhase.QUOTING
 
+        # Dynamic hedge target tightening on each tick
+        # This connects the multi-zone hedge system to quote generation
+        if s.locked_hedge_target is not None:
+            self.maybe_tighten_hedge_target(velocity_bps)
+
         # Calculate velocity-adjusted offsets
         up_offset, down_offset = self.calculate_offsets(velocity_bps)
         s.last_up_offset = up_offset
@@ -590,6 +811,7 @@ class SpreadCaptureStrategy:
     ) -> List[Dict[str, Any]]:
         """Generate quotes for one side (UP or DOWN)."""
         quotes = []
+        s = self.state
 
         # Check position limit
         if current_shares >= self.target_shares:
@@ -606,10 +828,25 @@ class SpreadCaptureStrategy:
             self.state.rebalance_count += 1
             logger.info(f"[SPREADCAP] REBALANCE {side}: offset={offset:.3f}")
 
+        # HEDGE TARGET CONSTRAINT: Cap hedge-side price at locked target
+        # If first fill was on one side, the OTHER side is the hedge side
+        # We should not bid higher than our locked hedge target
+        max_hedge_price = None
+        if s.first_fill_side is not None and side != s.first_fill_side:
+            max_hedge_price = self.get_current_hedge_target()
+            if max_hedge_price is not None:
+                logger.debug(
+                    f"[SPREADCAP] Hedge side {side}: max_price=${max_hedge_price:.4f}"
+                )
+
         # Generate grid levels
         for level in range(self.grid_levels):
             level_offset = offset + (level * GRID_SPACING)
             price = round(best_bid - level_offset, 2)
+
+            # Apply hedge target cap (don't bid higher than target)
+            if max_hedge_price is not None and price > max_hedge_price:
+                price = round(max_hedge_price, 2)
 
             # Validate price
             if price <= 0.01 or price > self.max_share_price:
@@ -720,6 +957,14 @@ class SpreadCaptureStrategy:
             f"Imbal: {s.imbalance:+d} ({s.imbalance_pct:.1%})"
         )
 
+        # Track first fill for dynamic hedge targeting
+        # Uses last_velocity from most recent get_quotes() call
+        if s.first_fill_side is None:
+            self.record_first_fill(side_upper, price, s.last_velocity)
+        else:
+            # Check if velocity strengthened - maybe tighten hedge target
+            self.maybe_tighten_hedge_target(s.last_velocity)
+
         # Check for completed pairs
         self._check_completed_pairs()
 
@@ -760,14 +1005,18 @@ class SpreadCaptureStrategy:
             f"Profit: ${net_profit:.4f} | Total: ${s.total_profit:.4f}"
         )
 
-        # Reset matched shares
+        # Reset matched shares after merge
+        # Logic: Keep remainder on the heavier side, zero the lighter side
+        # When equal (up_shares == down_shares): both become 0 (else branch zeros UP explicitly)
         if s.up_shares > s.down_shares:
+            # UP is heavier - keep UP remainder, zero DOWN
             s.up_shares -= matchable
             s.up_cost = s.up_avg_price * s.up_shares
             s.down_shares = 0
             s.down_cost = 0.0
             s.down_avg_price = 0.0
         else:
+            # DOWN is heavier OR equal - keep DOWN remainder, zero UP
             s.down_shares -= matchable
             s.down_cost = s.down_avg_price * s.down_shares
             s.up_shares = 0
@@ -928,9 +1177,11 @@ class SpreadCaptureStrategy:
         self.state.total_pairs_matched = total_pairs
         self.state.markets_traded = markets
         self.state.last_velocity_zone = VelocityZone.NEUTRAL  # Reset zone
+        # Note: Dynamic hedge fields (first_fill_side, locked_hedge_target, etc.)
+        # are reset to None/0.0 by the fresh SpreadCaptureState()
 
         self._completed_pairs = []
-        logger.info(f"[SPREADCAP] Reset for market #{markets}")
+        logger.info(f"[SPREADCAP] Reset for market #{markets} (hedge target cleared)")
 
     def __repr__(self) -> str:
         return (
