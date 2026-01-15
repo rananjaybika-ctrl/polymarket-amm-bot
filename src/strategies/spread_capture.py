@@ -172,7 +172,7 @@ DEFAULT_MIN_VELOCITY_BPS = 0.50  # zones 5-6 only (61%+ accuracy, +$1.17/hr)
 DEFAULT_STOP_LOSS_PCT = 0.07  # 7% drop triggers immediate hedge
 
 # Timing
-MIN_TIME_REMAINING = 60         # Don't place new orders with <60s left
+MIN_TIME_REMAINING = 120        # Don't place new orders with <120s left (safer buffer)
 QUOTE_REFRESH_INTERVAL = 0.5    # Refresh quotes every 500ms
 
 
@@ -1258,6 +1258,11 @@ class SpreadCaptureStrategy:
             s.up_cost = 0.0
             s.up_avg_price = 0.0
 
+        # CRITICAL: Reset for next cycle if cycling enabled
+        # Without this, first_fill_side stays set and strategy can't re-enter
+        if self.enable_cycling:
+            self.reset_for_cycle()
+
     # =========================================================================
     # LEGACY COMPATIBILITY - decide() for sequential mode
     # =========================================================================
@@ -1419,6 +1424,42 @@ class SpreadCaptureStrategy:
 
         self._completed_pairs = []
         logger.info(f"[SPREADCAP] Reset for market #{markets} (hedge target + stop-loss cleared)")
+
+    def reset_for_cycle(self) -> None:
+        """Reset state for next cycle WITHIN same market (cycling mode).
+
+        Called after merge to allow re-entry for another trade cycle.
+        Preserves cumulative statistics but clears entry/hedge state.
+
+        CRITICAL: This method enables cycling (multiple trades per market).
+        Without it, after first merge the strategy would be stuck.
+        """
+        s = self.state
+
+        # Reset entry/hedge tracking for new cycle
+        s.first_fill_side = None
+        s.first_fill_price = 0.0
+        s.first_fill_velocity_dir = None
+        s.locked_hedge_target = None
+        s.current_velocity_zone = None
+
+        # Reset stop-loss state
+        s.stop_loss_triggered = False
+        s.stop_loss_hedge_price = 0.0
+
+        # Reset legacy phase tracking
+        s.entry_side = None
+        s.hedge_side = None
+        s.entry_price = 0.0
+        s.hedge_price = 0.0
+        s.entry_size = 0
+        s.hedge_size = 0
+        s.phase = SpreadCapturePhase.IDLE
+
+        logger.info(
+            f"[SPREADCAP] Cycle reset: ready for re-entry "
+            f"(pairs={s.total_pairs_matched}, profit=${s.total_profit:.2f})"
+        )
 
     def __repr__(self) -> str:
         return (
