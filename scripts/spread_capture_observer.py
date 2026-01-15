@@ -5,10 +5,20 @@ Spread Capture Observer - Real WebSocket Data Collection
 Captures REAL market data at sub-second speeds for strategy analysis.
 NO simulated fills - just logs what the strategy WOULD do.
 
+OPTIMAL CONFIG (from backtest analysis):
+- ONE-SHOT mode: 15 shares at once (not cycling 3x5)
+- ZONES 4-6 ONLY: velocity >= 0.30 BPS (90% accuracy vs 76.7% all zones)
+- NO emergency hedging: accepting unhedged is better than stop-loss
+- MERGING ON: recycles capital via locked_profit
+
+Backtest Results (7hr data, 33 markets):
+- Best P&L: $5.40 with ONE-SHOT + No Emergency + Zones 4-6
+- Emergency hedging HURTS P&L by $3-4 (locks in guaranteed losses)
+
 Features:
 1. Real Binance WebSocket for velocity (100-200ms)
 2. Real Polymarket WebSocket for orderbook (100-500ms)
-3. Three parameter scenarios in parallel (default/conservative/aggressive)
+3. Zone 4-6 filtering (skip low-velocity noise)
 4. Theoretical position tracking with merge profit calculation
 5. Crash-safe CSV streaming
 
@@ -47,13 +57,19 @@ from src.services.market_finder import MarketFinder
 # 6-ZONE VELOCITY CONFIGURATION (MATCHES LIVE TRADING)
 # =============================================================================
 
+# ZONE 4-6 FILTER: Only trade when velocity >= 0.30 BPS (zones 4-6)
+# Based on backtest analysis showing 90% accuracy in zones 4-6 vs 76.7% all zones
+MIN_VELOCITY_BPS = 0.30
+
+# SUPER AGGRESSIVE loser offsets for zones 4-6 (wider hedge = cheaper fills)
+# Based on backtest: +$26.25 PnL vs +$16.50 standard offsets
 VELOCITY_ZONES = {
-    'neutral':      {'vel_min': 0.00, 'vel_max': 0.05, 'pair_target': 0.97, 'winner_offset': -0.01},
-    'moderate':     {'vel_min': 0.05, 'vel_max': 0.10, 'pair_target': 0.97, 'winner_offset': -0.01},
-    'strong':       {'vel_min': 0.10, 'vel_max': 0.30, 'pair_target': 0.96, 'winner_offset':  0.00},
-    'very_strong':  {'vel_min': 0.30, 'vel_max': 0.50, 'pair_target': 0.95, 'winner_offset': +0.01},
-    'extreme':      {'vel_min': 0.50, 'vel_max': 1.00, 'pair_target': 0.94, 'winner_offset': +0.01},
-    'super_strong': {'vel_min': 1.00, 'vel_max': 99.0, 'pair_target': 0.93, 'winner_offset': +0.02},
+    'neutral':      {'vel_min': 0.00, 'vel_max': 0.05, 'pair_target': 0.97, 'winner_offset': -0.01, 'loser_offset': -0.04},
+    'moderate':     {'vel_min': 0.05, 'vel_max': 0.10, 'pair_target': 0.97, 'winner_offset': -0.01, 'loser_offset': -0.06},
+    'strong':       {'vel_min': 0.10, 'vel_max': 0.30, 'pair_target': 0.96, 'winner_offset':  0.00, 'loser_offset': -0.08},
+    'very_strong':  {'vel_min': 0.30, 'vel_max': 0.50, 'pair_target': 0.95, 'winner_offset': +0.01, 'loser_offset': -0.12},
+    'extreme':      {'vel_min': 0.50, 'vel_max': 1.00, 'pair_target': 0.94, 'winner_offset': +0.01, 'loser_offset': -0.15},
+    'super_strong': {'vel_min': 1.00, 'vel_max': 99.0, 'pair_target': 0.93, 'winner_offset': +0.02, 'loser_offset': -0.18},
 }
 
 # Use single scenario matching live trading
@@ -170,15 +186,15 @@ def get_velocity_zone(velocity_bps: float) -> str:
     return 'super_strong'
 
 
-def get_zone_params(velocity_bps: float) -> Tuple[str, float, float]:
+def get_zone_params(velocity_bps: float) -> Tuple[str, float, float, float]:
     """Get zone parameters for current velocity.
 
     Returns:
-        (zone_name, pair_target, winner_offset)
+        (zone_name, pair_target, winner_offset, loser_offset)
     """
     zone_name = get_velocity_zone(velocity_bps)
     zone = VELOCITY_ZONES[zone_name]
-    return zone_name, zone['pair_target'], zone['winner_offset']
+    return zone_name, zone['pair_target'], zone['winner_offset'], zone['loser_offset']
 
 
 def maybe_tighten_hedge_target(entry_state: EntryState, velocity_bps: float) -> bool:
@@ -196,9 +212,9 @@ def maybe_tighten_hedge_target(entry_state: EntryState, velocity_bps: float) -> 
     if current_dir != entry_state.entry_velocity_dir:
         return False  # Velocity flipped, don't tighten
 
-    # Calculate new target based on current zone
-    zone_name, pair_target, _ = get_zone_params(velocity_bps)
-    new_target = pair_target - entry_state.entry_price
+    # Calculate new target based on current zone (with SUPER AGGRESSIVE loser_offset)
+    zone_name, pair_target, _, loser_offset = get_zone_params(velocity_bps)
+    new_target = pair_target - entry_state.entry_price + loser_offset
     new_target = max(0.01, min(0.95, new_target))
 
     # ONLY TIGHTEN (lower), NEVER LOOSEN
@@ -235,7 +251,7 @@ class SpreadCaptureObserver:
         continuous: bool = False,
         sample_interval_ms: int = 200,
         output_dir: str = "research/observer",
-        trade_size: float = 5.0,
+        trade_size: float = 15.0,  # ONE-SHOT mode: 15 shares at once (backtest optimal)
     ):
         self.duration_hours = duration_hours
         self.continuous = continuous
@@ -444,16 +460,18 @@ class SpreadCaptureObserver:
         pos = self.positions["live"]
         entry_state = self.entry_states["live"]
 
-        # Get zone parameters for current velocity
-        zone_name, pair_target, winner_offset = get_zone_params(velocity_bps)
+        # Get zone parameters for current velocity (including SUPER AGGRESSIVE loser_offset)
+        zone_name, pair_target, winner_offset, loser_offset = get_zone_params(velocity_bps)
 
-        # Determine entry side based on velocity direction (velocity_threshold = 0.05 in neutral zone)
-        if velocity_bps > VELOCITY_ZONES['neutral']['vel_max']:
-            entry_side = "UP"  # BTC rising, bet UP
-        elif velocity_bps < -VELOCITY_ZONES['neutral']['vel_max']:
-            entry_side = "DOWN"  # BTC falling, bet DOWN
+        # Determine entry side based on velocity direction
+        # ZONE 4-6 FILTER: Only enter when |velocity| >= 0.30 BPS (90% accuracy)
+        # Zones 1-3 (velocity < 0.30) are skipped - lower accuracy, more noise
+        if velocity_bps >= MIN_VELOCITY_BPS:
+            entry_side = "UP"  # BTC rising fast, bet UP
+        elif velocity_bps <= -MIN_VELOCITY_BPS:
+            entry_side = "DOWN"  # BTC falling fast, bet DOWN
         else:
-            entry_side = "NONE"  # Neutral zone, no entry
+            entry_side = "NONE"  # Zones 1-3, no entry (skip low-velocity noise)
 
         # Entry signal: directional velocity signal
         entry_signal = entry_side != "NONE"
@@ -487,8 +505,9 @@ class SpreadCaptureObserver:
                     entry_state.entry_price = up_ask  # Fill at ask
                     entry_state.entry_velocity_dir = "UP"
                     entry_state.entry_zone = zone_name
-                    # Hedge target = pair_target - entry_price (zone-specific!)
-                    entry_state.initial_hedge_target = pair_target - entry_state.entry_price
+                    # SUPER AGGRESSIVE hedge target = pair_target - entry_price + loser_offset
+                    # loser_offset is negative, so this LOWERS the target (cheaper hedge)
+                    entry_state.initial_hedge_target = pair_target - entry_state.entry_price + loser_offset
                     entry_state.initial_hedge_target = max(0.01, min(0.95, entry_state.initial_hedge_target))
                     entry_state.locked_hedge_target = entry_state.initial_hedge_target
                     pos.add_fill("UP", entry_state.entry_price, self.trade_size)
@@ -501,7 +520,8 @@ class SpreadCaptureObserver:
                     entry_state.entry_price = down_ask
                     entry_state.entry_velocity_dir = "DOWN"
                     entry_state.entry_zone = zone_name
-                    entry_state.initial_hedge_target = pair_target - entry_state.entry_price
+                    # SUPER AGGRESSIVE hedge target = pair_target - entry_price + loser_offset
+                    entry_state.initial_hedge_target = pair_target - entry_state.entry_price + loser_offset
                     entry_state.initial_hedge_target = max(0.01, min(0.95, entry_state.initial_hedge_target))
                     entry_state.locked_hedge_target = entry_state.initial_hedge_target
                     pos.add_fill("DOWN", entry_state.entry_price, self.trade_size)
@@ -670,15 +690,23 @@ class SpreadCaptureObserver:
         self.start_time = datetime.now()
 
         print("=" * 70)
-        print("SPREAD CAPTURE OBSERVER")
+        print("SPREAD CAPTURE OBSERVER - OPTIMAL CONFIG")
         print("=" * 70)
         print(f"Duration: {'continuous' if self.continuous else f'{self.duration_hours}h'}")
         print(f"Sample interval: {self.sample_interval_ms}ms")
         print(f"Output: {self.output_dir}/")
-        print(f"\n6-Zone Configuration (matches live trading):")
+        print()
+        print("OPTIMAL CONFIG (from backtest):")
+        print(f"  Trade size:    {self.trade_size} shares (ONE-SHOT mode)")
+        print(f"  Zone filter:   >= {MIN_VELOCITY_BPS} BPS (zones 4-6 only)")
+        print(f"  Emergency:     OFF (no stop-loss)")
+        print(f"  Merging:       ON (via locked_profit)")
+        print()
+        print("Zone Configuration (only zones 4-6 trigger entries):")
         for zone_name, zone in VELOCITY_ZONES.items():
-            print(f"  {zone_name}: vel={zone['vel_min']:.2f}-{zone['vel_max']:.2f}, "
-                  f"pair_target={zone['pair_target']:.2f}, winner_offset={zone['winner_offset']:+.2f}")
+            active = "✓" if zone['vel_min'] >= MIN_VELOCITY_BPS else " "
+            print(f"  [{active}] {zone_name:12}: vel={zone['vel_min']:.2f}-{zone['vel_max']:.2f}, "
+                  f"pair_target={zone['pair_target']:.2f}")
         print()
 
         # Initialize Binance WebSocket

@@ -97,19 +97,19 @@ VELOCITY_ZONES = {
         'vel_min': 0.30, 'vel_max': 0.50,
         'pair_target': 0.95,
         'winner_offset': +0.01,  # Aggressive - above best_bid
-        'loser_offset': -0.06,
+        'loser_offset': -0.12,   # SUPER AGGRESSIVE: wider hedge for cheaper fills
     },
     'extreme': {
         'vel_min': 0.50, 'vel_max': 1.00,
         'pair_target': 0.94,
         'winner_offset': +0.01,  # Aggressive
-        'loser_offset': -0.07,
+        'loser_offset': -0.15,   # SUPER AGGRESSIVE: wider hedge for cheaper fills
     },
     'super_strong': {
         'vel_min': 1.00, 'vel_max': 99.0,
         'pair_target': 0.93,
         'winner_offset': +0.02,  # Most aggressive - fast fill
-        'loser_offset': -0.08,
+        'loser_offset': -0.18,   # SUPER AGGRESSIVE: widest hedge for cheapest fills
     },
 }
 
@@ -862,7 +862,7 @@ class SpreadCaptureStrategy:
         # Generate grid levels
         for level in range(self.grid_levels):
             level_offset = offset + (level * GRID_SPACING)
-            price = round(best_bid - level_offset, 2)
+            price = round(best_bid + level_offset, 2)  # ADD offset (negative = lower price)
 
             # Apply hedge target cap (don't bid higher than target)
             if max_hedge_price is not None and price > max_hedge_price:
