@@ -1,26 +1,50 @@
 {
-  "default": {
-    "velocity_threshold": 0.05,
-    "velocity_strong": 0.1,
-    "base_offset": 0.02,
-    "tight_offset": -0.01,
-    "wide_offset": 0.02,
-    "very_wide_offset": 0.04
+  "neutral": {
+    "vel_min": 0.0,
+    "vel_max": 0.05,
+    "pair_target": 0.97,
+    "winner_offset": -0.01,
+    "loser_offset": -0.01,
+    "winner_size_ratio": 0.5
   },
-  "conservative": {
-    "velocity_threshold": 0.08,
-    "velocity_strong": 0.15,
-    "base_offset": 0.025,
-    "tight_offset": 0.0,
-    "wide_offset": 0.03,
-    "very_wide_offset": 0.05
+  "moderate": {
+    "vel_min": 0.05,
+    "vel_max": 0.1,
+    "pair_target": 0.97,
+    "winner_offset": -0.01,
+    "loser_offset": -0.02,
+    "winner_size_ratio": 0.55
   },
-  "aggressive": {
-    "velocity_threshold": 0.03,
-    "velocity_strong": 0.07,
-    "base_offset": 0.015,
-    "tight_offset": -0.02,
-    "wide_offset": 0.015,
-    "very_wide_offset": 0.03
+  "strong": {
+    "vel_min": 0.1,
+    "vel_max": 0.3,
+    "pair_target": 0.96,
+    "winner_offset": 0.0,
+    "loser_offset": -0.04,
+    "winner_size_ratio": 0.6
+  },
+  "very_strong": {
+    "vel_min": 0.3,
+    "vel_max": 0.5,
+    "pair_target": 0.95,
+    "winner_offset": 0.01,
+    "loser_offset": -0.08,
+    "winner_size_ratio": 0.7
+  },
+  "extreme": {
+    "vel_min": 0.5,
+    "vel_max": 1.0,
+    "pair_target": 0.94,
+    "winner_offset": 0.01,
+    "loser_offset": -0.12,
+    "winner_size_ratio": 0.75
+  },
+  "super_strong": {
+    "vel_min": 1.0,
+    "vel_max": 99.0,
+    "pair_target": 0.93,
+    "winner_offset": 0.01,
+    "loser_offset": -0.12,
+    "winner_size_ratio": 0.8
   }
 }

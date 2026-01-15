@@ -30,11 +30,11 @@ Expected Improvement:
     - Time utilization: 5% → 95%
 
 Usage (NEW):
-    strategy = SpreadCaptureStrategy(base_size=10, grid_levels=3)
+    strategy = SpreadCaptureStrategy(base_size=15, grid_levels=3)
     quotes = strategy.get_quotes(up_bid=0.55, up_ask=0.56, ...)
 
 Usage (LEGACY - still works):
-    strategy = SpreadCaptureStrategy(entry_size=5, target_shares=15)
+    strategy = SpreadCaptureStrategy(entry_size=15, target_shares=30)
     action = strategy.decide(up_bid=0.55, up_ask=0.56, ...)
 
 Author: Claude Code
@@ -73,43 +73,57 @@ VELOCITY_PULL_THRESHOLD = 0.05  # LEGACY: For backward compatibility with tests
 # loser_offset: Added to best_bid for HEDGE side (loser) - used as fallback
 #   - Always negative = bid below best_bid (wait for price drop)
 #
+# winner_size_ratio: Fraction of total shares allocated to winner side (HYBRID MM)
+#   - 0.50 = symmetric (no velocity edge)
+#   - 0.80 = 80% winner, 20% loser (strong velocity edge)
+#   - Higher velocity = more confidence = larger winner allocation
+#
 # hedge_target = pair_target - entry_price (primary hedge pricing)
+# PROFITABLE ZONE CONFIGURATION (Zone 5-6 with -0.12 loser offset)
+# Research finding: Zone 5-6 (vel >= 0.50) + 7% stop-loss + -0.12 loser = +$52.80 ($1.17/hr)
+# Key insight: More passive loser offset = higher per-trade profit ($1.31 vs $0.90)
 VELOCITY_ZONES = {
     'neutral': {
         'vel_min': 0.00, 'vel_max': 0.05,
         'pair_target': 0.97,
         'winner_offset': -0.01,  # Conservative entry
         'loser_offset': -0.01,
+        'winner_size_ratio': 0.50,  # Symmetric - no velocity edge
     },
     'moderate': {
         'vel_min': 0.05, 'vel_max': 0.10,
         'pair_target': 0.97,
         'winner_offset': -0.01,  # Still conservative
         'loser_offset': -0.02,
+        'winner_size_ratio': 0.55,  # Slight bias toward winner
     },
     'strong': {
         'vel_min': 0.10, 'vel_max': 0.30,
         'pair_target': 0.96,
         'winner_offset': 0.00,   # At best_bid
         'loser_offset': -0.04,
+        'winner_size_ratio': 0.60,  # Moderate bias toward winner
     },
     'very_strong': {
         'vel_min': 0.30, 'vel_max': 0.50,
         'pair_target': 0.95,
         'winner_offset': +0.01,  # Aggressive - above best_bid
-        'loser_offset': -0.12,   # SUPER AGGRESSIVE: wider hedge for cheaper fills
+        'loser_offset': -0.08,   # More passive for higher profit
+        'winner_size_ratio': 0.70,  # Strong bias toward winner (70-30 split)
     },
     'extreme': {
         'vel_min': 0.50, 'vel_max': 1.00,
         'pair_target': 0.94,
         'winner_offset': +0.01,  # Aggressive
-        'loser_offset': -0.15,   # SUPER AGGRESSIVE: wider hedge for cheaper fills
+        'loser_offset': -0.12,   # PROFITABLE: Very passive, higher per-trade profit
+        'winner_size_ratio': 0.75,  # Stronger bias (75-25 split)
     },
     'super_strong': {
         'vel_min': 1.00, 'vel_max': 99.0,
         'pair_target': 0.93,
-        'winner_offset': +0.02,  # Most aggressive - fast fill
-        'loser_offset': -0.18,   # SUPER AGGRESSIVE: widest hedge for cheapest fills
+        'winner_offset': +0.01,  # Consistent with other zones
+        'loser_offset': -0.12,   # PROFITABLE: Very passive, higher per-trade profit
+        'winner_size_ratio': 0.80,  # Maximum bias (80-20 split)
     },
 }
 
@@ -140,16 +154,22 @@ FORCE_REBALANCE_OFFSET = 0.005    # Tighter offset when force-buying lagging sid
 
 # Polymarket constraints
 MIN_SHARES = 5
-DEFAULT_BASE_SIZE = 10
+DEFAULT_BASE_SIZE = 15          # Target: 15 shares/side (scale to 30 after live validation)
 DEFAULT_TARGET_SHARES = 100     # Total target per market
 DEFAULT_MIN_PROFIT = 0.005
 DEFAULT_MAX_SHARE_PRICE = 0.95
-DEFAULT_ENABLE_CYCLING = False  # If False, stop at target; if True, keep cycling
+DEFAULT_ENABLE_CYCLING = True   # PROFITABLE: Enable cycling (7.96 cycles/market = 2.4x PnL)
 
 # Zone filtering - only trade when velocity >= min_velocity_bps
+# Set to 0.50 for zones 5-6 only (extreme, super_strong) - PROFITABLE CONFIG
 # Set to 0.30 for zones 4-6 only (very_strong, extreme, super_strong)
-# Set to 0.0 for all zones (default)
-DEFAULT_MIN_VELOCITY_BPS = 0.0  # 0.0 = all zones, 0.30 = zones 4-6 only
+# Set to 0.0 for all zones
+# PROFITABLE STRATEGY: Use 0.50 to only trade high-accuracy zones (61% accuracy)
+DEFAULT_MIN_VELOCITY_BPS = 0.50  # zones 5-6 only (61%+ accuracy, +$1.17/hr)
+
+# Stop-loss configuration - trigger hedge when winner drops X%
+# Early stop-loss (7%) = cheaper hedge pair cost ($1.048 vs $1.091 at 15%)
+DEFAULT_STOP_LOSS_PCT = 0.07  # 7% drop triggers immediate hedge
 
 # Timing
 MIN_TIME_REMAINING = 60         # Don't place new orders with <60s left
@@ -240,6 +260,11 @@ class SpreadCaptureState:
     first_fill_velocity_dir: Optional[str] = None   # Velocity direction at first fill ("UP" or "DOWN")
     locked_hedge_target: Optional[float] = None     # Current hedge target (only tightens)
     current_velocity_zone: Optional[str] = None     # 6-zone string from VELOCITY_ZONES (active system)
+
+    # Stop-loss tracking (7% stop-loss = profitable config)
+    # When winner drops X% from fill price, immediately hedge at loser ASK
+    stop_loss_triggered: bool = False               # Whether stop-loss was triggered
+    stop_loss_hedge_price: float = 0.0              # Price we hedged at via stop-loss
 
     # LEGACY attributes for backward compatibility
     entry_side: Optional[str] = None      # LEGACY: "UP" or "DOWN"
@@ -334,7 +359,8 @@ class SpreadCaptureStrategy:
         min_profit: float = DEFAULT_MIN_PROFIT,
         max_share_price: float = DEFAULT_MAX_SHARE_PRICE,
         enable_cycling: bool = DEFAULT_ENABLE_CYCLING,
-        min_velocity_bps: float = DEFAULT_MIN_VELOCITY_BPS,  # Zone filter: 0.30 = zones 4-6 only
+        min_velocity_bps: float = DEFAULT_MIN_VELOCITY_BPS,  # Zone filter: 0.50 = zones 5-6 only
+        stop_loss_pct: float = DEFAULT_STOP_LOSS_PCT,  # 7% stop-loss = profitable config
         # LEGACY parameters (aliases)
         entry_size: Optional[int] = None,
         entry_offset: float = DEFAULT_ENTRY_OFFSET,
@@ -355,7 +381,8 @@ class SpreadCaptureStrategy:
         self.min_profit = min_profit
         self.max_share_price = max_share_price
         self.enable_cycling = enable_cycling
-        self.min_velocity_bps = min_velocity_bps  # Zone filter threshold
+        self.min_velocity_bps = min_velocity_bps  # Zone filter threshold (0.50 = zones 5-6)
+        self.stop_loss_pct = stop_loss_pct  # 7% stop-loss = profitable config
 
         # LEGACY attributes
         self.entry_offset = entry_offset
@@ -367,9 +394,10 @@ class SpreadCaptureStrategy:
         self._completed_pairs: List[Dict[str, Any]] = []
 
         zone_info = f", min_vel={min_velocity_bps:.2f}" if min_velocity_bps > 0 else ""
+        sl_info = f", stop_loss={stop_loss_pct:.0%}" if stop_loss_pct > 0 else ""
         logger.info(
             f"[SPREADCAP] Initialized: base_size={base_size}, grid_levels={grid_levels}, "
-            f"max_imbalance={max_imbalance_pct:.0%}, target={target_shares}, cycling={enable_cycling}{zone_info}"
+            f"max_imbalance={max_imbalance_pct:.0%}, target={target_shares}, cycling={enable_cycling}{zone_info}{sl_info}"
         )
 
     # =========================================================================
@@ -451,6 +479,39 @@ class SpreadCaptureStrategy:
         """
         zone_name = self.get_velocity_zone_name(velocity_bps)
         return VELOCITY_ZONES[zone_name]['pair_target']
+
+    def calculate_size_allocation(self, velocity_bps: float, total_size: int) -> Tuple[int, int]:
+        """Calculate size allocation for UP and DOWN sides based on velocity.
+
+        HYBRID MM: Velocity biases SIZE allocation, not just offsets.
+        - When velocity > 0 (BTC rising): allocate MORE to UP (winner)
+        - When velocity < 0 (BTC falling): allocate MORE to DOWN (winner)
+
+        Args:
+            velocity_bps: Current BTC velocity in basis points per second
+            total_size: Total shares to allocate across both sides
+
+        Returns:
+            (up_size, down_size) - share allocation for each side
+        """
+        zone_name = self.get_velocity_zone_name(velocity_bps)
+        zone_config = VELOCITY_ZONES.get(zone_name, VELOCITY_ZONES['neutral'])
+        winner_ratio = zone_config.get('winner_size_ratio', 0.50)
+
+        winner_size = int(total_size * winner_ratio)
+        loser_size = total_size - winner_size
+
+        # Ensure minimum size
+        winner_size = max(MIN_SHARES, winner_size)
+        loser_size = max(MIN_SHARES, loser_size)
+
+        # Apply to correct side based on velocity direction
+        if velocity_bps >= 0:
+            # BTC rising → UP is winner
+            return (winner_size, loser_size)
+        else:
+            # BTC falling → DOWN is winner
+            return (loser_size, winner_size)
 
     def calculate_hedge_target(self, entry_price: float, velocity_bps: float) -> float:
         """Calculate hedge target price based on entry and current velocity zone.
@@ -574,6 +635,104 @@ class SpreadCaptureStrategy:
             return (True, old_target, new_target)
 
         return (False, None, None)
+
+    # =========================================================================
+    # STOP-LOSS MECHANISM (7% = profitable config)
+    # =========================================================================
+
+    def check_stop_loss(
+        self,
+        winner_current_bid: float,
+        loser_current_ask: float,
+    ) -> Tuple[bool, Optional[float]]:
+        """
+        Check if stop-loss should trigger and return hedge price.
+
+        Stop-loss triggers when winner drops X% from fill price.
+        When triggered, immediately hedge by hitting loser ASK.
+
+        Research finding: 7% stop-loss = cheaper hedge ($1.048 pair cost)
+        vs 15% stop-loss = expensive hedge ($1.091 pair cost)
+
+        Args:
+            winner_current_bid: Current bid price of winner side
+            loser_current_ask: Current ask price of loser side
+
+        Returns:
+            (should_trigger, hedge_price) - hedge_price is loser_current_ask
+        """
+        s = self.state
+
+        # Only check if entry filled but hedge hasn't
+        if s.first_fill_side is None or s.first_fill_price <= 0:
+            return (False, None)
+
+        # Already triggered or hedged
+        if s.stop_loss_triggered:
+            return (False, None)
+
+        # Calculate drop percentage
+        drop_pct = (s.first_fill_price - winner_current_bid) / s.first_fill_price
+
+        if drop_pct >= self.stop_loss_pct:
+            s.stop_loss_triggered = True
+            s.stop_loss_hedge_price = loser_current_ask
+
+            logger.warning(
+                f"[SPREADCAP] STOP-LOSS TRIGGERED: winner dropped {drop_pct:.1%} "
+                f"(fill=${s.first_fill_price:.3f} → bid=${winner_current_bid:.3f}), "
+                f"hedging at loser_ask=${loser_current_ask:.3f}"
+            )
+            return (True, loser_current_ask)
+
+        return (False, None)
+
+    def get_stop_loss_order(
+        self,
+        up_bid: float,
+        up_ask: float,
+        down_bid: float,
+        down_ask: float,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Check stop-loss and return immediate hedge order if triggered.
+
+        This should be called BEFORE normal quote generation.
+        If stop-loss triggers, return a market-taking order to hedge.
+
+        Args:
+            up_bid, up_ask, down_bid, down_ask: Current orderbook prices
+
+        Returns:
+            Dict with hedge order details, or None if no stop-loss
+        """
+        s = self.state
+
+        if s.first_fill_side is None or s.stop_loss_triggered:
+            return None
+
+        # Determine winner/loser based on entry side
+        if s.first_fill_side == "UP":
+            winner_bid = up_bid
+            loser_ask = down_ask
+            loser_side = "DOWN"
+        else:
+            winner_bid = down_bid
+            loser_ask = up_ask
+            loser_side = "UP"
+
+        should_trigger, hedge_price = self.check_stop_loss(winner_bid, loser_ask)
+
+        if should_trigger and hedge_price is not None:
+            return {
+                'side': loser_side,
+                'price': hedge_price,
+                'size': self.base_size,
+                'is_stop_loss': True,
+                'is_market_order': True,  # Hit the ask immediately
+            }
+
+        return None
 
     # =========================================================================
     # CORE: VELOCITY-BASED QUOTE ADJUSTMENT
@@ -774,6 +933,15 @@ class SpreadCaptureStrategy:
         s.last_velocity = velocity_bps
         s.phase = SpreadCapturePhase.QUOTING
 
+        # STOP-LOSS CHECK: If winner dropped X%, immediately hedge
+        # This takes priority over normal quote generation
+        stop_loss_order = self.get_stop_loss_order(up_bid, up_ask, down_bid, down_ask)
+        if stop_loss_order:
+            logger.info(
+                f"[SPREADCAP] Stop-loss hedge: {stop_loss_order['side']} @ ${stop_loss_order['price']:.3f}"
+            )
+            return [stop_loss_order]
+
         # Dynamic hedge target tightening on each tick
         # This connects the multi-zone hedge system to quote generation
         if s.locked_hedge_target is not None:
@@ -784,40 +952,75 @@ class SpreadCaptureStrategy:
         s.last_up_offset = up_offset
         s.last_down_offset = down_offset
 
-        # Check if rebalancing needed
-        needs_rebalance, rebalance_side = self._check_rebalance_needed()
-        if needs_rebalance:
-            s.phase = SpreadCapturePhase.REBALANCING
+        # Determine winner side based on velocity direction
+        winner_side = "UP" if velocity_bps > 0 else "DOWN"
+        loser_side = "DOWN" if velocity_bps > 0 else "UP"
+
+        # Get current ask prices for hedge decision
+        winner_ask = up_ask if winner_side == "UP" else down_ask
+        loser_ask = down_ask if winner_side == "UP" else up_ask
+        loser_bid = down_bid if winner_side == "UP" else up_bid
 
         quotes = []
+        zone_name = self.get_velocity_zone_name(velocity_bps)
 
-        # Generate UP quotes
-        up_quotes = self._generate_side_quotes(
-            side="UP",
-            best_bid=up_bid,
-            offset=up_offset,
-            current_shares=s.up_shares,
-            needs_rebalance=(needs_rebalance and rebalance_side == "UP"),
-        )
-        quotes.extend(up_quotes)
+        # DIRECTIONAL STRATEGY:
+        # Phase 1: Entry not filled yet → only post on WINNER side
+        # Phase 2: Entry filled → only post on LOSER side when price is near target
+        if s.first_fill_side is None:
+            # PHASE 1: No entry yet - post aggressively on WINNER side only
+            winner_offset = up_offset if winner_side == "UP" else down_offset
+            winner_bid = up_bid if winner_side == "UP" else down_bid
 
-        # Generate DOWN quotes
-        down_quotes = self._generate_side_quotes(
-            side="DOWN",
-            best_bid=down_bid,
-            offset=down_offset,
-            current_shares=s.down_shares,
-            needs_rebalance=(needs_rebalance and rebalance_side == "DOWN"),
-        )
-        quotes.extend(down_quotes)
+            winner_quotes = self._generate_side_quotes(
+                side=winner_side,
+                best_bid=winner_bid,
+                offset=winner_offset,
+                current_shares=s.up_shares if winner_side == "UP" else s.down_shares,
+                needs_rebalance=False,
+                allocated_size=self.base_size,  # Full size on winner
+            )
+            quotes.extend(winner_quotes)
+
+            if winner_quotes:
+                logger.debug(
+                    f"[SPREADCAP] ENTRY: {winner_side} {len(winner_quotes)} quotes "
+                    f"(off={winner_offset:.3f}), vel={velocity_bps:.3f}bps ({zone_name})"
+                )
+        else:
+            # PHASE 2: Entry filled - check if loser price is near hedge target
+            hedge_target = s.locked_hedge_target
+
+            if hedge_target is not None:
+                # Only post hedge when loser ask is CLOSE to our target
+                # This avoids adverse selection - we wait for price to drop
+                price_gap = loser_ask - hedge_target
+
+                if price_gap <= 0.02:  # Loser ask within $0.02 of target
+                    loser_offset = down_offset if loser_side == "DOWN" else up_offset
+
+                    loser_quotes = self._generate_side_quotes(
+                        side=loser_side,
+                        best_bid=loser_bid,
+                        offset=loser_offset,
+                        current_shares=s.down_shares if loser_side == "DOWN" else s.up_shares,
+                        needs_rebalance=False,
+                        allocated_size=self.base_size,  # Full size on hedge
+                    )
+                    quotes.extend(loser_quotes)
+
+                    if loser_quotes:
+                        logger.debug(
+                            f"[SPREADCAP] HEDGE: {loser_side} {len(loser_quotes)} quotes, "
+                            f"ask=${loser_ask:.3f} near target=${hedge_target:.3f} (gap=${price_gap:.3f})"
+                        )
+                else:
+                    logger.debug(
+                        f"[SPREADCAP] WAITING: loser ask=${loser_ask:.3f} > target=${hedge_target:.3f} "
+                        f"(gap=${price_gap:.3f}, need <=$0.02)"
+                    )
 
         s.quotes_generated += len(quotes)
-
-        if quotes:
-            logger.debug(
-                f"[SPREADCAP] Quotes: UP={len(up_quotes)} (off={up_offset:.3f}), "
-                f"DOWN={len(down_quotes)} (off={down_offset:.3f}), vel={velocity_bps:.3f}bps"
-            )
 
         return quotes
 
@@ -828,8 +1031,19 @@ class SpreadCaptureStrategy:
         offset: float,
         current_shares: int,
         needs_rebalance: bool,
+        allocated_size: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Generate quotes for one side (UP or DOWN)."""
+        """Generate quotes for one side (UP or DOWN).
+
+        Args:
+            side: "UP" or "DOWN"
+            best_bid: Current best bid for this side
+            offset: Price offset to apply (from velocity zone)
+            current_shares: Current position on this side
+            needs_rebalance: Whether this side needs force-rebalancing
+            allocated_size: Size allocation for this side (from velocity-biased sizing)
+                           If None, uses base_size (backward compatible)
+        """
         quotes = []
         s = self.state
 
@@ -838,8 +1052,9 @@ class SpreadCaptureStrategy:
             if not needs_rebalance:
                 return []
 
-        # Size per level
-        size_per_level = max(MIN_SHARES, self.base_size // self.grid_levels)
+        # Size per level - use allocated_size if provided (HYBRID MM)
+        effective_size = allocated_size if allocated_size is not None else self.base_size
+        size_per_level = max(MIN_SHARES, effective_size // self.grid_levels)
 
         # Rebalancing: tighter offset, full size
         if needs_rebalance:
@@ -1199,9 +1414,11 @@ class SpreadCaptureStrategy:
         self.state.last_velocity_zone = VelocityZone.NEUTRAL  # Reset zone
         # Note: Dynamic hedge fields (first_fill_side, locked_hedge_target, etc.)
         # are reset to None/0.0 by the fresh SpreadCaptureState()
+        # Note: Stop-loss fields (stop_loss_triggered, stop_loss_hedge_price)
+        # are also reset by the fresh SpreadCaptureState()
 
         self._completed_pairs = []
-        logger.info(f"[SPREADCAP] Reset for market #{markets} (hedge target cleared)")
+        logger.info(f"[SPREADCAP] Reset for market #{markets} (hedge target + stop-loss cleared)")
 
     def __repr__(self) -> str:
         return (
