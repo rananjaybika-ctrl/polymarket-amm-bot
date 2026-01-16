@@ -1,40 +1,41 @@
 #!/usr/bin/env python3
 """
-Spread Capture Observer - ZONE 5-6 PROFITABLE Mode
+Spread Capture Observer - PASSIVE GRID MM Strategy
 
 Captures REAL market data at sub-second speeds for strategy analysis.
-Simulates PROFITABLE strategy: winner-only entry, hedge when loser drops OR stop-loss triggers.
+Simulates PASSIVE GRID MM strategy (proven $95/hr in backtest).
 
-PROFITABLE STRATEGY CONFIG (Zone 5-6 + 7% Stop-Loss):
-- Zones 5-6 only (velocity >= 0.50 bps): 61% signal accuracy
-- Entry on WINNER side only (avoid adverse selection on loser)
-- Loser offset: -0.12 (very passive, $1.31 profit per passive hedge)
-- Stop-loss: 7% drop triggers immediate hedge at loser ASK ($1.048 pair cost)
-- Expected: +$1.17/hr (backtested on 180 markets)
+PASSIVE GRID MM CONFIG (All Zones, No Stop-Loss):
+- All velocity zones active (no filtering)
+- Entry on BOTH sides simultaneously (symmetric grid)
+- Passive offsets: bid = best_bid - offset (always below market)
+- No stop-loss (pure passive market making)
+- Fill detection: bid drops to our posted price
+- Expected: +$95/hr (backtested)
 
-Key Insight - Why Zone 5-6 + Stop-Loss is Profitable:
-1. Higher velocity threshold = better accuracy (61% vs 51% for Zone 4-6)
-2. Earlier stop-loss = cheaper hedge ($1.048 vs $1.091 at 15%)
-3. More passive loser offset = higher per-trade profit ($1.31 vs $0.90)
+Key Insight - Why Passive Grid Works:
+1. Symmetric entry = capture spread on both sides
+2. Deeper loser offset in high velocity = protect against adverse selection
+3. No stop-loss = let positions naturally fill via market movement
+4. Simple cycling: fill both sides → pair complete → reset → repeat
 
 Flow:
-1. Detect zone 5-6 velocity signal (|vel| >= 0.50 bps)
-2. Post ONLY on winner side (aggressive +0.01 offset)
-3. Wait for entry fill
-4. Monitor winner price - if drops 7%, trigger stop-loss hedge
-5. Otherwise, passive hedge when loser_ask <= hedge_target
+1. Post bids on BOTH UP and DOWN simultaneously at best_bid - offset
+2. Track posted prices until filled
+3. Fill when next_bid <= posted_price (market drops to us)
+4. When both sides fill, merge pair, lock profit, reset for next cycle
 
 Features:
 1. Real Binance WebSocket for velocity (100-200ms)
 2. Real Polymarket WebSocket for orderbook (100-500ms)
-3. Zone 5-6 filtering (skip low-accuracy zones)
-4. 7% stop-loss mechanism (cheaper hedges)
-5. Crash-safe CSV streaming with stop-loss tracking
+3. All zones active (no velocity filtering)
+4. Passive grid offsets (symmetric in low velocity, asymmetric in high)
+5. Crash-safe CSV streaming with grid tracking
 
 Usage:
-    python scripts/spread_capture_observer.py --hours 12
-    python scripts/spread_capture_observer.py --continuous
-    python scripts/spread_capture_observer.py --hours 8 --interval 100
+    python scripts/observer.py --hours 12
+    python scripts/observer.py --continuous
+    python scripts/observer.py --hours 8 --interval 100
 """
 
 import asyncio
@@ -63,34 +64,29 @@ from src.services.market_finder import MarketFinder
 
 
 # =============================================================================
-# 6-ZONE VELOCITY CONFIGURATION (MATCHES LIVE TRADING)
+# PASSIVE GRID MM CONFIGURATION (PROVEN $95/hr)
 # =============================================================================
 
-# PROFITABLE STRATEGY: Only trade zones 5-6 (highest confidence signals)
-# Zone 5-6 (vel >= 0.50) has 61% accuracy, +$1.17/hr (vs 51% for zones 4-6)
-# Entry on winner side only, hedge when loser price drops to target OR stop-loss triggers
-MIN_VELOCITY_BPS = 0.50  # zones 5-6 only (PROFITABLE CONFIG)
+# PASSIVE GRID: Trade ALL zones (no velocity filtering)
+# Formula: our_bid = best_bid - offset (positive offset = passive)
+MIN_VELOCITY_BPS = 0.0  # Trade all zones (passive grid)
 
-# Stop-loss configuration: 7% drop triggers immediate hedge
-# Research finding: 7% stop-loss = cheaper hedge ($1.048 pair cost vs $1.091 at 15%)
-STOP_LOSS_PCT = 0.07
+# Stop-loss: DISABLED for passive grid strategy
+# Let positions fill naturally via market movement
+STOP_LOSS_PCT = 0.0  # Disabled
 
 # Minimum time remaining to enter new trade (seconds)
-# Don't enter with <2min left - not enough time for hedge
-MIN_TIME = 120
+# Stop posting at 60s remaining
+MIN_TIME = 60
 
-# HYBRID MM: Velocity-biased sizing + offset adjustment
-# Higher velocity = more confidence = larger allocation to winner side
-# winner_size_ratio: Fraction allocated to predicted winner (0.5 = symmetric, 0.8 = 80% winner)
-# PROFITABLE ZONE CONFIGURATION (Zone 5-6 with -0.12 loser offset)
-# Research finding: Zone 5-6 (vel >= 0.50) + 7% stop-loss + -0.12 loser = +$52.80 ($1.17/hr)
+# PASSIVE GRID MM ZONES (proven $95/hr)
+# Formula: our_bid = best_bid - offset (positive = passive, below market)
+# Symmetric in low velocity, asymmetric loser offset in high velocity
 VELOCITY_ZONES = {
-    'neutral':      {'vel_min': 0.00, 'vel_max': 0.05, 'pair_target': 0.97, 'winner_offset': -0.01, 'loser_offset': -0.01, 'winner_size_ratio': 0.50},
-    'moderate':     {'vel_min': 0.05, 'vel_max': 0.10, 'pair_target': 0.97, 'winner_offset': -0.01, 'loser_offset': -0.02, 'winner_size_ratio': 0.55},
-    'strong':       {'vel_min': 0.10, 'vel_max': 0.30, 'pair_target': 0.96, 'winner_offset':  0.00, 'loser_offset': -0.04, 'winner_size_ratio': 0.60},
-    'very_strong':  {'vel_min': 0.30, 'vel_max': 0.50, 'pair_target': 0.95, 'winner_offset': +0.01, 'loser_offset': -0.08, 'winner_size_ratio': 0.70},
-    'extreme':      {'vel_min': 0.50, 'vel_max': 1.00, 'pair_target': 0.94, 'winner_offset': +0.01, 'loser_offset': -0.12, 'winner_size_ratio': 0.75},  # PROFITABLE: -0.12
-    'super_strong': {'vel_min': 1.00, 'vel_max': 99.0, 'pair_target': 0.93, 'winner_offset': +0.01, 'loser_offset': -0.12, 'winner_size_ratio': 0.80},  # PROFITABLE: -0.12
+    'neutral':     {'vel_min': 0.00, 'vel_max': 0.10, 'winner_offset': 0.01, 'loser_offset': 0.01},
+    'moderate':    {'vel_min': 0.10, 'vel_max': 0.30, 'winner_offset': 0.01, 'loser_offset': 0.01},
+    'strong':      {'vel_min': 0.30, 'vel_max': 0.50, 'winner_offset': 0.01, 'loser_offset': 0.03},
+    'very_strong': {'vel_min': 0.50, 'vel_max': 99.0, 'winner_offset': 0.01, 'loser_offset': 0.05},
 }
 
 # Use single scenario matching live trading
@@ -166,158 +162,138 @@ class RestingOrders:
 
 @dataclass
 class CycleRecord:
-    """Record of a completed entry→hedge→merge cycle."""
+    """Record of a completed grid pair cycle."""
     cycle_num: int
-    entry_side: str
-    entry_price: float
-    hedge_price: float
-    hedge_type: str  # "passive" or "stoploss"
+    up_fill_price: float
+    down_fill_price: float
     pair_cost: float
     pnl: float
-    time_remaining_at_entry: float
-    time_remaining_at_merge: float
+    time_remaining_at_post: float
+    time_remaining_at_complete: float
 
 
 @dataclass
-class EntryState:
+class GridState:
     """
-    Track entry fill and hedge target per scenario (matches live trading).
+    Track passive grid state - both sides posting simultaneously.
 
-    Key insight: Hedge target can TIGHTEN but never loosen when velocity strengthens.
-    Stop-loss: When winner drops 7% from fill, immediately hedge at loser ASK.
-    CYCLING: After both sides fill, merge pair and reset for next cycle.
+    Passive Grid Flow:
+    1. Post bids on BOTH UP and DOWN at best_bid - offset
+    2. Track posted prices until filled
+    3. Fill when market bid drops to our posted price
+    4. When both sides fill, complete pair and reset
     """
-    entry_filled: bool = False
-    entry_side: Optional[str] = None
-    entry_price: float = 0.0
-    entry_velocity_dir: Optional[str] = None  # Track velocity direction at entry
-    entry_zone: str = ""  # Zone at entry time
-    initial_hedge_target: float = 0.0  # Target at entry (for logging)
-    locked_hedge_target: float = 0.0  # Current (tightened) target
-    hedge_filled: bool = False
-    hedge_price: float = 0.0  # Price hedge filled at
-    tighten_count: int = 0  # Number of times target was tightened
-    entry_time_remaining: float = 0.0  # Time remaining when entry filled
+    # Grid posted prices (our bids)
+    up_posted_bid: float = 0.0
+    down_posted_bid: float = 0.0
 
-    # Stop-loss tracking (7% = profitable config)
-    stop_loss_triggered: bool = False  # Whether stop-loss was triggered
-    stop_loss_hedge_price: float = 0.0  # Price we hedged at via stop-loss
+    # Fill tracking
+    up_filled: bool = False
+    down_filled: bool = False
+    up_fill_price: float = 0.0
+    down_fill_price: float = 0.0
+
+    # Offsets used for this grid
+    up_offset: float = 0.0
+    down_offset: float = 0.0
+
+    # Time tracking
+    post_time_remaining: float = 0.0
+
+    # Zone at post time
+    post_zone: str = ""
 
     # Cycling tracking
-    cycles_this_market: int = 0  # Number of complete cycles in current market
-    cycles_total: int = 0  # Total cycles across all markets
-    cycles_pnl: float = 0.0  # Cumulative PnL from cycles this market
-    cycle_records: list = None  # List of CycleRecord for this market
+    cycles_this_market: int = 0
+    cycles_total: int = 0
+    cycles_pnl: float = 0.0
+    cycle_records: list = None
 
     def __post_init__(self):
         if self.cycle_records is None:
             self.cycle_records = []
 
+    def is_posted(self) -> bool:
+        """Check if grid is currently posted (waiting for fills)."""
+        return self.up_posted_bid > 0 or self.down_posted_bid > 0
+
+    def is_complete(self) -> bool:
+        """Check if both sides have filled."""
+        return self.up_filled and self.down_filled
+
     def reset_for_cycle(self):
         """Reset for next cycle within same market (keeps cycle count)."""
-        self.entry_filled = False
-        self.entry_side = None
-        self.entry_price = 0.0
-        self.entry_velocity_dir = None
-        self.entry_zone = ""
-        self.initial_hedge_target = 0.0
-        self.locked_hedge_target = 0.0
-        self.hedge_filled = False
-        self.hedge_price = 0.0
-        self.tighten_count = 0
-        self.entry_time_remaining = 0.0
-        self.stop_loss_triggered = False
-        self.stop_loss_hedge_price = 0.0
+        self.up_posted_bid = 0.0
+        self.down_posted_bid = 0.0
+        self.up_filled = False
+        self.down_filled = False
+        self.up_fill_price = 0.0
+        self.down_fill_price = 0.0
+        self.up_offset = 0.0
+        self.down_offset = 0.0
+        self.post_time_remaining = 0.0
+        self.post_zone = ""
 
     def reset(self):
         """Reset for new market (keeps total cycle count)."""
         self.reset_for_cycle()
-        # Reset market-specific cycling (keep total)
         self.cycles_this_market = 0
         self.cycles_pnl = 0.0
         self.cycle_records = []
 
 
+# Alias for compatibility
+EntryState = GridState
+
+
 # =============================================================================
-# SIGNAL GENERATOR (6-ZONE - MATCHES LIVE TRADING)
+# SIGNAL GENERATOR (PASSIVE GRID - 4 ZONES)
 # =============================================================================
 
 def get_velocity_zone(velocity_bps: float) -> str:
-    """Get velocity zone name based on absolute velocity (matches live trading)."""
+    """Get velocity zone name based on absolute velocity (passive grid)."""
     abs_vel = abs(velocity_bps)
     for zone_name, zone in VELOCITY_ZONES.items():
         if zone['vel_min'] <= abs_vel < zone['vel_max']:
             return zone_name
-    return 'super_strong'
+    return 'very_strong'  # Highest zone for passive grid
 
 
-def get_zone_params(velocity_bps: float) -> Tuple[str, float, float, float, float]:
-    """Get zone parameters for current velocity.
+def get_zone_params(velocity_bps: float) -> Tuple[str, float, float]:
+    """Get zone parameters for current velocity (passive grid).
 
     Returns:
-        (zone_name, pair_target, winner_offset, loser_offset, winner_size_ratio)
+        (zone_name, winner_offset, loser_offset)
     """
     zone_name = get_velocity_zone(velocity_bps)
     zone = VELOCITY_ZONES[zone_name]
-    return (zone_name, zone['pair_target'], zone['winner_offset'],
-            zone['loser_offset'], zone.get('winner_size_ratio', 0.50))
+    return (zone_name, zone['winner_offset'], zone['loser_offset'])
 
 
 def calculate_size_allocation(velocity_bps: float, total_size: float) -> Tuple[float, float]:
-    """Calculate size allocation for UP and DOWN based on velocity (HYBRID MM).
+    """Calculate size allocation for UP and DOWN (passive grid = symmetric).
 
-    Higher velocity = more shares to predicted winner side.
+    Passive grid uses equal sizing on both sides.
 
     Args:
-        velocity_bps: Current BTC velocity
-        total_size: Total shares to allocate
+        velocity_bps: Current BTC velocity (used to determine winner/loser)
+        total_size: Shares per side
 
     Returns:
-        (up_size, down_size)
+        (up_size, down_size) - both equal for passive grid
     """
-    _, _, _, _, winner_ratio = get_zone_params(velocity_bps)
-
-    winner_size = total_size * winner_ratio
-    loser_size = total_size - winner_size
-
-    # Ensure minimum size (5 shares)
-    winner_size = max(5.0, winner_size)
-    loser_size = max(5.0, loser_size)
-
-    # Apply to correct side based on velocity direction
-    if velocity_bps >= 0:
-        # BTC rising → UP is winner
-        return (winner_size, loser_size)
-    else:
-        # BTC falling → DOWN is winner
-        return (loser_size, winner_size)
+    # Passive grid: symmetric sizing on both sides
+    return (total_size, total_size)
 
 
 def maybe_tighten_hedge_target(entry_state: EntryState, velocity_bps: float) -> bool:
     """
-    Check if hedge target should be tightened (matches live trading).
+    Passive grid: No hedge tightening.
 
-    ONLY TIGHTEN (lower), NEVER LOOSEN.
-    Only tighten when velocity strengthens in SAME direction as entry.
+    In passive grid mode, we track posted prices until filled.
+    No dynamic target adjustment.
     """
-    if not entry_state.entry_filled or entry_state.hedge_filled:
-        return False
-
-    # Check velocity direction
-    current_dir = "UP" if velocity_bps > 0 else "DOWN"
-    if current_dir != entry_state.entry_velocity_dir:
-        return False  # Velocity flipped, don't tighten
-
-    # Calculate new target based on current zone
-    zone_name, pair_target, _, loser_offset, _ = get_zone_params(velocity_bps)
-    new_target = pair_target - entry_state.entry_price + loser_offset
-    new_target = max(0.01, min(0.95, new_target))
-
-    # ONLY TIGHTEN (lower), NEVER LOOSEN
-    if new_target < entry_state.locked_hedge_target:
-        entry_state.locked_hedge_target = new_target
-        entry_state.tighten_count += 1
-        return True
+    # Passive grid doesn't tighten - orders stay at posted price
     return False
 
 
@@ -390,7 +366,7 @@ class SpreadCaptureObserver:
         continuous: bool = False,
         sample_interval_ms: int = 200,
         output_dir: str = "research/observer",
-        trade_size: float = 15.0,  # ONE-SHOT mode: 15 shares at once (backtest optimal)
+        trade_size: float = 5.0,  # Passive grid: 5 shares per side
         starting_balance: float = 170.0,  # Starting balance in USD
     ):
         self.duration_hours = duration_hours
@@ -533,7 +509,7 @@ class SpreadCaptureObserver:
 
         self.current_date = today
         date_str = today.strftime("%Y%m%d")
-        filename = f"{self.output_dir}/spread_capture_obs_{date_str}.csv"
+        filename = f"{self.output_dir}/grid_obs_{date_str}.csv"
 
         file_exists = os.path.exists(filename)
         self.csv_file = open(filename, 'a', newline='')
@@ -545,13 +521,13 @@ class SpreadCaptureObserver:
                 'binance_price', 'velocity_bps',
                 'up_bid', 'up_ask', 'down_bid', 'down_ask', 'pair_cost',
                 'data_source',
-                # Hybrid MM columns (6-zone with velocity-biased sizing)
-                'velocity_zone', 'pair_target', 'winner_offset',
-                'winner_size_ratio', 'up_size', 'down_size',  # Size allocation
-                'entry_signal', 'entry_side', 'entry_bid',
-                'initial_hedge_target', 'locked_hedge_target', 'tighten_count',
-                'stop_loss_triggered', 'stop_loss_price',  # Stop-loss tracking
-                'would_fill_entry', 'would_fill_hedge',
+                # Passive grid columns
+                'velocity_zone', 'winner_offset', 'loser_offset',
+                'grid_up_offset', 'grid_down_offset',  # Offsets used
+                'grid_up_bid', 'grid_down_bid',        # Posted bid prices
+                'grid_up_filled', 'grid_down_filled',  # Fill flags
+                'grid_pair_cost',                       # UP fill + DOWN fill
+                'grid_profit',                          # 1.00 - pair_cost per share
                 'up_pos', 'down_pos', 'pairs', 'locked_profit',
                 # Cycling columns
                 'cycles_this_market', 'cycles_total', 'cycles_pnl',
@@ -563,7 +539,7 @@ class SpreadCaptureObserver:
         print(f"Logging to: {filename}")
 
     async def _write_sample(self):
-        """Write a sample row to CSV with validated orderbook."""
+        """Write a sample row to CSV with passive grid logic."""
         if not self.csv_writer:
             return
         if not self.binance or self.binance.current_price <= 0:
@@ -602,203 +578,115 @@ class SpreadCaptureObserver:
             data_source,
         ]
 
-        # Generate signals using 6-zone system (matches live trading)
+        # PASSIVE GRID LOGIC
         pos = self.positions["live"]
-        entry_state = self.entry_states["live"]
+        grid_state = self.entry_states["live"]
 
-        # Get zone parameters for current velocity (HYBRID MM with size ratios)
-        zone_name, pair_target, winner_offset, loser_offset, winner_size_ratio = get_zone_params(velocity_bps)
+        # Get zone parameters for current velocity (passive grid)
+        zone_name, winner_offset, loser_offset = get_zone_params(velocity_bps)
 
-        # Calculate velocity-biased size allocation (HYBRID MM)
-        up_size, down_size = calculate_size_allocation(velocity_bps, self.trade_size)
-
-        # Determine entry side based on velocity direction
-        # ZONE 4-6 FILTER: Only enter when |velocity| >= 0.30 BPS (90% accuracy)
-        # Zones 1-3 (velocity < 0.30) are skipped - lower accuracy, more noise
-        if velocity_bps >= MIN_VELOCITY_BPS:
-            entry_side = "UP"  # BTC rising fast, bet UP
-        elif velocity_bps <= -MIN_VELOCITY_BPS:
-            entry_side = "DOWN"  # BTC falling fast, bet DOWN
+        # Determine winner/loser sides based on velocity
+        # BTC rising = UP is winner, DOWN is loser
+        # BTC falling = DOWN is winner, UP is loser
+        if velocity_bps >= 0:
+            up_offset = winner_offset
+            down_offset = loser_offset
         else:
-            entry_side = "NONE"  # Zones 1-3, no entry (skip low-velocity noise)
+            up_offset = loser_offset
+            down_offset = winner_offset
 
-        # Entry signal: directional velocity signal
-        entry_signal = entry_side != "NONE"
+        # Calculate passive grid bid prices: best_bid - offset (below market)
+        grid_up_bid = up_bid - up_offset
+        grid_down_bid = down_bid - down_offset
+        grid_up_bid = max(0.01, min(0.95, grid_up_bid))
+        grid_down_bid = max(0.01, min(0.95, grid_down_bid))
 
-        # Calculate entry bid using CORRECT formula: best_bid + winner_offset
-        # (Matches live trading logic in spread_capture.py)
-        if entry_side == "UP":
-            entry_bid = up_bid + winner_offset
-            entry_bid = min(entry_bid, up_ask - 0.001)  # Stay below ask (maker)
-            entry_bid = max(0.01, min(0.95, entry_bid))
-        elif entry_side == "DOWN":
-            entry_bid = down_bid + winner_offset
-            entry_bid = min(entry_bid, down_ask - 0.001)
-            entry_bid = max(0.01, min(0.95, entry_bid))
-        else:
-            entry_bid = 0.0
-
-        # Fill tracking
-        up_filled = False
-        down_filled = False
-        entry_would_fill = False
-        hedge_would_fill = False
-
-        # ENTRY LOGIC: Fill with VELOCITY-BIASED sizing
-        # HYBRID MM: Always post both sides, size biased toward predicted winner
-        if not entry_state.entry_filled and entry_side != "NONE" and time_remaining >= MIN_TIME:
-            if entry_side == "UP":
-                entry_would_fill = would_fill(entry_bid, up_bid, up_ask)
-                if entry_would_fill:
-                    entry_state.entry_filled = True
-                    entry_state.entry_side = "UP"
-                    entry_state.entry_price = up_ask  # Fill at ask
-                    entry_state.entry_velocity_dir = "UP"
-                    entry_state.entry_zone = zone_name
-                    entry_state.entry_time_remaining = time_remaining  # Track for cycling
-                    # Hedge target = pair_target - entry_price + loser_offset
-                    entry_state.initial_hedge_target = pair_target - entry_state.entry_price + loser_offset
-                    entry_state.initial_hedge_target = max(0.01, min(0.95, entry_state.initial_hedge_target))
-                    entry_state.locked_hedge_target = entry_state.initial_hedge_target
-                    # HYBRID: Use velocity-biased size (up_size is winner size when vel > 0)
-                    pos.add_fill("UP", entry_state.entry_price, up_size)
-                    up_filled = True
-            elif entry_side == "DOWN":
-                entry_would_fill = would_fill(entry_bid, down_bid, down_ask)
-                if entry_would_fill:
-                    entry_state.entry_filled = True
-                    entry_state.entry_side = "DOWN"
-                    entry_state.entry_price = down_ask
-                    entry_state.entry_velocity_dir = "DOWN"
-                    entry_state.entry_zone = zone_name
-                    entry_state.entry_time_remaining = time_remaining  # Track for cycling
-                    # Hedge target = pair_target - entry_price + loser_offset
-                    entry_state.initial_hedge_target = pair_target - entry_state.entry_price + loser_offset
-                    entry_state.initial_hedge_target = max(0.01, min(0.95, entry_state.initial_hedge_target))
-                    entry_state.locked_hedge_target = entry_state.initial_hedge_target
-                    # HYBRID: Use velocity-biased size (down_size is winner size when vel < 0)
-                    pos.add_fill("DOWN", entry_state.entry_price, down_size)
-                    down_filled = True
-
-        # HEDGE TIGHTENING: Check if velocity strengthened (matches live trading)
-        if entry_state.entry_filled and not entry_state.hedge_filled:
-            maybe_tighten_hedge_target(entry_state, velocity_bps)
-
-        # STOP-LOSS CHECK: If winner dropped 7%, immediately hedge at loser ASK
-        # This takes priority over normal passive hedge fill
-        if entry_state.entry_filled and not entry_state.hedge_filled:
-            if entry_state.entry_side == "UP":
-                winner_bid = up_bid
-                loser_ask = down_ask
-                loser_size = down_size
-            else:
-                winner_bid = down_bid
-                loser_ask = up_ask
-                loser_size = up_size
-
-            stop_loss_triggered = check_stop_loss(entry_state, winner_bid, loser_ask, loser_size, pos)
-            if stop_loss_triggered:
-                if entry_state.entry_side == "UP":
-                    down_filled = True
-                else:
-                    up_filled = True
-                hedge_would_fill = True
-
-        # HEDGE FILL: Check against locked (possibly tightened) target
-        # HYBRID MM: Hedge side gets loser_size (smaller allocation)
-        # NOTE: Only check if not already filled by stop-loss
-        if entry_state.entry_filled and not entry_state.hedge_filled:
-            if entry_state.entry_side == "UP":
-                # Hedge is DOWN side - check if DOWN ask <= locked target
-                hedge_would_fill = down_ask <= entry_state.locked_hedge_target
-                if hedge_would_fill:
-                    entry_state.hedge_filled = True
-                    entry_state.hedge_price = down_ask  # Track for cycling
-                    # HYBRID: Use loser size for hedge (down_size when vel > 0)
-                    pos.add_fill("DOWN", down_ask, down_size)
-                    down_filled = True
-            else:
-                # Hedge is UP side - check if UP ask <= locked target
-                hedge_would_fill = up_ask <= entry_state.locked_hedge_target
-                if hedge_would_fill:
-                    entry_state.hedge_filled = True
-                    entry_state.hedge_price = up_ask  # Track for cycling
-                    # HYBRID: Use loser size for hedge (up_size when vel < 0)
-                    pos.add_fill("UP", up_ask, up_size)
-                    up_filled = True
-
-        # CYCLING: If both entry and hedge filled, complete cycle and reset
         cycle_just_completed = False
-        if entry_state.entry_filled and entry_state.hedge_filled:
-            # Calculate PnL for this cycle
-            hedge_price = entry_state.hedge_price
-            if entry_state.stop_loss_triggered:
-                hedge_price = entry_state.stop_loss_hedge_price
-                hedge_type = "stoploss"
-            else:
-                hedge_type = "passive"
 
-            pair_cost_cycle = entry_state.entry_price + hedge_price
-            cycle_pnl = (1.0 - pair_cost_cycle) * self.trade_size
+        # POSTING: Post on BOTH sides if not already posted and time remaining
+        if not grid_state.is_posted() and time_remaining >= MIN_TIME:
+            grid_state.up_posted_bid = grid_up_bid
+            grid_state.down_posted_bid = grid_down_bid
+            grid_state.up_offset = up_offset
+            grid_state.down_offset = down_offset
+            grid_state.post_time_remaining = time_remaining
+            grid_state.post_zone = zone_name
+
+        # FILL DETECTION: Check if market bid dropped to our posted price
+        # Fill when: current best_bid <= our posted bid (market came to us)
+        if grid_state.is_posted():
+            # Check UP side fill
+            if not grid_state.up_filled and up_bid <= grid_state.up_posted_bid:
+                grid_state.up_filled = True
+                grid_state.up_fill_price = grid_state.up_posted_bid
+                pos.add_fill("UP", grid_state.up_fill_price, self.trade_size)
+
+            # Check DOWN side fill
+            if not grid_state.down_filled and down_bid <= grid_state.down_posted_bid:
+                grid_state.down_filled = True
+                grid_state.down_fill_price = grid_state.down_posted_bid
+                pos.add_fill("DOWN", grid_state.down_fill_price, self.trade_size)
+
+        # CYCLING: If both sides filled, complete pair and reset
+        if grid_state.is_complete():
+            # Calculate PnL for this cycle
+            grid_pair_cost = grid_state.up_fill_price + grid_state.down_fill_price
+            cycle_pnl = (1.0 - grid_pair_cost) * self.trade_size
 
             # Record the cycle
-            entry_state.cycles_this_market += 1
-            entry_state.cycles_total += 1
-            entry_state.cycles_pnl += cycle_pnl
+            grid_state.cycles_this_market += 1
+            grid_state.cycles_total += 1
+            grid_state.cycles_pnl += cycle_pnl
 
             cycle_record = CycleRecord(
-                cycle_num=entry_state.cycles_this_market,
-                entry_side=entry_state.entry_side,
-                entry_price=entry_state.entry_price,
-                hedge_price=hedge_price,
-                hedge_type=hedge_type,
-                pair_cost=pair_cost_cycle,
+                cycle_num=grid_state.cycles_this_market,
+                up_fill_price=grid_state.up_fill_price,
+                down_fill_price=grid_state.down_fill_price,
+                pair_cost=grid_pair_cost,
                 pnl=cycle_pnl,
-                time_remaining_at_entry=entry_state.entry_time_remaining,
-                time_remaining_at_merge=time_remaining,
+                time_remaining_at_post=grid_state.post_time_remaining,
+                time_remaining_at_complete=time_remaining,
             )
-            entry_state.cycle_records.append(cycle_record)
+            grid_state.cycle_records.append(cycle_record)
 
             # Reset position for next cycle
             pos.reset()
 
-            # Reset entry state for next cycle (keep cycle counts)
-            entry_state.reset_for_cycle()
+            # Reset grid state for next cycle (keep cycle counts)
+            grid_state.reset_for_cycle()
             cycle_just_completed = True
 
-        # Update fill flags for logging
-        if entry_state.entry_side == "UP":
-            entry_would_fill = up_filled
-            hedge_would_fill = down_filled
-        elif entry_state.entry_side == "DOWN":
-            entry_would_fill = down_filled
-            hedge_would_fill = up_filled
+        # Calculate grid profit (for current posted orders)
+        grid_pair_cost_current = 0.0
+        grid_profit_current = 0.0
+        if grid_state.up_filled and grid_state.down_filled:
+            grid_pair_cost_current = grid_state.up_fill_price + grid_state.down_fill_price
+            grid_profit_current = 1.0 - grid_pair_cost_current
+        elif grid_state.is_posted():
+            # Estimate based on posted prices
+            grid_pair_cost_current = grid_state.up_posted_bid + grid_state.down_posted_bid
+            grid_profit_current = 1.0 - grid_pair_cost_current
 
         row.extend([
             zone_name,
-            round(pair_target, 2),
-            round(winner_offset, 2),
-            round(winner_size_ratio, 2),  # Size ratio
-            round(up_size, 1),  # Biased up size
-            round(down_size, 1),  # Biased down size
-            entry_signal,
-            entry_side,
-            round(entry_bid, 4),
-            round(entry_state.initial_hedge_target, 4) if entry_state.entry_filled else 0.0,
-            round(entry_state.locked_hedge_target, 4) if entry_state.entry_filled else 0.0,
-            entry_state.tighten_count,
-            entry_state.stop_loss_triggered,  # Stop-loss tracking
-            round(entry_state.stop_loss_hedge_price, 4) if entry_state.stop_loss_triggered else 0.0,
-            entry_would_fill,
-            hedge_would_fill,
+            round(winner_offset, 4),
+            round(loser_offset, 4),
+            round(grid_state.up_offset, 4) if grid_state.is_posted() else round(up_offset, 4),
+            round(grid_state.down_offset, 4) if grid_state.is_posted() else round(down_offset, 4),
+            round(grid_state.up_posted_bid, 4) if grid_state.is_posted() else round(grid_up_bid, 4),
+            round(grid_state.down_posted_bid, 4) if grid_state.is_posted() else round(grid_down_bid, 4),
+            grid_state.up_filled,
+            grid_state.down_filled,
+            round(grid_pair_cost_current, 4),
+            round(grid_profit_current, 4),
             round(pos.up_shares, 1),
             round(pos.down_shares, 1),
             pos.pairs,
             round(pos.locked_profit, 4),
             # Cycling columns
-            entry_state.cycles_this_market,
-            entry_state.cycles_total,
-            round(entry_state.cycles_pnl, 4),
+            grid_state.cycles_this_market,
+            grid_state.cycles_total,
+            round(grid_state.cycles_pnl, 4),
             cycle_just_completed,
         ])
 
@@ -889,7 +777,7 @@ class SpreadCaptureObserver:
         elapsed = (datetime.now() - self.start_time).total_seconds() / 3600
 
         print(f"\n{'='*70}")
-        print(f"SPREAD CAPTURE OBSERVER - {datetime.now().strftime('%H:%M:%S')}")
+        print(f"PASSIVE GRID OBSERVER - {datetime.now().strftime('%H:%M:%S')}")
         print(f"{'='*70}")
         print(f"Running: {elapsed:.2f} hours | Samples: {self.sample_count}")
 
@@ -901,18 +789,25 @@ class SpreadCaptureObserver:
 
         if self.binance and self.binance.current_price > 0:
             velocity = self.binance.calculate_velocity(window_seconds=10)
-            print(f"Binance: ${self.binance.current_price:.2f} | Velocity: {velocity:.4f} bps/s")
+            zone_name = get_velocity_zone(velocity)
+            print(f"Binance: ${self.binance.current_price:.2f} | Velocity: {velocity:.4f} bps/s | Zone: {zone_name}")
 
         if self.up_book and self.down_book:
             pair_cost = (self.up_book.best_ask or 0) + (self.down_book.best_ask or 0)
-            print(f"Pair Cost: ${pair_cost:.4f}")
+            print(f"Pair Cost (ask+ask): ${pair_cost:.4f}")
 
-        # Cycling stats
-        entry_state = self.entry_states.get("live")
-        if entry_state:
+        # Grid state
+        grid_state = self.entry_states.get("live")
+        if grid_state:
+            print(f"\nGRID STATE:")
+            if grid_state.is_posted():
+                print(f"  UP bid: ${grid_state.up_posted_bid:.4f} {'[FILLED]' if grid_state.up_filled else '[waiting]'}")
+                print(f"  DOWN bid: ${grid_state.down_posted_bid:.4f} {'[FILLED]' if grid_state.down_filled else '[waiting]'}")
+            else:
+                print(f"  Not posted yet")
             print(f"\nCYCLING:")
-            print(f"  This market: {entry_state.cycles_this_market} cycles, ${entry_state.cycles_pnl:.2f}")
-            print(f"  Total: {entry_state.cycles_total} cycles")
+            print(f"  This market: {grid_state.cycles_this_market} cycles, ${grid_state.cycles_pnl:.2f}")
+            print(f"  Total: {grid_state.cycles_total} cycles")
 
         print(f"\nTheoretical Positions:")
         for name, pos in self.positions.items():
@@ -925,28 +820,26 @@ class SpreadCaptureObserver:
         self.start_time = datetime.now()
 
         print("=" * 70)
-        print("SPREAD CAPTURE OBSERVER - ZONE 5-6 PROFITABLE MODE")
+        print("PASSIVE GRID MM OBSERVER - PROVEN $95/hr STRATEGY")
         print("=" * 70)
         print(f"Duration: {'continuous' if self.continuous else f'{self.duration_hours}h'}")
         print(f"Sample interval: {self.sample_interval_ms}ms")
         print(f"Output: {self.output_dir}/")
         print()
-        print("PROFITABLE STRATEGY CONFIG (Zone 5-6 + 7% Stop-Loss + CYCLING):")
+        print("PASSIVE GRID CONFIG (All Zones, No Stop-Loss):")
         print(f"  Starting bal:  ${self.starting_balance:.2f}")
-        print(f"  Trade size:    {self.trade_size} shares (winner-only entry)")
-        print(f"  Zone filter:   >= {MIN_VELOCITY_BPS} BPS (zones 5-6 only, 61% accuracy)")
-        print(f"  Stop-loss:     {STOP_LOSS_PCT*100:.0f}% drop triggers hedge ($1.048 pair cost)")
-        print(f"  Loser offset:  -0.12 (passive, $1.31/trade profit)")
-        print(f"  Min time:      {MIN_TIME}s (no entry with <2min remaining)")
-        print(f"  Mode:          DIRECTIONAL + STOP-LOSS + CYCLING")
-        print(f"  Cycling:       ENABLED (merge pair → reset → re-enter)")
-        print(f"  Expected:      +$3.70/hr (cycling backtest on 218 markets, 7.96 cycles/market)")
+        print(f"  Trade size:    {self.trade_size} shares per side")
+        print(f"  Zone filter:   ALL zones active (passive grid)")
+        print(f"  Stop-loss:     DISABLED (pure passive)")
+        print(f"  Min time:      {MIN_TIME}s (stop posting)")
+        print(f"  Mode:          PASSIVE GRID (both sides simultaneous)")
+        print(f"  Formula:       our_bid = best_bid - offset")
+        print(f"  Expected:      +$95/hr (backtest)")
         print()
-        print("Zone Configuration (only zones 5-6 trigger entries):")
+        print("Zone Configuration (all zones active):")
         for zone_name, zone in VELOCITY_ZONES.items():
-            active = "✓" if zone['vel_min'] >= MIN_VELOCITY_BPS else " "
-            print(f"  [{active}] {zone_name:12}: vel={zone['vel_min']:.2f}-{zone['vel_max']:.2f}, "
-                  f"pair_target={zone['pair_target']:.2f}, loser_offset={zone['loser_offset']:.2f}")
+            print(f"  [*] {zone_name:12}: vel={zone['vel_min']:.2f}-{zone['vel_max']:.2f}, "
+                  f"winner={zone['winner_offset']:.2f}, loser={zone['loser_offset']:.2f}")
         print()
 
         # Initialize Binance WebSocket
@@ -992,8 +885,8 @@ class SpreadCaptureObserver:
         # Initialize CSV
         self._init_csv()
 
-        # Save 6-zone params (matches live trading)
-        params_file = f"{self.output_dir}/spread_capture_params.json"
+        # Save passive grid params
+        params_file = f"{self.output_dir}/observer_params.json"
         with open(params_file, 'w') as f:
             json.dump(VELOCITY_ZONES, f, indent=2)
 
@@ -1051,7 +944,7 @@ class SpreadCaptureObserver:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Spread Capture Observer - Real WebSocket Data Collection",
+        description="Passive Grid Observer - Real WebSocket Data Collection",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('--hours', type=float, default=12.0, help='Duration in hours')
@@ -1059,7 +952,7 @@ def main():
     parser.add_argument('--interval', type=int, default=200, help='Sample interval in ms')
     parser.add_argument('--output', type=str, default='research/observer', help='Output directory')
     parser.add_argument('--balance', type=float, default=170.0, help='Starting balance in USD')
-    parser.add_argument('--shares', type=float, default=15.0, help='Target shares per trade (ONE-SHOT)')
+    parser.add_argument('--shares', type=float, default=5.0, help='Shares per side (passive grid)')
 
     args = parser.parse_args()
 

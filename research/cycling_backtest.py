@@ -44,7 +44,7 @@ class CycleResult:
     winner_side: str
     winner_fill_price: float
     loser_fill_price: float
-    hedge_type: str  # "passive" or "stoploss"
+    hedge_type: str  # "passive", "stoploss", or "unhedged"
     pair_cost: float
     pnl: float
     velocity_correct: bool
@@ -128,10 +128,8 @@ def simulate_market_with_cycling(mdf, slug) -> Optional[MarketResult]:
                 else:
                     winner_ask = row['down_ask']
 
-                if winner_bid >= winner_ask:
-                    winner_fill_price = winner_ask
-                else:
-                    winner_fill_price = winner_bid  # Assume fills at our bid
+                # Winner always fills at ASK (taker entry)
+                winner_fill_price = winner_ask
 
                 winner_fill_idx = i
 
@@ -144,7 +142,7 @@ def simulate_market_with_cycling(mdf, slug) -> Optional[MarketResult]:
                     check_row = mdf.iloc[j]
                     check_time = check_row['time_remaining_secs']
 
-                    if check_time < MIN_TIME - 60:  # Give some buffer
+                    if check_time < 10:  # Check almost to resolution
                         break
 
                     if winner_side == "UP":
@@ -206,10 +204,37 @@ def simulate_market_with_cycling(mdf, slug) -> Optional[MarketResult]:
 
                     in_trade = False
                 else:
-                    # No hedge fill - unhedged position (skip for now, could add later)
+                    # No hedge - calculate PnL based on resolution
+                    final = mdf.iloc[-1]
+                    if final['up_bid'] >= 0.90:
+                        resolution = 'UP'
+                    elif final['down_bid'] >= 0.90:
+                        resolution = 'DOWN'
+                    else:
+                        resolution = 'UP' if final['up_bid'] > final['down_bid'] else 'DOWN'
+
+                    velocity_correct = (winner_side == resolution)
+
+                    # Unhedged PnL: if correct, win (1 - entry), if wrong, lose entry
+                    if velocity_correct:
+                        pnl = (1.0 - winner_fill_price) * SHARES  # Winner resolves to $1
+                    else:
+                        pnl = (0.0 - winner_fill_price) * SHARES  # Winner resolves to $0
+
+                    cycles.append(CycleResult(
+                        cycle_num=cycle_num,
+                        entry_time_remaining=entry_time_remaining,
+                        entry_velocity=entry_velocity,
+                        winner_side=winner_side,
+                        winner_fill_price=winner_fill_price,
+                        loser_fill_price=0.0,  # No loser fill
+                        hedge_type="unhedged",
+                        pair_cost=winner_fill_price,  # Only paid for winner
+                        pnl=pnl,
+                        velocity_correct=velocity_correct,
+                        samples_to_hedge=0,
+                    ))
                     in_trade = False
-                    i += 1
-                    continue
         else:
             i += 1
             continue
@@ -253,7 +278,8 @@ def main():
 
     print(f"\nLoading data from {len(csv_files)} files...")
 
-    market_data = []
+    # Use dict to deduplicate markets - keep the most complete version
+    all_markets = {}
 
     for filepath in csv_files:
         try:
@@ -268,11 +294,14 @@ def main():
                     first = mdf.iloc[0]['time_remaining_secs']
                     last = mdf.iloc[-1]['time_remaining_secs']
                     if first >= 800 and last <= 60:
-                        market_data.append((mdf.copy(), slug))
+                        # Keep the most complete version of each market
+                        if slug not in all_markets or len(mdf) > len(all_markets[slug]):
+                            all_markets[slug] = mdf.copy()
         except Exception as e:
             continue
 
-    print(f"Complete markets: {len(market_data)}")
+    market_data = [(mdf, slug) for slug, mdf in all_markets.items()]
+    print(f"Unique complete markets: {len(market_data)}")
 
     # Run cycling simulation
     print(f"\n{'='*80}")
@@ -302,18 +331,30 @@ def main():
     # Breakdown by type
     passive_cycles = [c for c in all_cycles if c.hedge_type == 'passive']
     stoploss_cycles = [c for c in all_cycles if c.hedge_type == 'stoploss']
+    unhedged_cycles = [c for c in all_cycles if c.hedge_type == 'unhedged']
 
     print(f"\n  Cycle breakdown:")
     print(f"    Passive hedges: {len(passive_cycles)} ({len(passive_cycles)/total_cycles*100:.0f}%)")
     print(f"    Stop-loss hedges: {len(stoploss_cycles)} ({len(stoploss_cycles)/total_cycles*100:.0f}%)")
+    print(f"    UNHEDGED: {len(unhedged_cycles)} ({len(unhedged_cycles)/total_cycles*100:.0f}%)")
 
     # PnL breakdown
     passive_pnl = sum(c.pnl for c in passive_cycles)
     stoploss_pnl = sum(c.pnl for c in stoploss_cycles)
+    unhedged_pnl = sum(c.pnl for c in unhedged_cycles)
+
+    # Unhedged accuracy
+    unhedged_correct = [c for c in unhedged_cycles if c.velocity_correct]
+    unhedged_wrong = [c for c in unhedged_cycles if not c.velocity_correct]
 
     print(f"\n  PnL breakdown:")
     print(f"    Passive: ${passive_pnl:.2f} (avg ${passive_pnl/len(passive_cycles):.2f}/trade)" if passive_cycles else "")
     print(f"    Stop-loss: ${stoploss_pnl:.2f} (avg ${stoploss_pnl/len(stoploss_cycles):.2f}/trade)" if stoploss_cycles else "")
+    if unhedged_cycles:
+        print(f"    UNHEDGED: ${unhedged_pnl:.2f} (avg ${unhedged_pnl/len(unhedged_cycles):.2f}/trade)")
+        print(f"      - Correct (vel right): {len(unhedged_correct)} → ${sum(c.pnl for c in unhedged_correct):.2f}")
+        print(f"      - Wrong (vel wrong): {len(unhedged_wrong)} → ${sum(c.pnl for c in unhedged_wrong):.2f}")
+        print(f"      - Accuracy: {len(unhedged_correct)/len(unhedged_cycles)*100:.1f}%")
     print(f"    TOTAL: ${total_pnl:.2f}")
 
     # Hourly rate (each market is ~15 min)

@@ -79,62 +79,62 @@ VELOCITY_PULL_THRESHOLD = 0.05  # LEGACY: For backward compatibility with tests
 #   - Higher velocity = more confidence = larger winner allocation
 #
 # hedge_target = pair_target - entry_price (primary hedge pricing)
-# PROFITABLE ZONE CONFIGURATION (Zone 5-6 with -0.12 loser offset)
-# Research finding: Zone 5-6 (vel >= 0.50) + 7% stop-loss + -0.12 loser = +$52.80 ($1.17/hr)
-# Key insight: More passive loser offset = higher per-trade profit ($1.31 vs $0.90)
+# VELOCITY ZONE CONFIGURATION
+# Formula: our_bid = best_bid - offset
+# - Positive offset → bid BELOW best_bid (passive, cheaper fills)
+# - Negative offset → bid ABOVE best_bid (aggressive, faster fills)
+#
+# Zone behavior:
+# |v| < 0.1:  Both sides at best_bid - 0.01 (symmetric, passive)
+# |v| >= 0.1: Both sides at best_bid - 0.01 (same as above)
+# |v| >= 0.3: Loser at best_bid - 0.03, Winner at best_bid (more passive loser)
+# |v| >= 0.5: Loser at best_bid - 0.05, Winner at best_bid + 0.01 (aggressive winner)
 VELOCITY_ZONES = {
     'neutral': {
-        'vel_min': 0.00, 'vel_max': 0.05,
+        'vel_min': 0.00, 'vel_max': 0.10,
         'pair_target': 0.97,
-        'winner_offset': -0.01,  # Conservative entry
-        'loser_offset': -0.01,
+        'winner_offset': 0.01,   # best_bid - 0.01 (one tick below)
+        'loser_offset': 0.01,    # best_bid - 0.01 (symmetric)
         'winner_size_ratio': 0.50,  # Symmetric - no velocity edge
     },
     'moderate': {
-        'vel_min': 0.05, 'vel_max': 0.10,
+        'vel_min': 0.10, 'vel_max': 0.30,
         'pair_target': 0.97,
-        'winner_offset': -0.01,  # Still conservative
-        'loser_offset': -0.02,
+        'winner_offset': 0.01,   # best_bid - 0.01 (one tick below)
+        'loser_offset': 0.01,    # best_bid - 0.01 (same as winner)
         'winner_size_ratio': 0.55,  # Slight bias toward winner
     },
     'strong': {
-        'vel_min': 0.10, 'vel_max': 0.30,
+        'vel_min': 0.30, 'vel_max': 0.50,
         'pair_target': 0.96,
-        'winner_offset': 0.00,   # At best_bid
-        'loser_offset': -0.04,
+        'winner_offset': 0.00,   # best_bid - 0 = at best_bid exactly
+        'loser_offset': 0.03,    # best_bid - 0.03 (3 ticks below, passive)
         'winner_size_ratio': 0.60,  # Moderate bias toward winner
     },
     'very_strong': {
-        'vel_min': 0.30, 'vel_max': 0.50,
+        'vel_min': 0.50, 'vel_max': 1.00,
         'pair_target': 0.95,
-        'winner_offset': +0.01,  # Aggressive - above best_bid
-        'loser_offset': -0.08,   # More passive for higher profit
-        'winner_size_ratio': 0.70,  # Strong bias toward winner (70-30 split)
+        'winner_offset': -0.01,  # best_bid - (-0.01) = best_bid + 0.01 (AGGRESSIVE)
+        'loser_offset': 0.05,    # best_bid - 0.05 (5 ticks below, very passive)
+        'winner_size_ratio': 0.70,  # Strong bias toward winner
     },
     'extreme': {
-        'vel_min': 0.50, 'vel_max': 1.00,
-        'pair_target': 0.94,
-        'winner_offset': +0.01,  # Aggressive
-        'loser_offset': -0.12,   # PROFITABLE: Very passive, higher per-trade profit
-        'winner_size_ratio': 0.75,  # Stronger bias (75-25 split)
-    },
-    'super_strong': {
         'vel_min': 1.00, 'vel_max': 99.0,
-        'pair_target': 0.93,
-        'winner_offset': +0.01,  # Consistent with other zones
-        'loser_offset': -0.12,   # PROFITABLE: Very passive, higher per-trade profit
-        'winner_size_ratio': 0.80,  # Maximum bias (80-20 split)
+        'pair_target': 0.94,
+        'winner_offset': -0.01,  # best_bid + 0.01 (AGGRESSIVE)
+        'loser_offset': 0.05,    # best_bid - 0.05 (very passive)
+        'winner_size_ratio': 0.75,  # Maximum bias
     },
 }
 
 # Quote offsets (from best_bid)
 # Formula: our_bid = best_bid - offset
-# Negative offset = bid ABOVE best_bid (very aggressive)
-# Positive offset = bid BELOW best_bid (conservative)
-BASE_OFFSET = 0.02              # Neutral offset: best_bid - 0.02
-TIGHT_OFFSET = -0.01            # AGGRESSIVE: bid ABOVE best_bid for winner (best_bid + 0.01)
-WIDE_OFFSET = 0.02              # Conservative offset when avoiding overpriced side
-VERY_WIDE_OFFSET = 0.04         # CONSERVATIVE: bid far below for loser (best_bid - 0.04)
+# - Positive offset → bid BELOW best_bid (passive)
+# - Negative offset → bid ABOVE best_bid (aggressive)
+BASE_OFFSET = 0.01              # Default: best_bid - 0.01 (one tick below)
+TIGHT_OFFSET = -0.01            # AGGRESSIVE: best_bid + 0.01 (one tick above)
+WIDE_OFFSET = 0.03              # Passive: best_bid - 0.03 (three ticks below)
+VERY_WIDE_OFFSET = 0.05         # Very passive: best_bid - 0.05 (five ticks below)
 
 # LEGACY constants for backward compatibility
 DEFAULT_ENTRY_OFFSET = 0.01     # LEGACY: Fixed entry offset
@@ -788,7 +788,9 @@ class SpreadCaptureStrategy:
         CRITICAL: Must stay below ask to remain MAKER and avoid taker fees.
         Higher velocity = more confidence = bid closer to ask for faster fill.
 
-        Formula: entry_bid = best_bid + winner_offset
+        Formula: entry_bid = best_bid - winner_offset
+        - Positive offset → bid BELOW best_bid (passive)
+        - Negative offset → bid ABOVE best_bid (aggressive)
         Clamped to stay below ask by at least 0.001.
 
         Args:
@@ -803,7 +805,7 @@ class SpreadCaptureStrategy:
         zone_config = VELOCITY_ZONES.get(zone_name, VELOCITY_ZONES['moderate'])
         winner_offset = zone_config['winner_offset']
 
-        entry_bid = best_bid + winner_offset
+        entry_bid = best_bid - winner_offset
 
         # NEVER cross the spread - stay below ask to remain MAKER
         max_bid = best_ask - 0.001
@@ -1077,7 +1079,7 @@ class SpreadCaptureStrategy:
         # Generate grid levels
         for level in range(self.grid_levels):
             level_offset = offset + (level * GRID_SPACING)
-            price = round(best_bid + level_offset, 2)  # ADD offset (negative = lower price)
+            price = round(best_bid - level_offset, 2)  # SUBTRACT offset (positive = lower price)
 
             # Apply hedge target cap (don't bid higher than target)
             if max_hedge_price is not None and price > max_hedge_price:
