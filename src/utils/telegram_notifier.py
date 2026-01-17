@@ -102,6 +102,7 @@ class TelegramNotifier:
         self._on_graceful_stop_calculus_maker: Optional[Callable[[], Awaitable[None]]] = None
         self._on_graceful_stop_simple_hedger: Optional[Callable[[], Awaitable[None]]] = None
         self._on_graceful_stop_directional: Optional[Callable[[], Awaitable[None]]] = None
+        self._on_graceful_stop_enhanced_spike: Optional[Callable[[], Awaitable[None]]] = None
 
         # Polling state
         self._running = False
@@ -207,6 +208,7 @@ class TelegramNotifier:
                     {"text": "\u23F8 Calc", "callback_data": "graceful_stop_calculus_maker"},
                     {"text": "\u23F8 Simple", "callback_data": "graceful_stop_simple_hedger"},
                     {"text": "\u23F8 Dir", "callback_data": "graceful_stop_directional"},
+                    {"text": "\u23F8 Enh", "callback_data": "graceful_stop_enhanced_spike"},
                 ],
                 [
                     {"text": "\u2622\ufe0f NUKE ALL", "callback_data": "nuke_all"},
@@ -411,6 +413,10 @@ class TelegramNotifier:
         """Register callback for graceful stop of Directional mode (stops after current market)."""
         self._on_graceful_stop_directional = callback
 
+    def on_graceful_stop_enhanced_spike(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Register callback for graceful stop of Enhanced Spike mode (stops after current market)."""
+        self._on_graceful_stop_enhanced_spike = callback
+
     async def _handle_command(self, command: str, chat_id: str) -> None:
         """Handle incoming command."""
         # Only respond to configured chat
@@ -596,6 +602,14 @@ class TelegramNotifier:
                 await self.send_message("\u2705 Directional mode flagged for graceful stop.")
             else:
                 await self.send_message("<i>Directional mode not running.</i>")
+
+        elif data == "graceful_stop_enhanced_spike":
+            if self._on_graceful_stop_enhanced_spike:
+                await self.send_message("\u23F8 <b>Enhanced Spike: Will stop after current market...</b>")
+                await self._on_graceful_stop_enhanced_spike()
+                await self.send_message("\u2705 Enhanced Spike mode flagged for graceful stop.")
+            else:
+                await self.send_message("<i>Enhanced Spike mode not running.</i>")
 
     async def _poll_updates(self) -> None:
         """Poll for new messages/commands and button callbacks."""

@@ -48,9 +48,8 @@ import json
 import argparse
 import logging
 from datetime import datetime, timezone, timedelta
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Dict, List, Tuple
-from enum import Enum
 
 import aiohttp
 
@@ -71,9 +70,10 @@ from src.services.market_finder import MarketFinder
 # Formula: our_bid = best_bid - offset (positive offset = passive)
 MIN_VELOCITY_BPS = 0.0  # Trade all zones (passive grid)
 
-# Stop-loss: DISABLED for passive grid strategy
-# Let positions fill naturally via market movement
-STOP_LOSS_PCT = 0.0  # Disabled
+# Stop-loss: ENABLED for hedging when velocity/spike direction wrong
+# Backtest optimal: 7% for spike, 12% for velocity
+# Using 7% as default - triggers hedge when winner drops 7% from fill price
+STOP_LOSS_PCT = 0.07  # 7% stop-loss (backtest optimal for spike)
 
 # Minimum time remaining to enter new trade (seconds)
 # Stop posting at 60s remaining
@@ -172,6 +172,14 @@ class CycleRecord:
     time_remaining_at_complete: float
 
 
+# Spike detection constants (from enhanced_spike.py)
+SPIKE_LOOKBACK = 3           # 3 ticks for spike detection
+SPIKE_THRESHOLD = 0.02       # 0.02% minimum to trigger
+DROP_MULTIPLIER = 0.68       # From linear regression
+DROP_INTERCEPT = 0.01        # Base expected drop
+TARGET_PAIR_COST = 0.99      # Target sub-$1
+
+
 @dataclass
 class GridState:
     """
@@ -209,9 +217,59 @@ class GridState:
     cycles_pnl: float = 0.0
     cycle_records: list = None
 
+    # Spike detection tracking (NEW - faster than velocity)
+    spike_price_history: list = None
+    last_spike_direction: str = None
+    last_spike_magnitude: float = 0.0
+    last_spike_time: float = 0.0
+
     def __post_init__(self):
         if self.cycle_records is None:
             self.cycle_records = []
+        if self.spike_price_history is None:
+            self.spike_price_history = []
+
+    def detect_spike(self, binance_price: float) -> Tuple[Optional[str], float]:
+        """
+        Detect raw Binance price spike over last N ticks.
+
+        This is 4x faster than velocity-based detection.
+
+        Returns:
+            (direction, magnitude_pct) or (None, 0) if no spike
+        """
+        self.spike_price_history.append(binance_price)
+        if len(self.spike_price_history) > 50:
+            self.spike_price_history = self.spike_price_history[-50:]
+
+        if len(self.spike_price_history) < SPIKE_LOOKBACK + 1:
+            return None, 0
+
+        current = self.spike_price_history[-1]
+        previous = self.spike_price_history[-SPIKE_LOOKBACK - 1]
+
+        if previous <= 0:
+            return None, 0
+
+        change_pct = (current - previous) / previous * 100
+        magnitude = abs(change_pct)
+
+        if magnitude >= SPIKE_THRESHOLD:
+            direction = "UP" if change_pct > 0 else "DOWN"
+            self.last_spike_direction = direction
+            self.last_spike_magnitude = magnitude
+            return direction, magnitude
+
+        return None, 0
+
+    def calculate_spike_loser_bid(self, loser_ask: float, winner_entry: float) -> float:
+        """Calculate loser bid based on spike magnitude."""
+        if self.last_spike_magnitude <= 0:
+            return 0.0
+        expected_drop = DROP_MULTIPLIER * self.last_spike_magnitude + DROP_INTERCEPT
+        max_loser = TARGET_PAIR_COST - winner_entry
+        loser_bid = min(loser_ask - expected_drop, max_loser)
+        return max(0.01, loser_bid)
 
     def is_posted(self) -> bool:
         """Check if grid is currently posted (waiting for fills)."""
@@ -240,6 +298,11 @@ class GridState:
         self.cycles_this_market = 0
         self.cycles_pnl = 0.0
         self.cycle_records = []
+        # Reset spike detection for new market
+        self.spike_price_history = []
+        self.last_spike_direction = None
+        self.last_spike_magnitude = 0.0
+        self.last_spike_time = 0.0
 
 
 # Alias for compatibility
@@ -268,76 +331,6 @@ def get_zone_params(velocity_bps: float) -> Tuple[str, float, float]:
     zone_name = get_velocity_zone(velocity_bps)
     zone = VELOCITY_ZONES[zone_name]
     return (zone_name, zone['winner_offset'], zone['loser_offset'])
-
-
-def calculate_size_allocation(velocity_bps: float, total_size: float) -> Tuple[float, float]:
-    """Calculate size allocation for UP and DOWN (passive grid = symmetric).
-
-    Passive grid uses equal sizing on both sides.
-
-    Args:
-        velocity_bps: Current BTC velocity (used to determine winner/loser)
-        total_size: Shares per side
-
-    Returns:
-        (up_size, down_size) - both equal for passive grid
-    """
-    # Passive grid: symmetric sizing on both sides
-    return (total_size, total_size)
-
-
-def maybe_tighten_hedge_target(entry_state: EntryState, velocity_bps: float) -> bool:
-    """
-    Passive grid: No hedge tightening.
-
-    In passive grid mode, we track posted prices until filled.
-    No dynamic target adjustment.
-    """
-    # Passive grid doesn't tighten - orders stay at posted price
-    return False
-
-
-def check_stop_loss(entry_state: EntryState, winner_bid: float, loser_ask: float, loser_size: float, pos: TheoreticalPosition) -> bool:
-    """
-    Check if stop-loss should trigger (7% = profitable config).
-
-    When winner drops X% from fill price, immediately hedge at loser ASK.
-
-    Research finding: 7% stop-loss = cheaper hedge ($1.048 pair cost)
-    vs 15% stop-loss = expensive hedge ($1.091 pair cost)
-
-    Args:
-        entry_state: Current entry state
-        winner_bid: Current bid price of winner side
-        loser_ask: Current ask price of loser side
-        loser_size: Size to hedge (from velocity-biased allocation)
-        pos: Position tracker to record fill
-
-    Returns:
-        True if stop-loss triggered and hedge filled
-    """
-    if not entry_state.entry_filled or entry_state.hedge_filled:
-        return False
-
-    if entry_state.stop_loss_triggered:
-        return False  # Already triggered
-
-    # Calculate drop percentage from fill price
-    drop_pct = (entry_state.entry_price - winner_bid) / entry_state.entry_price
-
-    if drop_pct >= STOP_LOSS_PCT:
-        # Trigger stop-loss - hedge at loser ASK immediately
-        entry_state.stop_loss_triggered = True
-        entry_state.stop_loss_hedge_price = loser_ask
-        entry_state.hedge_filled = True
-
-        # Record the hedge fill
-        loser_side = "DOWN" if entry_state.entry_side == "UP" else "UP"
-        pos.add_fill(loser_side, loser_ask, loser_size)
-
-        return True
-
-    return False
 
 
 def would_fill(our_bid: float, best_bid: float, best_ask: float) -> bool:
@@ -414,6 +407,12 @@ class SpreadCaptureObserver:
         self.csv_writer = None
         self.current_date = None
         self.sample_count = 0
+
+        # Higher-order derivatives tracking (for enhanced momentum)
+        self._velocity_history: List[float] = []
+        self._price_history: List[float] = []
+        self._velocity_history_size = 100
+        self._price_history_size = 100
 
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
@@ -532,6 +531,13 @@ class SpreadCaptureObserver:
                 # Cycling columns
                 'cycles_this_market', 'cycles_total', 'cycles_pnl',
                 'cycle_just_completed',
+                # Spike detection columns (NEW - faster than velocity)
+                'spike_detected', 'spike_direction', 'spike_magnitude',
+                'spike_loser_bid', 'expected_drop',
+                'velocity_signal', 'spike_vs_velocity',
+                # Higher-order derivatives (for enhanced momentum strategy)
+                'acceleration_bps2', 'jerk_bps3', 'accel_aligned',
+                'signal_quality', 'momentum_5s',
             ]
             self.csv_writer.writerow(headers)
             self.csv_file.flush()
@@ -667,6 +673,96 @@ class SpreadCaptureObserver:
             grid_pair_cost_current = grid_state.up_posted_bid + grid_state.down_posted_bid
             grid_profit_current = 1.0 - grid_pair_cost_current
 
+        # SPIKE DETECTION (NEW - faster than velocity)
+        spike_direction, spike_magnitude = grid_state.detect_spike(self.binance.current_price)
+        spike_detected = spike_direction is not None
+
+        # Calculate spike-based loser bid if spike detected
+        spike_loser_bid = 0.0
+        expected_drop = 0.0
+        if spike_detected:
+            expected_drop = DROP_MULTIPLIER * spike_magnitude + DROP_INTERCEPT
+            # Determine winner/loser based on spike
+            if spike_direction == "UP":
+                winner_entry = up_ask  # Winner entry at ask
+                loser_ask = down_ask
+            else:
+                winner_entry = down_ask
+                loser_ask = up_ask
+            spike_loser_bid = grid_state.calculate_spike_loser_bid(loser_ask, winner_entry)
+
+        # Compare spike vs velocity signals
+        velocity_signal = abs(velocity_bps) >= 0.50  # Zone 5-6
+        velocity_direction = "UP" if velocity_bps > 0 else "DOWN" if velocity_bps < 0 else None
+
+        if spike_detected and velocity_signal:
+            if spike_direction == velocity_direction:
+                spike_vs_velocity = "AGREE"
+            else:
+                spike_vs_velocity = "DISAGREE"
+        elif spike_detected:
+            spike_vs_velocity = "SPIKE_ONLY"
+        elif velocity_signal:
+            spike_vs_velocity = "VEL_ONLY"
+        else:
+            spike_vs_velocity = "NONE"
+
+        # HIGHER-ORDER DERIVATIVES (for enhanced momentum strategy)
+        # Track price and velocity history
+        self._price_history.append(self.binance.current_price)
+        self._velocity_history.append(velocity_bps)
+
+        if len(self._price_history) > self._price_history_size:
+            self._price_history = self._price_history[-self._price_history_size:]
+        if len(self._velocity_history) > self._velocity_history_size:
+            self._velocity_history = self._velocity_history[-self._velocity_history_size:]
+
+        # Calculate acceleration (change in velocity over time)
+        acceleration_bps2 = 0.0
+        if len(self._velocity_history) >= 25:
+            vel_early = self._velocity_history[-25]
+            vel_late = self._velocity_history[-1]
+            # Assuming 5Hz, 25 samples = 5 seconds
+            acceleration_bps2 = (vel_late - vel_early) / 5.0
+
+        # Calculate jerk (change in acceleration) - simplified
+        jerk_bps3 = 0.0
+        if len(self._velocity_history) >= 50:
+            # Early acceleration
+            vel_early1 = self._velocity_history[-50]
+            vel_early2 = self._velocity_history[-25]
+            accel_early = (vel_early2 - vel_early1) / 5.0
+            # Late acceleration
+            vel_late1 = self._velocity_history[-25]
+            vel_late2 = self._velocity_history[-1]
+            accel_late = (vel_late2 - vel_late1) / 5.0
+            # Jerk
+            jerk_bps3 = (accel_late - accel_early) / 5.0
+
+        # Acceleration alignment (velocity and acceleration same sign = momentum building)
+        accel_aligned = (velocity_bps > 0 and acceleration_bps2 > 0) or (velocity_bps < 0 and acceleration_bps2 < 0)
+
+        # Signal quality calculation (0-1)
+        signal_quality = 0.0
+        # Velocity component (30%)
+        signal_quality += min(abs(velocity_bps) / 1.0, 1.0) * 0.30
+        # Acceleration alignment component (25%)
+        if accel_aligned:
+            signal_quality += 0.25
+        # Spike confirmation component (25%)
+        if spike_detected:
+            if spike_direction == velocity_direction:
+                signal_quality += 0.25
+            else:
+                signal_quality += 0.10
+        # Duration component (20%) - simplified
+        signal_quality += 0.10
+
+        # Momentum (5-second rolling average of velocity)
+        momentum_5s = 0.0
+        if len(self._velocity_history) >= 25:
+            momentum_5s = sum(self._velocity_history[-25:]) / 25
+
         row.extend([
             zone_name,
             round(winner_offset, 4),
@@ -688,6 +784,20 @@ class SpreadCaptureObserver:
             grid_state.cycles_total,
             round(grid_state.cycles_pnl, 4),
             cycle_just_completed,
+            # Spike detection columns (NEW)
+            spike_detected,
+            spike_direction or "",
+            round(spike_magnitude, 6) if spike_detected else 0.0,
+            round(spike_loser_bid, 4) if spike_detected else 0.0,
+            round(expected_drop, 4) if spike_detected else 0.0,
+            velocity_signal,
+            spike_vs_velocity,
+            # Higher-order derivatives (for enhanced momentum)
+            round(acceleration_bps2, 6),
+            round(jerk_bps3, 6),
+            accel_aligned,
+            round(signal_quality, 4),
+            round(momentum_5s, 4),
         ])
 
         self.csv_writer.writerow(row)
@@ -696,6 +806,35 @@ class SpreadCaptureObserver:
         # Flush periodically
         if self.sample_count % 50 == 0:
             self.csv_file.flush()
+
+    def _log_resolution(self, slug: str, resolution: str) -> None:
+        """Log market resolution to a separate CSV file."""
+        resolution_file = f"{self.output_dir}/resolutions_{datetime.now().strftime('%Y%m%d')}.csv"
+        file_exists = os.path.exists(resolution_file)
+
+        with open(resolution_file, 'a', newline='') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(['timestamp', 'market_slug', 'resolution', 'source'])
+            writer.writerow([
+                datetime.now().isoformat(),
+                slug,
+                resolution,
+                'polymarket_api',
+            ])
+        print(f"[RESOLUTION] Logged {slug} -> {resolution} to {resolution_file}")
+
+    async def _delayed_resolution_check(self, finder, slug: str, delay_seconds: float = 30.0) -> None:
+        """Check resolution after a delay (for markets not yet resolved at switch time)."""
+        await asyncio.sleep(delay_seconds)
+        try:
+            resolution = await finder.wait_for_resolution(slug, timeout_seconds=90.0, poll_interval=10.0)
+            if resolution:
+                self._log_resolution(slug, resolution)
+            else:
+                print(f"[RESOLUTION] {slug} still not resolved after waiting", flush=True)
+        except Exception as e:
+            print(f"[RESOLUTION] Delayed check failed for {slug}: {e}", flush=True)
 
     async def _find_current_market(self) -> bool:
         """Find and subscribe to current 15-min BTC market using REST API."""
@@ -720,6 +859,23 @@ class SpreadCaptureObserver:
         # Check if we need to switch
         if self.current_market and self.current_market.condition_id == market.condition_id:
             return True
+
+        # Query resolution for the OLD market before switching
+        if self.current_market:
+            old_slug = self.current_market.slug
+            print(f"\n[RESOLUTION] Checking resolution for {old_slug}...", flush=True)
+            try:
+                resolution = await finder.get_market_resolution(old_slug)
+                if resolution:
+                    print(f"[RESOLUTION] {old_slug} resolved to {resolution}", flush=True)
+                    # Log resolution to CSV
+                    self._log_resolution(old_slug, resolution)
+                else:
+                    print(f"[RESOLUTION] {old_slug} not yet resolved (will check later)", flush=True)
+                    # Schedule resolution check for later
+                    asyncio.create_task(self._delayed_resolution_check(finder, old_slug))
+            except Exception as e:
+                print(f"[RESOLUTION] Error checking {old_slug}: {e}", flush=True)
 
         print(f"\nSwitching to market: {market.slug}", flush=True)
         print(f"  UP token: {market.up_token_id[:16]}...", flush=True)
@@ -843,8 +999,9 @@ class SpreadCaptureObserver:
         print()
 
         # Initialize Binance WebSocket
-        print("Connecting to Binance WebSocket...")
-        self.binance = BinanceClient(window_seconds=60)
+        # UPGRADED: Use @bookTicker stream for faster detection (50-100ms vs 200ms)
+        print("Connecting to Binance WebSocket (@bookTicker for faster detection)...")
+        self.binance = BinanceClient(window_seconds=60, use_book_ticker=True)
         await self.binance.connect()
 
         # Wait for first price

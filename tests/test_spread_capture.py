@@ -263,7 +263,8 @@ class TestCompleteCycle:
 
     def test_full_cycle_completion(self):
         """Test entry fill -> hedge fill -> cycle complete."""
-        strategy = SpreadCaptureStrategy(entry_size=5, target_shares=5)
+        # Disable cycling to test COMPLETE phase (cycling resets to IDLE)
+        strategy = SpreadCaptureStrategy(entry_size=5, target_shares=5, enable_cycling=False)
 
         # Place entry
         action1 = strategy.decide(

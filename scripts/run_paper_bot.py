@@ -54,7 +54,6 @@ from src.services.pair_analyzer import PairAnalyzer, AsymmetricOpportunity
 from src.services.paper_trading import PaperTradingEngine, SimulationConfig
 from src.models.position import Position  # Unified position model for paper and live trading
 from src.services.live_trading import LiveTradingEngine
-from src.api.polymarket_client import PolymarketClient
 from src.strategies.calculus_maker import (
     CalculusMakerStrategy,
     check_prospective_pair_cost,
@@ -64,6 +63,18 @@ from src.strategies.calculus_maker import (
 from src.strategies.spread_capture import (
     SpreadCaptureStrategy,
     SpreadCapturePhase,
+)
+from src.strategies.enhanced_momentum import (
+    EnhancedMomentumStrategy,
+    EnhancedMomentumPhase,
+)
+from src.strategies.latency_arb import (
+    LatencyArbStrategy,
+    LatencyArbPhase,
+)
+from src.strategies.opportunistic_mm import (
+    OpportunisticMMStrategy,
+    MMPhase,
 )
 from src.services.trend_detector import TrendDetector, TrendState, TrendDirection
 from src.api.websocket_client import UserWebSocketClient, OrderFill, MarketResolved
@@ -489,7 +500,7 @@ class PaperTradingBot:
         spread_grid_levels: int = 3,          # 3 orders of 5 shares each
         spread_max_imbalance_pct: float = 0.10,  # Max inventory imbalance (10%)
         spread_enable_cycling: bool = False,  # If False, stop at target; if True, keep cycling
-        spread_min_velocity_bps: float = 0.30,  # Only trade zones 4-6 (velocity >= 0.30)
+        spread_min_velocity_bps: float = 0.50,  # Only trade zones 5-6 (velocity >= 0.50) - matches backtest
     ):
         self.initial_balance = initial_balance
         self.trading_mode = trading_mode
@@ -615,7 +626,10 @@ class PaperTradingBot:
 
         # REST API backup for fill verification (catches missed WebSocket fills)
         self._pending_order_ids: Dict[str, Dict[str, Any]] = {}  # order_id -> {side, size, price, strategy}
-        self._confirmed_fills: set = set()  # order_ids already confirmed
+        # FIXED: Separate fill tracking to prevent ID collisions between paper and live modes
+        self._paper_confirmed_fills: set = set()  # synthetic paper fill IDs (paper_UP_0.5000_100)
+        self._live_confirmed_fills: set = set()  # real order_ids from API
+        self._confirmed_fills: set = set()  # DEPRECATED: kept for backward compat, use mode-specific sets
         self._last_rest_verification: float = 0.0
 
         # Emergency stop: track markets where emergency triggered (stop further trading)
@@ -650,6 +664,7 @@ class PaperTradingBot:
                 max_imbalance_pct=self.spread_max_imbalance_pct,
                 enable_cycling=self.spread_enable_cycling,
                 min_velocity_bps=self.spread_min_velocity_bps,  # Zone filter
+                stop_loss_pct=0.07,  # Optimal for velocity (corrected backtest)
                 # Legacy params (for backward compatibility)
                 target_shares=self.accum_target_shares,
                 max_imbalance_shares=self.hard_max_imbalance,
@@ -660,7 +675,55 @@ class PaperTradingBot:
                 f"[SPREADCAP] Continuous velocity mode initialized: "
                 f"base_size={self.spread_base_size}, grid_levels={self.spread_grid_levels}, "
                 f"max_imbalance={self.spread_max_imbalance_pct*100:.0f}%, target={self.accum_target_shares}, "
-                f"cycling={self.spread_enable_cycling}{zone_info}"
+                f"cycling={self.spread_enable_cycling}, stop_loss=12%{zone_info}"
+            )
+
+        # Enhanced Momentum strategy (partial hedging with T1/T2 tranches)
+        self._enhanced_momentum_strategy: Optional[EnhancedMomentumStrategy] = None
+        if self.accum_mode == "enhanced_momentum":
+            hedge_ratio = getattr(self, 'enhanced_hedge_ratio', 0.50)
+            min_quality = getattr(self, 'enhanced_min_quality', 0.40)
+            self._enhanced_momentum_strategy = EnhancedMomentumStrategy(
+                base_size=self.spread_base_size,
+                hedge_ratio=hedge_ratio,
+                min_signal_quality=min_quality,
+                t2_stop_loss_pct=0.12,
+                enable_cycling=True,
+            )
+            logger.info(
+                f"[ENHANCED] Initialized: base_size={self.spread_base_size}, "
+                f"hedge_ratio={hedge_ratio:.0%}, min_quality={min_quality}"
+            )
+
+        # Latency Arbitrage strategy (exploits Binance->Poly lag)
+        self._latency_arb_strategy: Optional[LatencyArbStrategy] = None
+        if self.accum_mode == "latency_arb":
+            spike_threshold = getattr(self, 'latency_spike_threshold', 0.02)
+            self._latency_arb_strategy = LatencyArbStrategy(
+                base_size=self.spread_base_size,
+                spike_threshold=spike_threshold,
+                stop_loss_pct=0.07,
+                enable_cycling=True,
+            )
+            logger.info(
+                f"[LATARB] Initialized: base_size={self.spread_base_size}, "
+                f"spike_threshold={spike_threshold:.2f}%, stop_loss=7%"
+            )
+
+        # Opportunistic MM strategy (two-sided quoting with inventory balance)
+        self._opportunistic_mm_strategy: Optional[OpportunisticMMStrategy] = None
+        if self.accum_mode == "opportunistic_mm":
+            rebalance_threshold = getattr(self, 'mm_rebalance_threshold', 0.30)
+            max_position = getattr(self, 'mm_max_position', 200)
+            self._opportunistic_mm_strategy = OpportunisticMMStrategy(
+                base_size=self.spread_base_size,
+                max_position=max_position,
+                rebalance_threshold=rebalance_threshold,
+                enable_cycling=True,
+            )
+            logger.info(
+                f"[MM] Initialized: base_size={self.spread_base_size}, "
+                f"max_pos={max_position}, rebalance={rebalance_threshold:.0%}"
             )
 
         # Telegram notifications and remote control
@@ -1357,7 +1420,9 @@ class PaperTradingBot:
         self._init_csv()
 
         # Connect to Binance for price feed (needed for market resolution and trend detection)
-        self._binance_client = BinanceClient(window_seconds=60)
+        # UPGRADED: Use @bookTicker stream for faster detection (50-100ms vs 200ms)
+        # This enables spike capture strategy with 3-6x faster price updates
+        self._binance_client = BinanceClient(window_seconds=60, use_book_ticker=True)
         await self._binance_client.connect()
 
         # Wait for initial price
@@ -2710,6 +2775,30 @@ class PaperTradingBot:
         current_down = position.down_size if position else 0.0
         current_up_cost = position.up_cost if position else 0.0
         current_down_cost = position.down_cost if position else 0.0
+
+        # ============================================================================
+        # CRITICAL: Sync REST position INTO strategy's internal state
+        # ============================================================================
+        # FIXED: Accumulation cycle was missing this sync, causing rebalancing to use
+        # stale strategy state (Issue #4 from codebase audit)
+        # ============================================================================
+        if self._spread_capture_strategy and position:
+            old_up = self._spread_capture_strategy.state.up_shares
+            old_down = self._spread_capture_strategy.state.down_shares
+            current_up_int = round(current_up)
+            current_down_int = round(current_down)
+
+            if current_up_int != old_up or current_down_int != old_down:
+                self._spread_capture_strategy.state.up_shares = current_up_int
+                self._spread_capture_strategy.state.down_shares = current_down_int
+                self._spread_capture_strategy.state.up_cost = current_up_cost
+                self._spread_capture_strategy.state.down_cost = current_down_cost
+                self._spread_capture_strategy.state.up_avg_price = position.up_avg_price
+                self._spread_capture_strategy.state.down_avg_price = position.down_avg_price
+                logger.debug(
+                    f"[ACCUM] SYNCED strategy state: "
+                    f"UP {old_up}→{current_up_int}, DOWN {old_down}→{current_down_int}"
+                )
 
         # ============================================================================
         # HARD MAX IMBALANCE LIMIT (CRITICAL SAFETY - First line of defense)
@@ -4252,6 +4341,29 @@ class PaperTradingBot:
         time_remaining_secs = market.time_remaining()
 
         # =========================================================================
+        # HARD STOP ENFORCEMENT FOR SPREAD CAPTURE
+        # =========================================================================
+        # FIXED: Issue #6 - Spread capture bypassed hard stop check in accumulation cycle.
+        # When imbalance exceeds hard_max AND we're NOT actively hedging, block new entries.
+        # This prevents runaway imbalance from spread capture entries.
+        # =========================================================================
+        current_imbalance = abs(current_up - current_down)
+        is_actively_hedging = strategy.state.phase.value in ("hedge_pending", "entry_filled")
+
+        in_spread_capture_hard_stop = False
+        if current_imbalance >= self.hard_max_imbalance and not is_actively_hedging:
+            in_spread_capture_hard_stop = True
+            # Only log once per minute to avoid spam
+            now = time.time()
+            if now - self._last_hard_stop_log >= 60:
+                logger.warning(
+                    f"🛑 [SPREADCAP] HARD STOP: Imbalance {current_imbalance:.0f} >= {self.hard_max_imbalance} "
+                    f"(UP={current_up:.0f}, DOWN={current_down:.0f}). Blocking new entries."
+                )
+                self._last_hard_stop_log = now
+            # Still process fills below but will return before placing new orders
+
+        # =========================================================================
         # CRITICAL: Process WebSocket fills FIRST (before any trading decisions)
         # =========================================================================
         if self.trading_mode == "live" and hasattr(self, '_ws_fill_queue'):
@@ -4448,7 +4560,7 @@ class PaperTradingBot:
         current_time = time.time()
 
         # Check for pending fills first (before placing new orders)
-        # DEDUPLICATION: Paper mode uses _confirmed_fills to avoid double-counting
+        # DEDUPLICATION: Paper mode uses _paper_confirmed_fills to avoid double-counting
         if self.trading_mode == "paper" and hasattr(self._engine, 'check_pending_fills'):
             try:
                 current_prices = {"UP": up_ask, "DOWN": down_ask}
@@ -4457,14 +4569,14 @@ class PaperTradingBot:
                     fill_side = fill.get("side", "")
                     fill_price = fill.get("price", 0)
                     fill_size = int(fill.get("size", 0))
-                    # Generate fill ID for deduplication (use order_id if available, else synthetic)
-                    fill_id = fill.get("order_id", f"paper_{fill_side}_{fill_price:.4f}_{fill_size}")
+                    # Generate unique fill ID including timestamp to prevent collisions
+                    fill_id = fill.get("order_id", f"paper_{fill_side}_{time.time_ns()}")
                     if fill_side and fill_price > 0:
-                        # Skip if already processed
-                        if fill_id in self._confirmed_fills:
+                        # Skip if already processed (use paper-specific tracking set)
+                        if fill_id in self._paper_confirmed_fills:
                             logger.debug(f"[SPREADCAP] Skipping duplicate fill: {fill_id}")
                             continue
-                        self._confirmed_fills.add(fill_id)
+                        self._paper_confirmed_fills.add(fill_id)
                         strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
                         logger.info(
                             f"[SPREADCAP] Fill detected: {fill_side} {fill_size} @ ${fill_price:.4f}"
@@ -4477,11 +4589,23 @@ class PaperTradingBot:
             await self._verify_fills_via_rest(strategy)
 
         # =========================================================================
+        # HARD STOP: Return after processing fills (no new entries allowed)
+        # =========================================================================
+        if in_spread_capture_hard_stop:
+            logger.debug(f"[SPREADCAP] Hard stop active - skipping quote generation")
+            return
+
+        # =========================================================================
         # CONTINUOUS VELOCITY MODE: Use get_quotes() for two-sided quoting
         # =========================================================================
         # This replaces the old sequential decide() → single order approach.
         # Now we generate quotes for BOTH sides with velocity-adjusted offsets.
         # =========================================================================
+
+        # Get current Binance price for spike detection (UPGRADED from velocity-only)
+        binance_price = None
+        if self._binance_client and self._binance_client.current_price > 0:
+            binance_price = self._binance_client.current_price
 
         quotes = strategy.get_quotes(
             up_bid=up_bid,
@@ -4491,6 +4615,7 @@ class PaperTradingBot:
             velocity_bps=velocity_bps,
             time_remaining=time_remaining_secs,
             current_time=current_time,
+            binance_price=binance_price,  # Enable spike detection (3-tick vs 10s velocity)
         )
 
         if not quotes:
@@ -4558,7 +4683,7 @@ class PaperTradingBot:
                                 "strategy": "spread_capture",
                             }
                         else:
-                            self._confirmed_fills.add(order_id)
+                            self._live_confirmed_fills.add(order_id)
 
                     # Notify strategy of fill
                     if filled_size > 0:
@@ -4746,7 +4871,7 @@ class PaperTradingBot:
         # Check each pending order
         orders_to_remove = []
         for order_id, order_info in self._pending_order_ids.items():
-            if order_id in self._confirmed_fills:
+            if order_id in self._live_confirmed_fills:
                 orders_to_remove.append(order_id)
                 continue
 
@@ -4760,7 +4885,7 @@ class PaperTradingBot:
                         fill_price = float(status.get("price", order_info.get("price", 0)))
                         fill_size = int(float(status.get("size_matched", order_info.get("size", 0))))
 
-                        if fill_size > 0 and order_id not in self._confirmed_fills:
+                        if fill_size > 0 and order_id not in self._live_confirmed_fills:
                             logger.info(
                                 f"[REST_VERIFY] Caught missed fill: {order_info['side']} "
                                 f"{fill_size} @ ${fill_price:.4f} (order_id={order_id[:16]}...)"
@@ -4770,7 +4895,7 @@ class PaperTradingBot:
                                 price=fill_price,
                                 size=fill_size
                             )
-                            self._confirmed_fills.add(order_id)
+                            self._live_confirmed_fills.add(order_id)
                         orders_to_remove.append(order_id)
 
                     elif order_status == "CANCELLED":
@@ -5159,12 +5284,18 @@ class PaperTradingBot:
                         if stale_count > 0:
                             logger.info(f"[WS_CLEANUP] Cleared {stale_count} stale fills from old market queue")
 
-                    # Clear confirmed fills set to allow fresh deduplication for new market
+                    # Clear confirmed fills sets to allow fresh deduplication for new market
+                    # FIXED: Clear both mode-specific sets
+                    paper_count = len(self._paper_confirmed_fills) if hasattr(self, '_paper_confirmed_fills') else 0
+                    live_count = len(self._live_confirmed_fills) if hasattr(self, '_live_confirmed_fills') else 0
+                    if hasattr(self, '_paper_confirmed_fills'):
+                        self._paper_confirmed_fills.clear()
+                    if hasattr(self, '_live_confirmed_fills'):
+                        self._live_confirmed_fills.clear()
                     if hasattr(self, '_confirmed_fills'):
-                        old_count = len(self._confirmed_fills)
-                        self._confirmed_fills.clear()
-                        if old_count > 0:
-                            logger.info(f"[WS_CLEANUP] Cleared {old_count} old fill IDs from deduplication set")
+                        self._confirmed_fills.clear()  # Deprecated but clear for backward compat
+                    if paper_count + live_count > 0:
+                        logger.info(f"[WS_CLEANUP] Cleared fill IDs: {paper_count} paper, {live_count} live")
 
                     # Clear pending order tracking for old market
                     if hasattr(self, '_pending_order_ids'):
@@ -5179,6 +5310,29 @@ class PaperTradingBot:
                         self._user_ws._watched_orders.clear()
                         if old_count > 0:
                             logger.info(f"[WS_CLEANUP] Cleared {old_count} watched orders from user WebSocket")
+
+                    # FIXED: Issue #16 - Clear additional market-specific tracking dicts
+                    # These were missing from the original cleanup, causing stale data carryover
+                    if hasattr(self, '_pending_expensive_orders'):
+                        keys_to_remove = [k for k in self._pending_expensive_orders if k.startswith(old_market_slug)]
+                        for k in keys_to_remove:
+                            del self._pending_expensive_orders[k]
+                        if keys_to_remove:
+                            logger.debug(f"[WS_CLEANUP] Cleared {len(keys_to_remove)} pending expensive orders for {old_market_slug}")
+
+                    if hasattr(self, '_emergency_ceiling_used'):
+                        keys_to_remove = [k for k in self._emergency_ceiling_used if k.startswith(old_market_slug)]
+                        for k in keys_to_remove:
+                            del self._emergency_ceiling_used[k]
+                        if keys_to_remove:
+                            logger.debug(f"[WS_CLEANUP] Cleared {len(keys_to_remove)} emergency ceiling entries for {old_market_slug}")
+
+                    if hasattr(self, '_pull_cooldown'):
+                        keys_to_remove = [k for k in self._pull_cooldown if k.startswith(old_market_slug)]
+                        for k in keys_to_remove:
+                            del self._pull_cooldown[k]
+                        if keys_to_remove:
+                            logger.debug(f"[WS_CLEANUP] Cleared {len(keys_to_remove)} pull cooldown entries for {old_market_slug}")
 
                     # CRITICAL: Subscribe WebSocket to new market immediately
                     # (Don't wait for next trading cycle - that causes 2-5s latency gap)
@@ -5629,9 +5783,9 @@ async def main():
     parser.add_argument(
         '--accum-mode',
         type=str,
-        choices=['standard', 'calculus_maker', 'spread_capture'],
+        choices=['standard', 'calculus_maker', 'spread_capture', 'enhanced_momentum', 'latency_arb', 'opportunistic_mm'],
         default='standard',
-        help='Accumulation strategy mode: standard, calculus_maker (exponential decay), or spread_capture (continuous velocity MM)',
+        help='Accumulation strategy mode: standard, calculus_maker (exponential decay), spread_capture (continuous velocity MM), enhanced_momentum (partial hedging), latency_arb (spike detection), or opportunistic_mm (two-sided quoting)',
     )
 
     parser.add_argument(
