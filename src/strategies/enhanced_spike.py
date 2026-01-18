@@ -137,11 +137,11 @@ DEFAULT_ENABLE_CYCLING = True
 # Zone filtering (LEGACY - spike threshold is the new filter)
 DEFAULT_MIN_VELOCITY_BPS = 0.50
 
-# Stop-loss configuration
-DEFAULT_STOP_LOSS_PCT = 0.07
+# Stop-loss configuration (None = disabled, backtest shows SL hurts in low volatility)
+DEFAULT_STOP_LOSS_PCT = None
 
-# Timing
-MIN_TIME_REMAINING = 120
+# Timing (reduced from 120s based on backtest results)
+MIN_TIME_REMAINING = 60
 QUOTE_REFRESH_INTERVAL = 0.5
 
 
@@ -322,7 +322,7 @@ class EnhancedSpikeStrategy:
         min_profit: float = DEFAULT_MIN_PROFIT,
         max_share_price: float = DEFAULT_MAX_SHARE_PRICE,
         enable_cycling: bool = DEFAULT_ENABLE_CYCLING,
-        stop_loss_pct: float = DEFAULT_STOP_LOSS_PCT,
+        stop_loss_pct: Optional[float] = DEFAULT_STOP_LOSS_PCT,
         # LEGACY parameters (aliases for backward compatibility)
         entry_size: Optional[int] = None,
         entry_offset: float = DEFAULT_ENTRY_OFFSET,
@@ -756,6 +756,10 @@ class EnhancedSpikeStrategy:
     ) -> Tuple[bool, Optional[float]]:
         """Check if stop-loss should trigger and return hedge price."""
         s = self.state
+
+        # Stop-loss disabled
+        if self.stop_loss_pct is None:
+            return (False, None)
 
         if s.first_fill_side is None or s.first_fill_price <= 0:
             return (False, None)

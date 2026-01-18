@@ -414,6 +414,13 @@ class SpreadCaptureObserver:
         self._velocity_history_size = 100
         self._price_history_size = 100
 
+        # Resolution tracking - persistent retry for unresolved markets
+        # Polymarket takes 2-5 minutes to resolve, so we retry for up to 10 minutes
+        self._unresolved_markets: Dict[str, float] = {}  # slug -> first_check_time
+        self._resolution_retry_task: Optional[asyncio.Task] = None
+        self._resolution_max_age_seconds = 600  # 10 minutes max retry
+        self._resolution_retry_interval = 30  # Retry every 30 seconds
+
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
 
@@ -808,13 +815,22 @@ class SpreadCaptureObserver:
             self.csv_file.flush()
 
     def _log_resolution(self, slug: str, resolution: str) -> None:
-        """Log market resolution to a separate CSV file."""
-        resolution_file = f"{self.output_dir}/resolutions_{datetime.now().strftime('%Y%m%d')}.csv"
-        file_exists = os.path.exists(resolution_file)
+        """
+        Log market resolution to CSV files.
 
-        with open(resolution_file, 'a', newline='') as f:
+        Creates/updates two files:
+        1. Daily log: resolutions_YYYYMMDD.csv (timestamped entries)
+        2. Main file: market_resolutions.csv (for backtest compatibility)
+        """
+        import pandas as pd
+
+        # 1. Daily log file (append)
+        daily_file = f"{self.output_dir}/resolutions_{datetime.now().strftime('%Y%m%d')}.csv"
+        daily_exists = os.path.exists(daily_file)
+
+        with open(daily_file, 'a', newline='') as f:
             writer = csv.writer(f)
-            if not file_exists:
+            if not daily_exists:
                 writer.writerow(['timestamp', 'market_slug', 'resolution', 'source'])
             writer.writerow([
                 datetime.now().isoformat(),
@@ -822,19 +838,91 @@ class SpreadCaptureObserver:
                 resolution,
                 'polymarket_api',
             ])
-        print(f"[RESOLUTION] Logged {slug} -> {resolution} to {resolution_file}")
 
-    async def _delayed_resolution_check(self, finder, slug: str, delay_seconds: float = 30.0) -> None:
-        """Check resolution after a delay (for markets not yet resolved at switch time)."""
-        await asyncio.sleep(delay_seconds)
+        # 2. Main resolution file (merge with existing)
+        # This file is used by backtest scripts
+        main_file = f"{self.output_dir}/market_resolutions.csv"
         try:
-            resolution = await finder.wait_for_resolution(slug, timeout_seconds=90.0, poll_interval=10.0)
-            if resolution:
-                self._log_resolution(slug, resolution)
+            if os.path.exists(main_file):
+                existing = pd.read_csv(main_file)
+                # Handle both 'slug' and 'market' column names
+                if 'market' in existing.columns:
+                    existing = existing.rename(columns={'market': 'slug'})
+                # Remove old entry for this market if exists
+                existing = existing[existing['slug'] != slug]
             else:
-                print(f"[RESOLUTION] {slug} still not resolved after waiting", flush=True)
+                existing = pd.DataFrame(columns=['slug', 'winner'])
+
+            # Add new resolution
+            new_row = pd.DataFrame([{'slug': slug, 'winner': resolution}])
+            combined = pd.concat([existing, new_row], ignore_index=True)
+            combined.to_csv(main_file, index=False)
         except Exception as e:
-            print(f"[RESOLUTION] Delayed check failed for {slug}: {e}", flush=True)
+            print(f"[RESOLUTION] Warning: Failed to update main file: {e}", flush=True)
+
+        print(f"[RESOLUTION] Logged {slug} -> {resolution}", flush=True)
+
+    def _add_unresolved_market(self, slug: str) -> None:
+        """Add a market to the unresolved tracking list."""
+        if slug not in self._unresolved_markets:
+            self._unresolved_markets[slug] = time.time()
+            print(f"[RESOLUTION] Added {slug} to retry queue ({len(self._unresolved_markets)} pending)", flush=True)
+
+    async def _resolution_retry_loop(self) -> None:
+        """
+        Background task that retries resolution checks for all unresolved markets.
+
+        Polymarket takes 2-5 minutes to resolve markets, so we:
+        1. Retry every 30 seconds
+        2. Keep trying for up to 10 minutes per market
+        3. Remove markets that resolve or exceed max age
+        """
+        finder = MarketFinder()
+
+        while self.running:
+            await asyncio.sleep(self._resolution_retry_interval)
+
+            if not self._unresolved_markets:
+                continue
+
+            # Get list of markets to check (copy to avoid modification during iteration)
+            to_check = list(self._unresolved_markets.keys())
+            now = time.time()
+
+            for slug in to_check:
+                first_check = self._unresolved_markets.get(slug)
+                if first_check is None:
+                    continue
+
+                age = now - first_check
+
+                # Remove if too old (>10 minutes)
+                if age > self._resolution_max_age_seconds:
+                    print(f"[RESOLUTION] {slug} - giving up after {age:.0f}s", flush=True)
+                    del self._unresolved_markets[slug]
+                    continue
+
+                # Try to get resolution
+                try:
+                    resolution = await finder.get_market_resolution(slug)
+                    if resolution:
+                        self._log_resolution(slug, resolution)
+                        del self._unresolved_markets[slug]
+                        print(f"[RESOLUTION] {slug} -> {resolution} (after {age:.0f}s)", flush=True)
+                    else:
+                        # Still pending, will retry next iteration
+                        pass
+                except Exception as e:
+                    print(f"[RESOLUTION] Retry failed for {slug}: {e}", flush=True)
+
+                # Rate limit between checks
+                await asyncio.sleep(0.5)
+
+        # On shutdown, log any remaining unresolved markets
+        if self._unresolved_markets:
+            print(f"[RESOLUTION] {len(self._unresolved_markets)} markets still unresolved at shutdown", flush=True)
+            for slug in self._unresolved_markets:
+                print(f"  - {slug}", flush=True)
 
     async def _find_current_market(self) -> bool:
         """Find and subscribe to current 15-min BTC market using REST API."""
@@ -868,14 +956,15 @@ class SpreadCaptureObserver:
                 resolution = await finder.get_market_resolution(old_slug)
                 if resolution:
                     print(f"[RESOLUTION] {old_slug} resolved to {resolution}", flush=True)
-                    # Log resolution to CSV
                     self._log_resolution(old_slug, resolution)
                 else:
-                    print(f"[RESOLUTION] {old_slug} not yet resolved (will check later)", flush=True)
-                    # Schedule resolution check for later
-                    asyncio.create_task(self._delayed_resolution_check(finder, old_slug))
+                    print(f"[RESOLUTION] {old_slug} not yet resolved (adding to retry queue)", flush=True)
+                    # Add to persistent retry queue (will retry every 30s for up to 10 minutes)
+                    self._add_unresolved_market(old_slug)
             except Exception as e:
                 print(f"[RESOLUTION] Error checking {old_slug}: {e}", flush=True)
+                # Add to retry queue on error as well
+                self._add_unresolved_market(old_slug)
 
         print(f"\nSwitching to market: {market.slug}", flush=True)
         print(f"  UP token: {market.up_token_id[:16]}...", flush=True)
@@ -1039,6 +1128,11 @@ class SpreadCaptureObserver:
 
         print("Ready! Starting observation...\n")
 
+        # Start background resolution retry task
+        # This will retry unresolved markets every 30s for up to 10 minutes
+        self._resolution_retry_task = asyncio.create_task(self._resolution_retry_loop())
+        print("  Resolution retry task started (30s interval, 10min max)")
+
         # Initialize CSV
         self._init_csv()
 
@@ -1087,12 +1181,21 @@ class SpreadCaptureObserver:
             # Cleanup
             if hasattr(self, '_ws_task') and self._ws_task:
                 self._ws_task.cancel()
+            if hasattr(self, '_resolution_retry_task') and self._resolution_retry_task:
+                self._resolution_retry_task.cancel()
+                # Give it a moment to log remaining unresolved markets
+                try:
+                    await asyncio.wait_for(self._resolution_retry_task, timeout=1.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
             if self.csv_file:
                 self.csv_file.flush()
                 self.csv_file.close()
 
             await self._print_status()
             print(f"\nObservation complete. {self.sample_count} samples recorded.")
+            if self._unresolved_markets:
+                print(f"  {len(self._unresolved_markets)} markets still pending resolution")
 
 
 # =============================================================================

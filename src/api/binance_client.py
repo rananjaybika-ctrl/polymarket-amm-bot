@@ -46,6 +46,12 @@ class PriceStats:
     sample_count: int
 
 
+# Type for spike detection callbacks
+# callback(direction: str, magnitude_pct: float, price: float)
+SpikeCallback = Callable[[str, float, float], None]
+AsyncSpikeCallback = Callable[[str, float, float], 'asyncio.coroutine']
+
+
 class BinanceClient:
     """
     Real-time BTCUSDT price feed from Binance.
@@ -54,22 +60,48 @@ class BinanceClient:
     - Current price
     - Strike price (reference at market open)
     - Rolling window statistics for flip detection
+    - Raw spike detection (NEW - faster than velocity)
+
+    UPGRADED: Now supports @bookTicker stream for faster detection (50-100ms vs 200ms).
+    Use use_book_ticker=True in constructor for spike capture strategy.
     """
 
-    WEBSOCKET_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+    # Trade stream (default) - ~5 updates/sec
+    WEBSOCKET_URL_TRADE = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+    # Book ticker stream (faster) - ~20-50 updates/sec
+    WEBSOCKET_URL_BOOK_TICKER = "wss://stream.binance.com:9443/ws/btcusdt@bookTicker"
+    # Combined stream (both)
+    WEBSOCKET_URL_COMBINED = "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/btcusdt@bookTicker"
+
+    # Default to trade stream for backward compatibility
+    WEBSOCKET_URL = WEBSOCKET_URL_TRADE
     REST_URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
     KLINES_URL = "https://api.binance.com/api/v3/klines"
 
     # Velocity threshold for event-driven callbacks (bps/sec)
     VELOCITY_PULL_THRESHOLD = 0.05  # ~$5 BTC move in 10s
 
-    def __init__(self, window_seconds: int = 60, max_history_seconds: int = 3600):
+    # Spike detection parameters (NEW)
+    DEFAULT_SPIKE_LOOKBACK = 3      # 3 ticks (~600ms at 5 ticks/sec, ~150ms with bookTicker)
+    DEFAULT_SPIKE_THRESHOLD = 0.02  # 0.02% minimum to trigger
+
+    def __init__(
+        self,
+        window_seconds: int = 60,
+        max_history_seconds: int = 3600,
+        use_book_ticker: bool = False,
+        spike_lookback: int = None,
+        spike_threshold: float = None,
+    ):
         """
         Initialize Binance client.
 
         Args:
             window_seconds: Default rolling window for statistics (default 60s)
             max_history_seconds: Maximum price history to keep (default 1 hour)
+            use_book_ticker: Use @bookTicker stream for faster updates (NEW)
+            spike_lookback: Ticks to look back for spike detection (default 3)
+            spike_threshold: Minimum % change to trigger spike (default 0.02)
         """
         self._current_price: float = 0.0
         self._strike_price: float = 0.0
@@ -83,6 +115,14 @@ class BinanceClient:
         self._connected: bool = False
         self._window_seconds = window_seconds
 
+        # Stream selection (NEW)
+        self._use_book_ticker = use_book_ticker
+        if use_book_ticker:
+            self._websocket_url = self.WEBSOCKET_URL_BOOK_TICKER
+            logger.info("BinanceClient using @bookTicker stream (faster detection)")
+        else:
+            self._websocket_url = self.WEBSOCKET_URL_TRADE
+
         # Reconnection settings
         self._reconnect_delay: float = 1.0
         self._max_reconnect_delay: float = 30.0
@@ -94,6 +134,15 @@ class BinanceClient:
         self._callback_cooldown_secs: float = 1.0  # Minimum time between callbacks
         self._last_callback_time: float = 0.0
         self._velocity_window_secs: int = 10  # Window for velocity calculation
+
+        # Spike detection (NEW - faster than velocity)
+        self._spike_lookback = spike_lookback or self.DEFAULT_SPIKE_LOOKBACK
+        self._spike_threshold = spike_threshold or self.DEFAULT_SPIKE_THRESHOLD
+        self._spike_callbacks: List[SpikeCallback] = []
+        self._spike_price_history: List[float] = []
+        self._spike_history_size = 50  # Keep last 50 prices
+        self._last_spike_callback_time: float = 0.0
+        self._spike_callback_cooldown_secs: float = 0.5  # Faster cooldown for spikes
 
     async def connect(self) -> None:
         """Connect to Binance WebSocket stream and start receiving prices."""
@@ -112,7 +161,7 @@ class BinanceClient:
         while self._running:
             try:
                 async with websockets.connect(
-                    self.WEBSOCKET_URL,
+                    self._websocket_url,  # Use configured URL (trade or bookTicker)
                     ping_interval=20,
                     ping_timeout=10,
                     close_timeout=5,
@@ -120,7 +169,8 @@ class BinanceClient:
                     self._ws = ws
                     self._connected = True
                     reconnect_delay = self._reconnect_delay  # Reset on successful connect
-                    logger.info(f"Connected to Binance WebSocket")
+                    stream_type = "bookTicker" if self._use_book_ticker else "trade"
+                    logger.info(f"Connected to Binance WebSocket ({stream_type} stream)")
 
                     await self._receive_loop(ws)
 
@@ -145,18 +195,31 @@ class BinanceClient:
 
             try:
                 data = json.loads(message)
-                # Trade stream format: {"e": "trade", "p": "23456.78", ...}
-                if "p" in data:
+                price = None
+
+                # Handle bookTicker format: {"u":123,"s":"BTCUSDT","b":"95000.00","B":"1.5","a":"95001.00","A":"2.0"}
+                if 'b' in data and 'a' in data:
+                    bid = float(data['b'])
+                    ask = float(data['a'])
+                    price = (bid + ask) / 2  # Mid price for spike detection
+
+                # Handle trade stream format: {"e": "trade", "p": "23456.78", ...}
+                elif "p" in data:
                     price = float(data["p"])
+
+                if price is not None:
                     now = datetime.now(timezone.utc)
 
                     self._current_price = price
                     self._price_history.append(PricePoint(timestamp=now, price=price))
 
-                    # EVENT-DRIVEN: Check velocity on every tick
-                    # This is the key latency advantage - react within 100ms of Binance move
+                    # EVENT-DRIVEN: Check velocity on every tick (LEGACY)
                     if self._velocity_callbacks and self._strike_price > 0:
                         self._check_velocity_and_fire()
+
+                    # EVENT-DRIVEN: Check spike on every tick (NEW - faster)
+                    if self._spike_callbacks:
+                        self._check_spike_and_fire(price)
 
             except (json.JSONDecodeError, KeyError, ValueError) as e:
                 logger.debug(f"Failed to parse Binance message: {e}")
@@ -545,3 +608,128 @@ class BinanceClient:
                         asyncio.create_task(result)
                 except Exception as e:
                     logger.error(f"Velocity callback error: {e}")
+
+    # =========================================================================
+    # EVENT-DRIVEN SPIKE DETECTION (NEW - FASTER THAN VELOCITY)
+    # =========================================================================
+    # Raw spike detection reacts within 100-600ms of Binance price moves.
+    # This is faster than velocity-based detection which averages over 10s.
+
+    def on_spike_detected(self, callback: SpikeCallback) -> None:
+        """
+        Register callback for when raw price spike is detected.
+
+        The callback is fired IMMEDIATELY when price change exceeds threshold.
+        This enables 100-600ms reaction time to Binance price moves.
+
+        Args:
+            callback: Function(direction, magnitude_pct, price) called on spike
+                      direction: "UP" if price rising, "DOWN" if falling
+                      magnitude_pct: Absolute percentage change (e.g., 0.05 for 0.05%)
+                      price: Current Binance price
+
+        Example:
+            def on_spike(direction, magnitude_pct, price):
+                if direction == "UP":
+                    # Buy UP immediately - BTC is spiking up
+                    asyncio.create_task(buy_winner("UP", magnitude_pct))
+
+            binance.on_spike_detected(on_spike)
+        """
+        self._spike_callbacks.append(callback)
+        logger.info(f"Registered spike callback (total: {len(self._spike_callbacks)})")
+
+    def remove_spike_callback(self, callback: SpikeCallback) -> bool:
+        """Remove a previously registered spike callback."""
+        try:
+            self._spike_callbacks.remove(callback)
+            return True
+        except ValueError:
+            return False
+
+    def clear_spike_callbacks(self) -> None:
+        """Remove all spike callbacks."""
+        self._spike_callbacks.clear()
+        logger.info("Cleared all spike callbacks")
+
+    def reset_spike_state(self) -> None:
+        """
+        Reset spike detection state for new market.
+
+        Call this when switching to a new market.
+        """
+        self._spike_price_history = []
+        self._last_spike_callback_time = 0.0
+        logger.debug("Reset spike state for new market")
+
+    def detect_spike(self, price: float) -> tuple:
+        """
+        Detect raw Binance price spike over last N ticks.
+
+        Args:
+            price: Current Binance BTCUSDT price
+
+        Returns:
+            (direction, magnitude_pct) or (None, 0) if no spike
+        """
+        # Add to history
+        self._spike_price_history.append(price)
+
+        # Trim history
+        if len(self._spike_price_history) > self._spike_history_size:
+            self._spike_price_history = self._spike_price_history[-self._spike_history_size:]
+
+        # Need enough history
+        if len(self._spike_price_history) < self._spike_lookback + 1:
+            return None, 0
+
+        current = self._spike_price_history[-1]
+        previous = self._spike_price_history[-self._spike_lookback - 1]
+
+        if previous <= 0:
+            return None, 0
+
+        change_pct = (current - previous) / previous * 100
+        magnitude = abs(change_pct)
+
+        if magnitude >= self._spike_threshold:
+            direction = "UP" if change_pct > 0 else "DOWN"
+            return direction, magnitude
+
+        return None, 0
+
+    def _check_spike_and_fire(self, price: float) -> None:
+        """
+        Check for spike and fire callbacks when threshold exceeded.
+
+        Called on every Binance WebSocket tick.
+        """
+        import time
+
+        # Detect spike
+        direction, magnitude = self.detect_spike(price)
+
+        if direction is None:
+            return
+
+        # Cooldown to prevent callback spam
+        now = time.time()
+        if (now - self._last_spike_callback_time) < self._spike_callback_cooldown_secs:
+            return  # Still in cooldown
+
+        # Fire callbacks
+        logger.info(
+            f"[EVENT] Spike detected: {direction} {magnitude:.4f}% | "
+            f"price=${price:,.2f}"
+        )
+        self._last_spike_callback_time = now
+
+        for callback in self._spike_callbacks:
+            try:
+                # Handle both sync and async callbacks
+                result = callback(direction, magnitude, price)
+                if asyncio.iscoroutine(result):
+                    # Schedule async callback without blocking
+                    asyncio.create_task(result)
+            except Exception as e:
+                logger.error(f"Spike callback error: {e}")
