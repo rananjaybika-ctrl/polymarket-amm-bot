@@ -651,3 +651,87 @@ threshold = base_threshold * multiplier
 ### Git Checkpoint
 - Tag: `pre-ou-adaptive-threshold`
 - Commit: `a25c864` - "Pre-OU checkpoint: OOS2 analysis complete"
+
+---
+
+## Implementation Progress: January 20, 2026
+
+### Completed (Commit ea7ffc5)
+
+| File | Status | Description |
+|------|--------|-------------|
+| `src/strategies/ou_volatility.py` | ✅ Created | Core OU classes (OUParameters, OUParameterEstimator, OUAdaptiveThreshold) |
+| `research/ou_calibration.py` | ✅ Created | Offline calibration script |
+| `research/spike_param_optimizer_taker.py` | ✅ Modified | Added `--threshold-method` (fixed/regime/ou) |
+| `research/enhanced_spike_backtest.py` | ✅ Renamed+Modified | Was enhanced_spike_60hz_optimized.py, added OU support |
+| `src/strategies/volatility_regime.py` | ✅ Modified | Added `get_ou_adaptive_threshold()` method |
+| `src/strategies/enhanced_spike.py` | ✅ Modified | Added optional `ou_adaptive_threshold` parameter |
+| `research/adaptive_threshold.py` | ✅ Modified | Added `OUThreshold` class |
+
+### Blocked: Calibration Issues
+
+**Problem:** Initial calibration produced unstable parameters:
+```
+μ = -11.72, σ_stat = 35.5, half_life = 2.6s
+```
+
+**Root Cause:** Data at 111Hz (9ms intervals) → tick-to-tick returns are too granular → numerical instability in OU estimation.
+
+**Fix Needed:** Resample to 1-second intervals before estimation. Started implementing `resample_to_1s()` function in `ou_calibration.py`.
+
+### AWS Data Collection
+
+- **Status:** Running (PID 458322, started Jan 19)
+- **Target:** Stop at 05:30 UTC Jan 22 (11am IST)
+- **Location:** `ubuntu@54.170.244.221:~/polymarket-amm-bot/research/binance_hf/`
+
+### Path Forward (Priority Order)
+
+1. **Fix calibration (NEXT)**
+   - Add 1-second resampling before OU estimation
+   - Re-run: `python research/ou_calibration.py --all`
+   - Expected: σ_stat ≈ 0.5-2.0, half_life ≈ 30-120s
+
+2. **Validate on both datasets**
+   ```bash
+   # Training (should maintain performance)
+   python research/enhanced_spike_backtest.py --threshold-method=ou --end-ts=1768705387229
+
+   # OOS2 (should improve from -$0.49/hr)
+   python research/enhanced_spike_backtest.py --threshold-method=ou --start-ts=1768705387229
+   ```
+
+3. **Compare threshold methods**
+   | Method | Training $/hr | OOS2 $/hr | Notes |
+   |--------|--------------|-----------|-------|
+   | fixed | $3.62 | -$0.49 | Baseline (broken) |
+   | regime | TBD | TBD | ATR percentile-based |
+   | ou | TBD | TBD | OU z-score sigmoid |
+
+4. **If OU works:** Run optimizer with `--threshold-method=ou`
+
+5. **Production integration:** Pass `OUAdaptiveThreshold` to `EnhancedSpikeStrategy`
+
+### Key Commands
+
+```bash
+# Fix calibration and re-run
+python research/ou_calibration.py --all
+
+# Test OU on training
+python research/enhanced_spike_backtest.py --threshold-method=ou --end-ts=1768705387229
+
+# Test OU on OOS2
+python research/enhanced_spike_backtest.py --threshold-method=ou --start-ts=1768705387229
+
+# Check AWS data collection
+ssh -i ~/Downloads/polymarket-key.pem ubuntu@54.170.244.221 "tail -20 ~/polymarket-amm-bot/data_collection.log"
+```
+
+### Decision Point
+
+After fixing calibration, if OU-adaptive thresholds show:
+- Training: ≥$3.25/hr (within 10% of $3.62)
+- OOS2: >$0/hr (improvement from -$0.49)
+
+→ Proceed with production integration. Otherwise, investigate regime-based thresholds as fallback.

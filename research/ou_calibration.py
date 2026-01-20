@@ -132,6 +132,28 @@ def compute_returns(df: pd.DataFrame, price_col: str = 'price') -> np.ndarray:
     return returns
 
 
+def resample_to_1s(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Resample high-frequency data to 1-second intervals.
+
+    Takes the last price in each 1-second bucket.
+
+    Args:
+        df: DataFrame with timestamp_ms and price columns
+
+    Returns:
+        Resampled DataFrame
+    """
+    df = df.copy()
+    df['timestamp_s'] = df['timestamp_ms'] // 1000
+    resampled = df.groupby('timestamp_s').agg({
+        'timestamp_ms': 'last',
+        'price': 'last'
+    }).reset_index(drop=True)
+    logger.info(f"Resampled from {len(df):,} to {len(resampled):,} rows (1s intervals)")
+    return resampled
+
+
 # =============================================================================
 # CALIBRATION
 # =============================================================================
