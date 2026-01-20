@@ -33,12 +33,16 @@ Supersedes: spike_capture.py (raw spike), spread_capture.py (velocity-based)
 """
 
 import logging
+import math
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from src.config import FeeConfig
+
+if TYPE_CHECKING:
+    from src.strategies.ou_volatility import OUAdaptiveThreshold
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +333,8 @@ class EnhancedSpikeStrategy:
         max_share_price: float = DEFAULT_MAX_SHARE_PRICE,
         enable_cycling: bool = DEFAULT_ENABLE_CYCLING,
         stop_loss_pct: Optional[float] = DEFAULT_STOP_LOSS_PCT,
+        # OU adaptive threshold (optional - use for production)
+        ou_adaptive_threshold: Optional["OUAdaptiveThreshold"] = None,
         # LEGACY parameters (aliases for backward compatibility)
         entry_size: Optional[int] = None,
         entry_offset: float = DEFAULT_ENTRY_OFFSET,
@@ -347,6 +353,9 @@ class EnhancedSpikeStrategy:
         self.spike_threshold = spike_threshold
         self.target_pair_cost = target_pair_cost
         self._binance_price_history: List[float] = []
+
+        # OU adaptive threshold (replaces fixed threshold when set)
+        self.ou_adaptive_threshold = ou_adaptive_threshold
 
         # Core parameters
         self.base_size = max(MIN_SHARES, base_size)
@@ -386,6 +395,9 @@ class EnhancedSpikeStrategy:
         This REPLACES the velocity-based zone detection with faster, more
         accurate raw spike detection.
 
+        Uses OU-based adaptive threshold if ou_adaptive_threshold is set,
+        otherwise falls back to fixed spike_threshold.
+
         Args:
             binance_price: Current Binance BTCUSDT price
 
@@ -413,7 +425,13 @@ class EnhancedSpikeStrategy:
         change_pct = (current - previous) / previous * 100
         magnitude = abs(change_pct)
 
-        if magnitude >= self.spike_threshold:
+        # Use OU adaptive threshold if available, otherwise fixed threshold
+        if self.ou_adaptive_threshold is not None:
+            threshold = self.ou_adaptive_threshold.update(binance_price)
+        else:
+            threshold = self.spike_threshold
+
+        if magnitude >= threshold:
             direction = "UP" if change_pct > 0 else "DOWN"
 
             # Update state
@@ -423,11 +441,17 @@ class EnhancedSpikeStrategy:
 
             logger.debug(
                 f"[ENHSPIKE] Spike detected: {direction} {magnitude:.4f}% "
-                f"(${previous:.2f} -> ${current:.2f})"
+                f"(threshold={threshold:.4f}%, ${previous:.2f} -> ${current:.2f})"
             )
             return direction, magnitude
 
         return None, 0
+
+    def get_current_threshold(self) -> float:
+        """Get current spike threshold (OU adaptive or fixed)."""
+        if self.ou_adaptive_threshold is not None:
+            return self.ou_adaptive_threshold.get_threshold()
+        return self.spike_threshold
 
     def calculate_magnitude_loser_bid(
         self,

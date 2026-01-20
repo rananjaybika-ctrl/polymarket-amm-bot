@@ -620,3 +620,34 @@ The strategy **overfit to a specific market regime** (low volatility, ranging ma
 2. **Add trend filter** - Recommended
 3. **Retest on combined data** - Validate fixes work across regimes
 4. **Paper trade through different regimes** - Essential validation
+
+---
+
+## Implementation Plan: Adaptive Spike Thresholds (January 20, 2026)
+
+### Plan File Location
+`research/PLAN_OU_ADAPTIVE_THRESHOLD.md`
+
+### Approach: Ornstein-Uhlenbeck Process for Volatility Modeling
+
+The OU process models mean-reverting dynamics, which perfectly describes volatility:
+- Volatility clusters (high vol follows high vol)
+- Volatility mean-reverts (eventually returns to baseline)
+- Well-defined stationary distribution for z-score computation
+
+### Key Formula
+```python
+z = (log(current_vol) - μ) / σ_stat          # Current z-score
+multiplier = k_low + (k_high - k_low) / (1 + exp(-steepness * z))
+threshold = base_threshold * multiplier
+```
+
+### Expected Outcome
+- Training z-scores ≈ 0 (calibrated baseline)
+- OOS2 z-scores > 1.5 (high volatility detected)
+- OOS2 threshold raised to 0.03-0.04% (reduce false signals)
+- OOS2 performance: loss → breakeven/profit
+
+### Git Checkpoint
+- Tag: `pre-ou-adaptive-threshold`
+- Commit: `a25c864` - "Pre-OU checkpoint: OOS2 analysis complete"

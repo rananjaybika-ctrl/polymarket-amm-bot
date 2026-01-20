@@ -19,12 +19,16 @@ Date: January 17, 2026
 """
 
 import logging
+import math
 import statistics
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.strategies.ou_volatility import OUParameters
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +63,15 @@ DEFAULT_REGIME_MIN_SCORES = {
 
 # Regime transition hysteresis (prevent rapid switching)
 DEFAULT_HYSTERESIS_FACTOR = 0.10  # 10% buffer around thresholds
+
+# OU-based adaptive threshold parameters (see PLAN_OU_ADAPTIVE_THRESHOLD.md)
+OU_BASE_THRESHOLD = 0.02
+OU_K_LOW = 0.5
+OU_K_HIGH = 1.75
+OU_SIGMOID_STEEPNESS = 1.5
+OU_MIN_THRESHOLD = 0.005
+OU_MAX_THRESHOLD = 0.10
+OU_EWMA_HALFLIFE = 300  # 5 seconds at 60Hz
 
 
 # =============================================================================
@@ -162,6 +175,7 @@ class VolatilityRegimeDetector:
         regime_min_scores: Optional[Dict[str, float]] = None,
         hysteresis_factor: float = DEFAULT_HYSTERESIS_FACTOR,
         history_size: int = DEFAULT_HISTORY_SIZE,
+        ou_params: Optional["OUParameters"] = None,
     ):
         """
         Initialize volatility regime detector.
@@ -176,6 +190,7 @@ class VolatilityRegimeDetector:
             regime_min_scores: Minimum signal scores per regime
             hysteresis_factor: Buffer around thresholds to prevent rapid switching
             history_size: Maximum history size
+            ou_params: Optional OUParameters for OU-based adaptive thresholds
         """
         # Configuration
         self.short_window = short_window
@@ -204,10 +219,22 @@ class VolatilityRegimeDetector:
         # Percentile tracking (for regime classification)
         self._atr_percentile_window: Deque[float] = deque(maxlen=long_window)
 
+        # OU-based adaptive threshold support
+        self.ou_params = ou_params
+        self._ou_prev_price: Optional[float] = None
+        self._ou_variance: float = 0.01  # Initial variance estimate
+        self._ou_current_vol: float = 0.0
+        self._ou_current_z: float = 0.0
+        self._ou_alpha: float = 1 - 0.5 ** (1.0 / OU_EWMA_HALFLIFE)
+
         logger.info(
             f"[REGIME] Initialized: short={short_window}, long={long_window}, "
             f"atr_period={atr_period}, thresholds={self.regime_thresholds}"
         )
+        if ou_params:
+            logger.info(
+                f"[REGIME] OU params: μ={ou_params.mu:.4f}, σ_stat={ou_params.sigma_stat:.4f}"
+            )
 
     # =========================================================================
     # CORE UPDATE METHODS
@@ -480,6 +507,69 @@ class VolatilityRegimeDetector:
         ratio = max(0.5, min(ratio, 2.5))
 
         return base_threshold * ratio
+
+    def get_ou_adaptive_threshold(
+        self,
+        price: Optional[float] = None,
+        base_threshold: float = OU_BASE_THRESHOLD,
+    ) -> float:
+        """
+        Get OU-based adaptive spike threshold using z-score sigmoid mapping.
+
+        Uses the Ornstein-Uhlenbeck process model for volatility:
+        - Computes EWMA volatility from returns
+        - Maps log-volatility to z-score using OU stationary distribution
+        - Applies sigmoid mapping: threshold = base * multiplier
+
+        Multiplier formula:
+            z = (log(vol) - μ) / σ_stat
+            multiplier = k_low + (k_high - k_low) / (1 + exp(-steepness * z))
+
+        Args:
+            price: Current price (updates EWMA volatility if provided)
+            base_threshold: Base spike threshold (default 0.02%)
+
+        Returns:
+            Adaptive spike threshold, or base_threshold if OU params not set
+        """
+        if self.ou_params is None:
+            return base_threshold
+
+        # Update EWMA volatility if price provided
+        if price is not None and self._ou_prev_price is not None:
+            ret = (price - self._ou_prev_price) / self._ou_prev_price * 100
+            self._ou_variance = (
+                self._ou_alpha * (ret ** 2) +
+                (1 - self._ou_alpha) * self._ou_variance
+            )
+            self._ou_current_vol = max(math.sqrt(self._ou_variance), 1e-6)
+
+        if price is not None:
+            self._ou_prev_price = price
+
+        # Compute z-score
+        if self._ou_current_vol <= 0:
+            return base_threshold
+
+        log_vol = math.log(self._ou_current_vol)
+        self._ou_current_z = (log_vol - self.ou_params.mu) / self.ou_params.sigma_stat
+
+        # Sigmoid mapping
+        z_clamped = max(-10, min(10, self._ou_current_z * OU_SIGMOID_STEEPNESS))
+        sigmoid = 1.0 / (1.0 + math.exp(-z_clamped))
+        multiplier = OU_K_LOW + (OU_K_HIGH - OU_K_LOW) * sigmoid
+
+        # Compute threshold with bounds
+        threshold = base_threshold * multiplier
+        return max(OU_MIN_THRESHOLD, min(OU_MAX_THRESHOLD, threshold))
+
+    def get_ou_z_score(self) -> float:
+        """Get current OU z-score (for monitoring)."""
+        return self._ou_current_z
+
+    def get_ou_volatility(self) -> float:
+        """Get current EWMA volatility (for monitoring)."""
+        return self._ou_current_vol
 
     # =========================================================================
     # REGIME QUERIES

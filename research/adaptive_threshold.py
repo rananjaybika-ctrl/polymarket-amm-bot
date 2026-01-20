@@ -13,6 +13,7 @@ Usage:
         ATRThreshold,
         RegimeThreshold,
         HybridThreshold,
+        OUThreshold,          # NEW: OU-based adaptive (recommended)
         AdaptiveSpikeDetector
     )
 
@@ -734,7 +735,169 @@ class HybridThreshold:
 
 
 # =============================================================================
-# 7. Adaptive Spike Detector (Main Interface)
+# 7. OU (Ornstein-Uhlenbeck) Threshold
+# =============================================================================
+
+class OUThreshold:
+    """
+    Adaptive spike threshold using Ornstein-Uhlenbeck process model.
+
+    Uses pre-calibrated OU parameters to compute z-scores of current volatility
+    against the stationary distribution, then applies sigmoid mapping.
+
+    This is the RECOMMENDED approach for handling regime changes (e.g., OOS2).
+
+    Formula:
+        z = (log(vol) - mu) / sigma_stat
+        multiplier = k_low + (k_high - k_low) / (1 + exp(-steepness * z))
+        threshold = base * multiplier
+
+    Expected behavior:
+        z < -1 (LOW vol):     ~0.6x base → 0.012% threshold
+        z ≈ 0  (MEDIUM vol):  ~1.0x base → 0.020% threshold
+        z > +1 (HIGH vol):    ~1.4x base → 0.028% threshold
+        z > +2 (EXTREME vol): ~1.7x base → 0.034% threshold
+
+    Parameters:
+        ou_params_file: Path to JSON file with calibrated OU parameters
+        base_threshold: Base spike threshold (default 0.02%)
+        k_low: Multiplier for low volatility (default 0.5)
+        k_high: Multiplier for high volatility (default 1.75)
+        sigmoid_steepness: Steepness of sigmoid transition (default 1.5)
+        ewma_halflife: Half-life for EWMA volatility (default 300 ticks)
+        min_threshold: Minimum threshold (default 0.005%)
+        max_threshold: Maximum threshold (default 0.10%)
+    """
+
+    def __init__(
+        self,
+        ou_params_file: Optional[str] = None,
+        base_threshold: float = 0.02,
+        k_low: float = 0.5,
+        k_high: float = 1.75,
+        sigmoid_steepness: float = 1.5,
+        ewma_halflife: int = 300,
+        min_threshold: float = 0.005,
+        max_threshold: float = 0.10
+    ):
+        import math
+
+        self.base_threshold = base_threshold
+        self.k_low = k_low
+        self.k_high = k_high
+        self.steepness = sigmoid_steepness
+        self.min_threshold = min_threshold
+        self.max_threshold = max_threshold
+
+        # EWMA for volatility
+        self.lambda_decay = 0.5 ** (1.0 / ewma_halflife)
+        self.prev_price: Optional[float] = None
+        self.variance: float = 0.01  # Initial estimate
+        self.tick_count: int = 0
+
+        # OU parameters (load from file or use defaults)
+        self.ou_mu = -4.0  # Default mean log-volatility
+        self.ou_sigma_stat = 1.0  # Default stationary std
+
+        if ou_params_file:
+            self._load_params(ou_params_file)
+
+        # Current state
+        self.current_vol: float = 0.0
+        self.current_z: float = 0.0
+        self.current_threshold: float = base_threshold
+
+    def _load_params(self, filepath: str) -> None:
+        """Load OU parameters from JSON file."""
+        import json
+        try:
+            with open(filepath, 'r') as f:
+                params = json.load(f)
+            self.ou_mu = params.get('mu', self.ou_mu)
+            self.ou_sigma_stat = params.get('sigma_stat', self.ou_sigma_stat)
+            print(f"[OUThreshold] Loaded: μ={self.ou_mu:.4f}, σ_stat={self.ou_sigma_stat:.4f}")
+        except Exception as e:
+            print(f"[OUThreshold] Warning: Could not load {filepath}: {e}")
+
+    def update(self, price: float) -> float:
+        """Update with new price and return current threshold."""
+        import math
+
+        self.tick_count += 1
+
+        if self.prev_price is None:
+            self.prev_price = price
+            return self.base_threshold
+
+        # Compute return
+        ret = (price - self.prev_price) / self.prev_price * 100
+        self.prev_price = price
+
+        # EWMA variance update
+        self.variance = self.lambda_decay * self.variance + (1 - self.lambda_decay) * (ret ** 2)
+        self.current_vol = max(math.sqrt(self.variance), 1e-6)
+
+        # Compute z-score
+        log_vol = math.log(self.current_vol)
+        self.current_z = (log_vol - self.ou_mu) / self.ou_sigma_stat
+
+        # Sigmoid mapping
+        z_clamped = max(-10, min(10, self.current_z * self.steepness))
+        sigmoid = 1.0 / (1.0 + math.exp(-z_clamped))
+        multiplier = self.k_low + (self.k_high - self.k_low) * sigmoid
+
+        # Compute threshold with bounds
+        self.current_threshold = self.base_threshold * multiplier
+        self.current_threshold = max(self.min_threshold, min(self.current_threshold, self.max_threshold))
+
+        return self.current_threshold
+
+    def get_threshold(self) -> float:
+        """Get current threshold without updating."""
+        return self.current_threshold
+
+    def get_z_score(self) -> float:
+        """Get current z-score."""
+        return self.current_z
+
+    def get_volatility(self) -> float:
+        """Get current EWMA volatility."""
+        return self.current_vol
+
+    def get_state(self) -> ThresholdState:
+        """Get current state for monitoring."""
+        import math
+        regime = self.classify_regime(self.current_z)
+        return ThresholdState(
+            threshold=self.current_threshold,
+            volatility=self.current_vol,
+            samples=self.tick_count,
+            regime=regime
+        )
+
+    def classify_regime(self, z_score: float) -> str:
+        """Classify regime from z-score."""
+        if z_score < -1.0:
+            return "LOW"
+        elif z_score < 1.0:
+            return "MEDIUM"
+        elif z_score < 2.0:
+            return "HIGH"
+        else:
+            return "EXTREME"
+
+    def reset(self) -> None:
+        """Reset state for new session."""
+        self.prev_price = None
+        self.variance = 0.01
+        self.tick_count = 0
+        self.current_vol = 0.0
+        self.current_z = 0.0
+        self.current_threshold = self.base_threshold
+
+
+# =============================================================================
+# 8. Adaptive Spike Detector (Main Interface)
 # =============================================================================
 
 class AdaptiveSpikeDetector:
@@ -758,7 +921,8 @@ class AdaptiveSpikeDetector:
         "percentile": PercentileThreshold,
         "atr": ATRThreshold,
         "regime": RegimeThreshold,
-        "hybrid": HybridThreshold
+        "hybrid": HybridThreshold,
+        "ou": OUThreshold,  # OU-based adaptive (recommended for regime changes)
     }
 
     def __init__(

@@ -41,6 +41,10 @@ from datetime import datetime
 import multiprocessing as mp
 import time
 import sys
+import math
+
+# Add parent to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # =============================================================================
 # CONSTANTS
@@ -83,6 +87,55 @@ REGIME_THRESHOLDS = {
     "MEDIUM": 0.020,
     "HIGH": 0.035,
 }
+
+# OU-based adaptive threshold parameters (see PLAN_OU_ADAPTIVE_THRESHOLD.md)
+OU_BASE_THRESHOLD = 0.02
+OU_K_LOW = 0.5
+OU_K_HIGH = 1.75
+OU_SIGMOID_STEEPNESS = 1.5
+OU_MIN_THRESHOLD = 0.005
+OU_MAX_THRESHOLD = 0.10
+
+# Global OU parameters (loaded at runtime if --threshold-method=ou)
+_ou_params = None
+
+
+def load_ou_params(filepath: str):
+    """Load OU parameters from JSON file."""
+    global _ou_params
+    try:
+        from src.strategies.ou_volatility import OUParameters
+        _ou_params = OUParameters.load(filepath)
+        print(f"[OU] Loaded parameters: μ={_ou_params.mu:.4f}, σ_stat={_ou_params.sigma_stat:.4f}, half_life={_ou_params.half_life_sec:.1f}s")
+    except Exception as e:
+        print(f"[OU] ERROR loading parameters from {filepath}: {e}")
+        _ou_params = None
+
+
+def compute_ou_threshold(volatility: float) -> float:
+    """
+    Compute OU-based adaptive threshold from volatility.
+
+    Uses sigmoid mapping on z-score: threshold = base * multiplier
+    where multiplier = k_low + (k_high - k_low) / (1 + exp(-steepness * z))
+    """
+    global _ou_params
+    if _ou_params is None:
+        return OU_BASE_THRESHOLD  # Fallback to base threshold
+
+    # Compute z-score
+    vol = max(volatility, 1e-6)
+    log_vol = math.log(vol)
+    z_score = (log_vol - _ou_params.mu) / _ou_params.sigma_stat
+
+    # Sigmoid mapping
+    z_clamped = max(-10, min(10, z_score * OU_SIGMOID_STEEPNESS))
+    sigmoid = 1.0 / (1.0 + math.exp(-z_clamped))
+    multiplier = OU_K_LOW + (OU_K_HIGH - OU_K_LOW) * sigmoid
+
+    # Compute threshold with bounds
+    threshold = OU_BASE_THRESHOLD * multiplier
+    return max(OU_MIN_THRESHOLD, min(OU_MAX_THRESHOLD, threshold))
 
 # =============================================================================
 # TAKER FEE CALCULATION
@@ -430,8 +483,21 @@ def classify_regime_vectorized(atr_series: pd.Series, window: int = ATR_WINDOW) 
 
 
 def detect_spikes_for_lookback(btc_df: pd.DataFrame, lookback: int,
-                               adaptive_volatility: bool = True) -> pd.DataFrame:
-    """Detect spikes using specified lookback period."""
+                               threshold_method: str = "regime") -> pd.DataFrame:
+    """
+    Detect spikes using specified lookback period.
+
+    Args:
+        btc_df: DataFrame with timestamp_ms and price columns
+        lookback: Number of ticks to look back for spike detection
+        threshold_method: One of "fixed", "regime", or "ou"
+            - "fixed": Use fixed SPIKE_THRESHOLD (0.02%)
+            - "regime": Use ATR-based regime thresholds (LOW/MEDIUM/HIGH)
+            - "ou": Use OU-based adaptive thresholds (requires _ou_params loaded)
+
+    Returns:
+        DataFrame with spike detection results
+    """
     df = btc_df.copy()
     df = df.sort_values('timestamp_ms').reset_index(drop=True)
 
@@ -440,13 +506,40 @@ def detect_spikes_for_lookback(btc_df: pd.DataFrame, lookback: int,
     df['change_pct'] = (df['price'] - df['price_prev']) / df['price_prev'] * 100
     df['magnitude'] = df['change_pct'].abs()
 
-    if adaptive_volatility:
+    if threshold_method == "ou":
+        # OU-based adaptive threshold using EWMA volatility
+        # Compute rolling EWMA volatility
+        returns = df['price'].pct_change() * 100
+        ewma_halflife = 300  # 5 seconds at 60Hz
+        alpha = 1 - 0.5 ** (1.0 / ewma_halflife)
+
+        # Initialize variance
+        variance = returns.iloc[:60].var() if len(returns) > 60 else 0.01
+        volatilities = []
+
+        for i, r in enumerate(returns):
+            if pd.isna(r):
+                volatilities.append(0.01)
+                continue
+            variance = alpha * (r ** 2) + (1 - alpha) * variance
+            vol = max(np.sqrt(variance), 1e-6)
+            volatilities.append(vol)
+
+        df['volatility'] = volatilities
+        df['threshold'] = df['volatility'].apply(compute_ou_threshold)
+        df['regime'] = df['threshold'].apply(lambda t:
+            'LOW' if t < 0.015 else ('HIGH' if t > 0.025 else 'MEDIUM'))
+        df['spike_detected'] = df['magnitude'] >= df['threshold']
+
+    elif threshold_method == "regime":
+        # ATR-based regime thresholds (original adaptive_volatility=True behavior)
         df['atr'] = calculate_rolling_atr(df['price'])
         df['regime'] = classify_regime_vectorized(df['atr'])
         df['threshold'] = df['regime'].map(REGIME_THRESHOLDS)
         df['threshold'] = df['threshold'].fillna(SPIKE_THRESHOLD)
         df['spike_detected'] = df['magnitude'] >= df['threshold']
-    else:
+
+    else:  # "fixed"
         df['spike_detected'] = df['magnitude'] >= SPIKE_THRESHOLD
         df['regime'] = 'MEDIUM'
         df['threshold'] = SPIKE_THRESHOLD
@@ -457,7 +550,7 @@ def detect_spikes_for_lookback(btc_df: pd.DataFrame, lookback: int,
     df['spike_magnitude'] = df['magnitude'].where(df['spike_detected'], 0)
 
     return df[['timestamp_ms', 'price', 'spike_detected', 'spike_direction',
-               'spike_magnitude', 'regime']]
+               'spike_magnitude', 'regime', 'threshold']]
 
 
 # =============================================================================
@@ -936,22 +1029,38 @@ def _run_config_worker(config: OptConfig) -> OptResult:
 
 
 def precompute_spikes(btc_df: pd.DataFrame, lookbacks: List[int],
-                      adaptive_volatility: bool = True) -> Dict[int, pd.DataFrame]:
-    """Pre-compute spikes for all lookback values."""
-    print("\nPre-computing spikes for all lookback values...")
+                      threshold_method: str = "regime") -> Dict[int, pd.DataFrame]:
+    """
+    Pre-compute spikes for all lookback values.
+
+    Args:
+        btc_df: Binance price DataFrame
+        lookbacks: List of lookback tick values
+        threshold_method: "fixed", "regime", or "ou"
+
+    Returns:
+        Dict mapping lookback -> spikes DataFrame
+    """
+    print(f"\nPre-computing spikes for all lookback values (method={threshold_method})...")
     spikes_by_lookback = {}
 
     for lookback in lookbacks:
         ms = lookback * 1000 // 60
         print(f"  Lookback {lookback} ticks ({ms}ms)...", end=' ', flush=True)
-        spikes_df = detect_spikes_for_lookback(btc_df, lookback, adaptive_volatility)
+        spikes_df = detect_spikes_for_lookback(btc_df, lookback, threshold_method)
         # Filter out LOW regime spikes (48% accuracy = worse than coin flip)
         spikes_only = spikes_df[
             (spikes_df['spike_detected'] == True) &
             (spikes_df['regime'] != 'LOW')
         ].copy()
         spikes_by_lookback[lookback] = spikes_only
-        print(f"{len(spikes_only):,} spikes (excl. LOW regime)")
+
+        # Show threshold stats for OU method
+        if threshold_method == "ou" and len(spikes_only) > 0:
+            mean_thresh = spikes_only['threshold'].mean()
+            print(f"{len(spikes_only):,} spikes (mean threshold={mean_thresh:.4f}%)")
+        else:
+            print(f"{len(spikes_only):,} spikes (excl. LOW regime)")
 
     return spikes_by_lookback
 
@@ -959,18 +1068,20 @@ def precompute_spikes(btc_df: pd.DataFrame, lookbacks: List[int],
 def run_optimization(btc_df: pd.DataFrame, obs_df: pd.DataFrame, hours: float,
                      market_resolutions: Dict[str, str], n_workers: int = 4,
                      quick: bool = False, path: str = "both",
-                     slippage: float = 0.0) -> List[OptResult]:
+                     slippage: float = 0.0,
+                     threshold_method: str = "regime") -> List[OptResult]:
     """Run all configurations in parallel."""
     configs = generate_param_grid(quick=quick, path=path)
     print(f"\nTotal configurations to test: {len(configs)}")
     print(f"Entry slippage: +${slippage:.2f} above ask")
+    print(f"Threshold method: {threshold_method}")
 
     # Get unique lookback values
     lookbacks = list(set(c.spike_lookback for c in configs))
     print(f"Unique lookback values: {lookbacks}")
 
     # Pre-compute spikes for all lookback values (major optimization)
-    spikes_by_lookback = precompute_spikes(btc_df, lookbacks, adaptive_volatility=True)
+    spikes_by_lookback = precompute_spikes(btc_df, lookbacks, threshold_method=threshold_method)
 
     results = []
     start_time = time.time()
@@ -1417,6 +1528,12 @@ def parse_args():
                         help="Filter data to only include timestamps >= this (ms)")
     parser.add_argument("--end-ts", type=int, default=None,
                         help="Filter data to only include timestamps <= this (ms)")
+    parser.add_argument("--threshold-method", type=str, default="regime",
+                        choices=["fixed", "regime", "ou"],
+                        help="Spike threshold method: fixed (0.02%%), regime (ATR-based), "
+                             "ou (Ornstein-Uhlenbeck adaptive)")
+    parser.add_argument("--ou-params", type=str, default="research/ou_params.json",
+                        help="Path to OU parameters JSON file (for --threshold-method=ou)")
 
     return parser.parse_args()
 
@@ -1433,6 +1550,16 @@ def main():
     print("  - Max fee at 50%: 1.56%")
     print("  - Min fee at extremes: ~0.31%")
     print()
+
+    # Load OU parameters if using OU threshold method
+    if args.threshold_method == "ou":
+        print(f"Loading OU parameters from {args.ou_params}...")
+        load_ou_params(args.ou_params)
+        if _ou_params is None:
+            print("ERROR: Failed to load OU parameters. Run ou_calibration.py first.")
+            print("  python research/ou_calibration.py --all")
+            sys.exit(1)
+        print()
 
     # Load data
     btc_df, obs_df, hours, res_map = load_data(
@@ -1452,12 +1579,17 @@ def main():
         "path2": "PATH 2: Partial Hedge + Aggressive Hedge (ALL lookbacks)",
         "both": "Full Grid (all lookbacks)"
     }
+    threshold_desc = {
+        "fixed": "Fixed 0.02%",
+        "regime": "ATR-based regime (LOW/MEDIUM/HIGH)",
+        "ou": "OU-based adaptive (z-score sigmoid)"
+    }
     print(f"\nOptimization Settings:")
     print(f"  Mode:         {'Quick (reduced grid)' if args.quick else path_desc[args.path]}")
     print(f"  Workers:      {args.workers}")
     print(f"  Configs:      {len(configs)}")
     print(f"  Signal:       enhanced (fixed)")
-    print(f"  Adaptive Vol: ON (fixed)")
+    print(f"  Threshold:    {threshold_desc[args.threshold_method]}")
     print(f"  Min Time:     {MIN_TIME}s (fixed)")
     print(f"  Cycling:      ON (fixed)")
     if args.path == "path1":
@@ -1477,7 +1609,8 @@ def main():
     print("Running optimization...")
     results = run_optimization(btc_df, obs_df, hours, res_map,
                               n_workers=args.workers, quick=args.quick,
-                              path=args.path, slippage=args.slippage)
+                              path=args.path, slippage=args.slippage,
+                              threshold_method=args.threshold_method)
 
     # Print results
     print_results(results, hours, n_markets)
