@@ -64,6 +64,18 @@ from .opportunistic_mm import (
     MMPhase,
 )
 
+from .volatility_regime import (
+    VolatilityRegimeDetector,
+    VolatilityRegime,
+    RegimeState,
+    RegimeAwareEnhancedSpike,
+    SimpleMACrossoverDetector,
+    # Standalone functions
+    calculate_rolling_atr,
+    classify_regime_simple,
+    get_regime_adjusted_threshold,
+)
+
 __all__ = [
     "CalculusMakerStrategy",
     "get_mispricing_threshold",
@@ -102,4 +114,13 @@ __all__ = [
     "OpportunisticMMStrategy",
     "OpportunisticMMState",
     "MMPhase",
+    # Volatility Regime Detection
+    "VolatilityRegimeDetector",
+    "VolatilityRegime",
+    "RegimeState",
+    "RegimeAwareEnhancedSpike",
+    "SimpleMACrossoverDetector",
+    "calculate_rolling_atr",
+    "classify_regime_simple",
+    "get_regime_adjusted_threshold",
 ]

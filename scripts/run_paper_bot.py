@@ -64,6 +64,10 @@ from src.strategies.spread_capture import (
     SpreadCaptureStrategy,
     SpreadCapturePhase,
 )
+from src.strategies.volatility_regime import (
+    VolatilityRegimeDetector,
+    VolatilityRegime,
+)
 from src.strategies.enhanced_momentum import (
     EnhancedMomentumStrategy,
     EnhancedMomentumPhase,
@@ -496,10 +500,12 @@ class PaperTradingBot:
         session_start_utc: Optional[datetime] = None,
         session_end_utc: Optional[datetime] = None,
         # NEW: Spread Capture continuous velocity mode parameters
-        spread_base_size: int = 15,           # Total shares across grid (15 / 3 = 5 per level)
-        spread_grid_levels: int = 3,          # 3 orders of 5 shares each
+        # Updated based on optimizer results (Jan 18, 2026)
+        spread_base_size: int = 30,           # Total shares per trade
+        spread_grid_levels: int = 1,          # Single price level (optimizer winner)
+        spread_spike_lookback: int = 3,       # 300ms at 5Hz (18 ticks at 60Hz = robust across all sessions)
         spread_max_imbalance_pct: float = 0.10,  # Max inventory imbalance (10%)
-        spread_enable_cycling: bool = False,  # If False, stop at target; if True, keep cycling
+        spread_enable_cycling: bool = True,   # Re-enter same market (optimal per backtest)
         spread_min_velocity_bps: float = 0.50,  # Only trade zones 5-6 (velocity >= 0.50) - matches backtest
     ):
         self.initial_balance = initial_balance
@@ -568,6 +574,7 @@ class PaperTradingBot:
         # NEW: Spread Capture continuous velocity mode parameters
         self.spread_base_size = spread_base_size
         self.spread_grid_levels = spread_grid_levels
+        self.spread_spike_lookback = spread_spike_lookback
         self.spread_max_imbalance_pct = spread_max_imbalance_pct
         self.spread_enable_cycling = spread_enable_cycling
         self.spread_min_velocity_bps = spread_min_velocity_bps
@@ -658,13 +665,14 @@ class PaperTradingBot:
         self._spread_capture_strategy: Optional[SpreadCaptureStrategy] = None
         if self.accum_mode == "spread_capture":
             self._spread_capture_strategy = SpreadCaptureStrategy(
-                # NEW: Continuous velocity mode params
+                # NEW: Continuous velocity mode params (optimizer winner Jan 18)
                 base_size=self.spread_base_size,
                 grid_levels=self.spread_grid_levels,
+                spike_lookback=self.spread_spike_lookback,  # 3 ticks = 300ms at 5Hz (robust across sessions)
                 max_imbalance_pct=self.spread_max_imbalance_pct,
                 enable_cycling=self.spread_enable_cycling,
                 min_velocity_bps=self.spread_min_velocity_bps,  # Zone filter
-                stop_loss_pct=0.07,  # Optimal for velocity (corrected backtest)
+                stop_loss_pct=None,  # Disabled - optimizer found SL hurts performance
                 # Legacy params (for backward compatibility)
                 target_shares=self.accum_target_shares,
                 max_imbalance_shares=self.hard_max_imbalance,
@@ -674,8 +682,19 @@ class PaperTradingBot:
             logger.info(
                 f"[SPREADCAP] Continuous velocity mode initialized: "
                 f"base_size={self.spread_base_size}, grid_levels={self.spread_grid_levels}, "
+                f"spike_lookback={self.spread_spike_lookback} (300ms), "
                 f"max_imbalance={self.spread_max_imbalance_pct*100:.0f}%, target={self.accum_target_shares}, "
-                f"cycling={self.spread_enable_cycling}, stop_loss=12%{zone_info}"
+                f"cycling={self.spread_enable_cycling}, stop_loss=None{zone_info}"
+            )
+
+        # Volatility Regime Detector for adaptive spike thresholds
+        # Uses ATR-based regime classification (LOW=0.01%, MEDIUM=0.02%, HIGH=0.035%)
+        self._volatility_detector: Optional[VolatilityRegimeDetector] = None
+        if self.accum_mode == "spread_capture":
+            self._volatility_detector = VolatilityRegimeDetector()
+            logger.info(
+                f"[REGIME] Adaptive volatility enabled: "
+                f"LOW=0.010%, MEDIUM=0.020%, HIGH=0.035%"
             )
 
         # Enhanced Momentum strategy (partial hedging with T1/T2 tranches)
@@ -1205,19 +1224,21 @@ class PaperTradingBot:
         """
         trading_mode = config.get("mode", "paper")
 
-        # NEW: Continuous velocity mode params (with legacy fallbacks)
-        base_size = config.get("base_size", config.get("entry_size", 10))
-        grid_levels = config.get("grid_levels", 3)
+        # NEW: Continuous velocity mode params (optimizer winner Jan 18)
+        base_size = config.get("base_size", config.get("entry_size", 30))
+        grid_levels = config.get("grid_levels", 1)  # Optimizer winner
+        spike_lookback = config.get("spike_lookback", 3)  # 300ms at 5Hz (robust across sessions)
         max_imbalance_pct = config.get("max_imbalance_pct", 0.10)
-        enable_cycling = config.get("enable_cycling", False)
+        enable_cycling = config.get("enable_cycling", True)  # Optimizer winner
 
         return cls(
             initial_balance=config.get("starting_balance", 500.0),
             # Set accum_mode to spread_capture
             accum_mode="spread_capture",
-            # NEW: Continuous velocity mode parameters
+            # NEW: Continuous velocity mode parameters (optimizer winner Jan 18)
             spread_base_size=base_size,
             spread_grid_levels=grid_levels,
+            spread_spike_lookback=spike_lookback,
             spread_max_imbalance_pct=max_imbalance_pct,
             spread_enable_cycling=enable_cycling,
             # Spread Capture specific parameters (legacy support)
@@ -4606,6 +4627,26 @@ class PaperTradingBot:
         binance_price = None
         if self._binance_client and self._binance_client.current_price > 0:
             binance_price = self._binance_client.current_price
+
+            # Update volatility regime and adjust spike threshold dynamically
+            if self._volatility_detector and binance_price:
+                regime = self._volatility_detector.update_from_binance(binance_price)
+
+                # SKIP LOW VOLATILITY REGIME - 48% accuracy (worse than coin flip)
+                # Data shows: LOW=48%, MEDIUM=73%, HIGH=61% at 10s window
+                if regime.value == "low":
+                    if self._opportunities_checked % 100 == 0:
+                        logger.debug(f"[REGIME] Skipping LOW volatility regime (48% accuracy)")
+                    return
+
+                new_threshold = self._volatility_detector.get_spike_threshold()
+                if strategy.spike_threshold != new_threshold:
+                    old_threshold = strategy.spike_threshold
+                    strategy.spike_threshold = new_threshold
+                    logger.info(
+                        f"[REGIME] {regime.value.upper()}: spike_threshold "
+                        f"{old_threshold:.3f}% → {new_threshold:.3f}%"
+                    )
 
         quotes = strategy.get_quotes(
             up_bid=up_bid,

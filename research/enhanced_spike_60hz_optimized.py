@@ -56,9 +56,10 @@ DEFAULT_REGIME_THRESHOLDS = {
 VELOCITY_CONFIRM_THRESHOLD = 0.10
 ENHANCED_SCORE_THRESHOLD = 0.40
 
-# Loser bid
-DROP_MULTIPLIER = 0.68
-DROP_INTERCEPT = 0.01
+# Loser bid (v2: recalibrated Jan 18, 2026 - see HEDGE_PRICING_FINDINGS.md)
+DROP_MULTIPLIER = 0.50   # Reduced from 0.68 - spike has weak predictive power
+DROP_INTERCEPT = 0.08    # Increased from 0.01 - matches actual mean drop
+DROP_REGIME_BONUS = {'LOW': 0.0, 'MEDIUM': 0.01, 'HIGH': 0.02}
 TARGET_PAIR_COST = 0.99
 
 MIN_CYCLE_GAP_MS = 1000
@@ -276,8 +277,11 @@ def compute_score_v1_legacy(spike_mag: float, velocity_bps: float, spike_dir: st
     return 0.40 * spike_score + 0.30 * velocity_score + 0.20 * confirm_bonus + 0.10 * urgency
 
 
-def calc_loser_bid(winner_entry: float, spike_mag: float) -> float:
-    expected_drop = DROP_MULTIPLIER * spike_mag / 100 + DROP_INTERCEPT
+def calc_loser_bid(winner_entry: float, spike_mag: float, regime: str = "MEDIUM") -> float:
+    """Calculate loser bid with v2 formula (recalibrated Jan 18, 2026)."""
+    regime_bonus = DROP_REGIME_BONUS.get(regime, 0.01)
+    expected_drop = DROP_MULTIPLIER * spike_mag / 100 + DROP_INTERCEPT + regime_bonus
+    expected_drop = max(0.02, min(0.20, expected_drop))
     max_loser = TARGET_PAIR_COST - winner_entry
     loser_bid = min((1.0 - winner_entry) - expected_drop, max_loser)
     return max(0.01, min(0.95, loser_bid))

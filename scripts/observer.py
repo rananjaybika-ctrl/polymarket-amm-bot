@@ -175,8 +175,10 @@ class CycleRecord:
 # Spike detection constants (from enhanced_spike.py)
 SPIKE_LOOKBACK = 3           # 3 ticks for spike detection
 SPIKE_THRESHOLD = 0.02       # 0.02% minimum to trigger
-DROP_MULTIPLIER = 0.68       # From linear regression
-DROP_INTERCEPT = 0.01        # Base expected drop
+# Hedge pricing (v2: recalibrated Jan 18, 2026)
+DROP_MULTIPLIER = 0.50       # Reduced from 0.68 - spike has weak predictive power
+DROP_INTERCEPT = 0.08        # Increased from 0.01 - matches actual mean drop
+DROP_REGIME_BONUS = {'LOW': 0.0, 'MEDIUM': 0.01, 'HIGH': 0.02}
 TARGET_PAIR_COST = 0.99      # Target sub-$1
 
 
@@ -262,11 +264,14 @@ class GridState:
 
         return None, 0
 
-    def calculate_spike_loser_bid(self, loser_ask: float, winner_entry: float) -> float:
-        """Calculate loser bid based on spike magnitude."""
+    def calculate_spike_loser_bid(self, loser_ask: float, winner_entry: float,
+                                   regime: str = "MEDIUM") -> float:
+        """Calculate loser bid based on spike magnitude (v2)."""
         if self.last_spike_magnitude <= 0:
             return 0.0
-        expected_drop = DROP_MULTIPLIER * self.last_spike_magnitude + DROP_INTERCEPT
+        regime_bonus = DROP_REGIME_BONUS.get(regime, 0.01)
+        expected_drop = DROP_MULTIPLIER * self.last_spike_magnitude + DROP_INTERCEPT + regime_bonus
+        expected_drop = max(0.02, min(0.20, expected_drop))
         max_loser = TARGET_PAIR_COST - winner_entry
         loser_bid = min(loser_ask - expected_drop, max_loser)
         return max(0.01, loser_bid)
@@ -688,7 +693,12 @@ class SpreadCaptureObserver:
         spike_loser_bid = 0.0
         expected_drop = 0.0
         if spike_detected:
-            expected_drop = DROP_MULTIPLIER * spike_magnitude + DROP_INTERCEPT
+            # Use velocity zone as proxy for regime (v2 formula)
+            zone_name = get_velocity_zone(velocity)
+            regime = "HIGH" if zone_name in ["strong", "extreme"] else "MEDIUM" if zone_name == "moderate" else "LOW"
+            regime_bonus = DROP_REGIME_BONUS.get(regime, 0.01)
+            expected_drop = DROP_MULTIPLIER * spike_magnitude + DROP_INTERCEPT + regime_bonus
+            expected_drop = max(0.02, min(0.20, expected_drop))
             # Determine winner/loser based on spike
             if spike_direction == "UP":
                 winner_entry = up_ask  # Winner entry at ask
@@ -696,7 +706,7 @@ class SpreadCaptureObserver:
             else:
                 winner_entry = down_ask
                 loser_ask = up_ask
-            spike_loser_bid = grid_state.calculate_spike_loser_bid(loser_ask, winner_entry)
+            spike_loser_bid = grid_state.calculate_spike_loser_bid(loser_ask, winner_entry, regime)
 
         # Compare spike vs velocity signals
         velocity_signal = abs(velocity_bps) >= 0.50  # Zone 5-6

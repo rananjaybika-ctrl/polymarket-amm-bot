@@ -46,9 +46,12 @@ SPIKE_THRESHOLD = 0.02  # Base threshold
 VELOCITY_CONFIRM_THRESHOLD = 0.10
 ENHANCED_SCORE_THRESHOLD = 0.02  # v2 formula: spike_mag * velocity_bps, 0.02 = 2% spike with 1bps vel
 
-# Loser bid calculation
-DROP_MULTIPLIER = 0.68
-DROP_INTERCEPT = 0.01
+# Loser bid calculation (v2: based on hedge_pricing_analysis.py regression results)
+# Analysis findings: actual 60s drop mean = 0.10, spike_magnitude has no predictive power (r=-0.01)
+# Old formula (0.68 * spike + 0.01) severely underpredicted drops (predicted 0.03, actual 0.10)
+DROP_MULTIPLIER = 0.50  # Reduced from 0.68 - spike has weak predictive power
+DROP_INTERCEPT = 0.08   # Increased from 0.01 - matches actual mean drop better
+DROP_REGIME_BONUS = {'LOW': 0.0, 'MEDIUM': 0.01, 'HIGH': 0.02}  # Regime adjustment
 TARGET_PAIR_COST = 0.99
 
 # Cycling
@@ -451,9 +454,32 @@ def compute_score_v1_legacy(spike_mag: float, velocity_bps: float, spike_dir: st
     return 0.40 * spike_score + 0.30 * velocity_score + 0.20 * confirm_bonus + 0.10 * urgency
 
 
-def calc_loser_bid(winner_entry: float, spike_mag: float) -> float:
-    """Calculate loser side bid price."""
-    expected_drop = DROP_MULTIPLIER * spike_mag / 100 + DROP_INTERCEPT
+def calc_loser_bid(winner_entry: float, spike_mag: float, regime: str = "MEDIUM") -> float:
+    """
+    Calculate loser side bid price (v2).
+
+    Based on hedge_pricing_analysis.py regression results:
+    - Actual 60s mean drop: 0.10 (not 0.03 as old formula predicted)
+    - spike_magnitude correlation with drop: -0.01 (essentially zero)
+    - Regime has modest effect on drop magnitude
+
+    Formula: expected_drop = 0.08 + 0.50 * spike_mag/100 + regime_bonus
+    For 3% spike in MEDIUM regime: 0.08 + 0.015 + 0.01 = 0.105 (close to actual 0.10)
+    """
+    # Base drop (calibrated to actual 60s mean of 0.10)
+    base_drop = DROP_INTERCEPT  # 0.08
+
+    # Spike term (small weight - spike has weak predictive power)
+    spike_term = DROP_MULTIPLIER * spike_mag / 100  # 0.50 * spike%
+
+    # Regime adjustment
+    regime_bonus = DROP_REGIME_BONUS.get(regime, 0.01)
+
+    expected_drop = base_drop + spike_term + regime_bonus
+
+    # Clamp to reasonable range [0.02, 0.20]
+    expected_drop = max(0.02, min(0.20, expected_drop))
+
     max_loser = TARGET_PAIR_COST - winner_entry
     loser_bid = min((1.0 - winner_entry) - expected_drop, max_loser)
     return max(0.01, min(0.95, loser_bid))
@@ -475,6 +501,10 @@ def simulate_entry_with_grid(obs_row: pd.Series, config: OptConfig,
 
     Returns list of orders, each with price, size, and level.
 
+    Entry price logic (matches live enhanced_spike.py):
+    - Base: bid + 0.01, capped at ask - 0.01
+    - Grid levels spread downward from base (more passive at higher levels)
+
     Args:
         obs_row: Observer data row
         config: OptConfig
@@ -482,9 +512,16 @@ def simulate_entry_with_grid(obs_row: pd.Series, config: OptConfig,
         cycle_shares: Shares for this cycle (uses order_size_per_cycle if None)
     """
     if winner_side == 'UP':
-        base_price = obs_row['up_ask']
+        winner_bid = obs_row['up_bid']
+        winner_ask = obs_row['up_ask']
     else:
-        base_price = obs_row['down_ask']
+        winner_bid = obs_row['down_bid']
+        winner_ask = obs_row['down_ask']
+
+    # Match live behavior: bid + 0.01, capped at ask - 0.01
+    base_price = min(winner_bid + 0.01, winner_ask - 0.01)
+    base_price = round(base_price, 2)
+    base_price = max(0.01, min(0.95, base_price))
 
     # Determine shares for this cycle
     if cycle_shares is None:
@@ -495,7 +532,10 @@ def simulate_entry_with_grid(obs_row: pd.Series, config: OptConfig,
 
     orders = []
     for level in range(config.grid_levels):
-        price = base_price + (level * config.grid_spacing)
+        # Grid levels spread downward (more passive at higher levels)
+        price = base_price - (level * config.grid_spacing)
+        price = round(price, 2)
+        price = max(0.01, price)
         orders.append({
             'price': price,
             'size': shares_per_level,
@@ -508,10 +548,30 @@ def simulate_entry_with_grid(obs_row: pd.Series, config: OptConfig,
     return orders
 
 
-def check_order_fill(order: Dict, current_ask: float) -> bool:
-    """Check if a passive order would fill at current ask."""
-    # Order fills if ask drops to or below our bid price
-    return current_ask <= order['price']
+def check_order_fill(order: Dict, current_bid: float, current_ask: float,
+                     time_since_placed_ms: int) -> bool:
+    """Check if a passive order would fill.
+
+    More realistic than just checking ask <= price:
+    - Order fills if we're at or above best bid (competitive)
+    - And market is active (tight spread)
+    - And enough time has passed for execution
+
+    Args:
+        order: Order dict with 'price' field
+        current_bid: Current best bid price
+        current_ask: Current best ask price
+        time_since_placed_ms: Time since order was placed in ms
+
+    Returns:
+        True if order would fill
+    """
+    at_best_bid = order['price'] >= current_bid
+    spread = current_ask - current_bid
+    active_market = spread <= 0.03
+    min_time_elapsed = time_since_placed_ms >= 500  # 500ms minimum
+
+    return at_best_bid and active_market and min_time_elapsed
 
 
 def check_order_pull(order: Dict, current_ts: int, config: OptConfig,
@@ -628,8 +688,10 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
 
             if winner_side == "UP":
                 current_ask = scan_row['up_ask']
+                current_bid = scan_row['up_bid']
             else:
                 current_ask = scan_row['down_ask']
+                current_bid = scan_row['down_bid']
 
             # Check each unfilled order
             for order in winner_orders:
@@ -641,8 +703,9 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
                     pulled = True
                     break
 
-                # Check for fill
-                if check_order_fill(order, current_ask):
+                # Check for fill (Option A: at best bid with time requirement)
+                time_since_placed = scan_ts - order['placed_at']
+                if check_order_fill(order, current_bid, current_ask, time_since_placed):
                     order['filled'] = True
                     order['fill_price'] = order['price']  # Limit order fill at our price
                     total_winner_filled += order['size']
@@ -674,8 +737,8 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
         # Calculate average winner entry price
         avg_winner_entry = total_winner_cost / total_winner_filled if total_winner_filled > 0 else 0
 
-        # Calculate loser bid target
-        loser_target = calc_loser_bid(avg_winner_entry, spike_mag)
+        # Calculate loser bid target (v2: includes regime adjustment)
+        loser_target = calc_loser_bid(avg_winner_entry, spike_mag, regime)
 
         # Scan forward for hedge
         hedge_type = "resolution"

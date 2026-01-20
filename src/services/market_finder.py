@@ -876,6 +876,104 @@ class MarketFinder:
 
         return active_markets
 
+    async def get_market_resolution(self, slug: str) -> Optional[str]:
+        """
+        Get the resolution (winner) for a settled market.
+
+        Queries the Gamma API and checks outcomePrices to determine winner.
+        - outcomePrices: ["1", "0"] means first outcome (Up) won
+        - outcomePrices: ["0", "1"] means second outcome (Down) won
+
+        Args:
+            slug: Market slug (e.g., 'btc-updown-15m-1768343400')
+
+        Returns:
+            "UP" or "DOWN" if resolved, None if not resolved or error
+        """
+        client = await self._get_client()
+
+        try:
+            url = f"{self.GAMMA_API_URL}/events?slug={slug}"
+            response = await client.get(url, timeout=10.0)
+            response.raise_for_status()
+            data = response.json()
+
+            if not data:
+                logger.warning(f"[RESOLUTION] Market not found: {slug}")
+                return None
+
+            event = data[0]
+            market = event.get("markets", [{}])[0]
+
+            # Check if market is closed/resolved
+            closed = market.get("closed", False)
+            resolution_status = market.get("umaResolutionStatus", "")
+
+            if not closed and resolution_status != "resolved":
+                logger.debug(f"[RESOLUTION] Market not yet resolved: {slug}")
+                return None
+
+            # Parse outcomes and prices
+            import json
+            outcomes_str = market.get("outcomes", "[]")
+            prices_str = market.get("outcomePrices", "[]")
+
+            outcomes = json.loads(outcomes_str) if isinstance(outcomes_str, str) else outcomes_str
+            prices = json.loads(prices_str) if isinstance(prices_str, str) else prices_str
+
+            if not prices:
+                logger.warning(f"[RESOLUTION] No outcome prices for: {slug}")
+                return None
+
+            # Find winner (price == "1" or 1)
+            for i, price in enumerate(prices):
+                if str(price) == "1":
+                    if i < len(outcomes):
+                        winner = outcomes[i].upper()
+                        logger.info(f"[RESOLUTION] {slug} resolved to {winner}")
+                        return winner
+
+            logger.warning(f"[RESOLUTION] Could not determine winner for: {slug}")
+            return None
+
+        except Exception as e:
+            logger.warning(f"[RESOLUTION] Failed to get resolution for {slug}: {e}")
+            return None
+
+    async def wait_for_resolution(
+        self,
+        slug: str,
+        timeout_seconds: float = 120.0,
+        poll_interval: float = 5.0,
+    ) -> Optional[str]:
+        """
+        Wait for a market to resolve and return the winner.
+
+        Useful for tracking unhedged positions after market ends.
+
+        Args:
+            slug: Market slug
+            timeout_seconds: Maximum time to wait for resolution
+            poll_interval: Seconds between resolution checks
+
+        Returns:
+            "UP" or "DOWN" if resolved within timeout, None otherwise
+        """
+        import asyncio
+
+        start_time = time.time()
+        logger.info(f"[RESOLUTION] Waiting for {slug} to resolve (timeout={timeout_seconds}s)")
+
+        while time.time() - start_time < timeout_seconds:
+            resolution = await self.get_market_resolution(slug)
+            if resolution:
+                return resolution
+
+            await asyncio.sleep(poll_interval)
+
+        logger.warning(f"[RESOLUTION] Timeout waiting for {slug} to resolve")
+        return None
+
     def __repr__(self) -> str:
         """String representation."""
         return f"MarketFinder(timeout={self.timeout})"

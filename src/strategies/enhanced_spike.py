@@ -48,14 +48,19 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 # Spike detection parameters (REPLACES velocity thresholds)
-DEFAULT_SPIKE_LOOKBACK = 3       # 3 ticks (~600ms at 5 ticks/sec)
-DEFAULT_SPIKE_THRESHOLD = 0.02  # 0.02% minimum to trigger (~$20 on $100k BTC)
+# Updated Jan 20, 2026 from optimizer results (spike_param_optimizer_taker.py)
+# Best config: 1400ms lookback, 12% SL, 50 shares
+DEFAULT_SPIKE_LOOKBACK = 7       # 7 ticks = 1400ms at 5Hz (was 3 = 600ms)
+DEFAULT_SPIKE_THRESHOLD = 0.02  # 0.02% minimum spike magnitude
 SPIKE_HISTORY_SIZE = 50         # Keep last 50 prices for spike detection
 
-# Magnitude → Loser Bid linear model coefficients
-# expected_drop = DROP_MULTIPLIER * magnitude_pct + DROP_INTERCEPT
-DROP_MULTIPLIER = 0.68          # From linear regression on observer data
-DROP_INTERCEPT = 0.01           # Base expected drop ($0.01)
+# Magnitude → Loser Bid linear model coefficients (v2: recalibrated Jan 18, 2026)
+# See research/HEDGE_PRICING_FINDINGS.md for analysis details
+# Old formula (0.68 * spike + 0.01) severely underpredicted drops (predicted 0.03, actual 0.10)
+# expected_drop = DROP_MULTIPLIER * magnitude_pct + DROP_INTERCEPT + regime_bonus
+DROP_MULTIPLIER = 0.50          # Reduced from 0.68 - spike has weak predictive power
+DROP_INTERCEPT = 0.08           # Increased from 0.01 - matches actual mean drop better
+DROP_REGIME_BONUS = {'LOW': 0.0, 'MEDIUM': 0.01, 'HIGH': 0.02}  # Regime adjustment
 
 # Target pair cost for magnitude-based bidding
 DEFAULT_TARGET_PAIR_COST = 0.99  # Target sub-$1 for profit
@@ -129,7 +134,7 @@ FORCE_REBALANCE_OFFSET = 0.005
 # Polymarket constraints
 MIN_SHARES = 5
 DEFAULT_BASE_SIZE = 15
-DEFAULT_TARGET_SHARES = 100
+DEFAULT_TARGET_SHARES = 50       # Updated from optimizer: 50 > 30 > 15
 DEFAULT_MIN_PROFIT = 0.005
 DEFAULT_MAX_SHARE_PRICE = 0.95
 DEFAULT_ENABLE_CYCLING = True
@@ -137,8 +142,9 @@ DEFAULT_ENABLE_CYCLING = True
 # Zone filtering (LEGACY - spike threshold is the new filter)
 DEFAULT_MIN_VELOCITY_BPS = 0.50
 
-# Stop-loss configuration (None = disabled, backtest shows SL hurts in low volatility)
-DEFAULT_STOP_LOSS_PCT = None
+# Stop-loss configuration
+# Updated Jan 20, 2026: 12% SL optimal - prevents resolution losses, 19.6% trigger rate
+DEFAULT_STOP_LOSS_PCT = 0.12     # 12% stop-loss (was None)
 
 # Timing (reduced from 120s based on backtest results)
 MIN_TIME_REMAINING = 60
@@ -428,23 +434,27 @@ class EnhancedSpikeStrategy:
         magnitude_pct: float,
         loser_ask: float,
         winner_entry: float,
+        regime: str = "MEDIUM",
     ) -> float:
         """
-        Calculate optimal loser bid based on BTC spike magnitude.
+        Calculate optimal loser bid based on BTC spike magnitude (v2).
 
-        Uses linear model from observer data:
-        expected_drop = 0.68 * magnitude_pct + 0.01
+        Uses recalibrated model from hedge_pricing_analysis.py:
+        expected_drop = 0.50 * magnitude_pct + 0.08 + regime_bonus
 
         Args:
             magnitude_pct: Absolute BTC % change (e.g., 0.05 for 0.05%)
             loser_ask: Current loser side ask price
             winner_entry: Price we paid for winner
+            regime: Volatility regime ('LOW', 'MEDIUM', 'HIGH')
 
         Returns:
             Optimal loser bid price
         """
-        # Expected drop from linear model
-        expected_drop = DROP_MULTIPLIER * magnitude_pct + DROP_INTERCEPT
+        # Expected drop from recalibrated model (v2)
+        regime_bonus = DROP_REGIME_BONUS.get(regime, 0.01)
+        expected_drop = DROP_MULTIPLIER * magnitude_pct + DROP_INTERCEPT + regime_bonus
+        expected_drop = max(0.02, min(0.20, expected_drop))  # Clamp to reasonable range
 
         # Maximum we can pay and still achieve target pair cost
         max_loser = self.target_pair_cost - winner_entry
@@ -1025,8 +1035,8 @@ class EnhancedSpikeStrategy:
 
             # Use aggressive entry (at or near ask) when spike detected
             if spike_direction is not None:
-                # In spike mode, be more aggressive - bid closer to ask
-                entry_price = min(winner_bid + 0.01, winner_ask - 0.001)
+                # In spike mode, be more aggressive - bid at bid + 0.01, capped at ask - 0.01
+                entry_price = min(winner_bid + 0.01, winner_ask - 0.01)
             else:
                 # Legacy velocity-based entry
                 up_offset, down_offset = self.calculate_offsets(velocity_bps)
@@ -1540,21 +1550,25 @@ def calculate_magnitude_loser_bid(
     magnitude_pct: float,
     loser_ask: float,
     winner_entry: float,
-    target_pair: float = 0.99
+    target_pair: float = 0.99,
+    regime: str = "MEDIUM",
 ) -> float:
     """
-    Standalone loser bid calculation based on spike magnitude.
+    Standalone loser bid calculation based on spike magnitude (v2).
 
     Args:
         magnitude_pct: Absolute BTC % change
         loser_ask: Current loser side ask price
         winner_entry: Price we paid for winner
         target_pair: Target pair cost (default $0.99)
+        regime: Volatility regime ('LOW', 'MEDIUM', 'HIGH')
 
     Returns:
         Optimal loser bid price
     """
-    expected_drop = DROP_MULTIPLIER * magnitude_pct + DROP_INTERCEPT
+    regime_bonus = DROP_REGIME_BONUS.get(regime, 0.01)
+    expected_drop = DROP_MULTIPLIER * magnitude_pct + DROP_INTERCEPT + regime_bonus
+    expected_drop = max(0.02, min(0.20, expected_drop))
     max_loser = target_pair - winner_entry
     loser_bid = min(loser_ask - expected_drop, max_loser)
     return max(loser_bid, 0.01)

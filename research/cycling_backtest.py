@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict
 from collections import defaultdict
 
-# Strategy config (Zone 5-6 + 7% stop-loss)
+# Strategy config (Zone 5-6 + 12% stop-loss)
 SHARES = 15
 WINNER_OFFSET = +0.01
 LOSER_OFFSET = -0.12
