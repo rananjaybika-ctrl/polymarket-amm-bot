@@ -42,6 +42,14 @@ from src.services.dry_run import (
 )
 from src.services.auto_redeemer import AutoRedeemer
 from src.services.orderbook_cache import OrderbookCache, OrderbookManager
+from src.services.volatility_tracker import (
+    LiveZScoreTracker,
+    OUParams,
+    create_zscore_tracker,
+    create_aggressive_tracker,
+    create_balanced_tracker,
+    create_conservative_tracker,
+)
 
 __all__ = [
     "MarketFinder",
@@ -73,4 +81,10 @@ __all__ = [
     "AutoRedeemer",
     "OrderbookCache",
     "OrderbookManager",
+    "LiveZScoreTracker",
+    "OUParams",
+    "create_zscore_tracker",
+    "create_aggressive_tracker",
+    "create_balanced_tracker",
+    "create_conservative_tracker",
 ]

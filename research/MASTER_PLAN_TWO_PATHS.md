@@ -1,7 +1,7 @@
 # MASTER PLAN: Two Paths to Profitable Trading
 
-**Date:** January 18, 2026
-**Status:** OOS VALIDATED - Ready for production optimizer run
+**Date:** January 18, 2026 (Updated: January 22, 2026)
+**Status:** CONFIGS VALIDATED - Three production configs ready with adaptive stop selection
 **Objective:** Create a repeatable edge through one of two validated approaches
 
 ### OOS Validation Status: PASSED
@@ -9,6 +9,36 @@
 - Mean 60s drop: 0.1367 (range [0.05, 0.15]) ✓
 - Passive fill rate: 100% (threshold ≥50%) ✓
 - See: `HANDOVER_HEDGE_PRICING_JAN18.md` for details
+
+---
+
+## JAN 22 UPDATE: FINAL VALIDATED CONFIGS
+
+### Grid Search Complete (1440 configs tested on 81.71 hours)
+- Volatility filter validated: Z-zone 0<z<1.5 best
+- Adaptive threshold method: OU beats EWMA
+- **Critical Finding:** Stop type depends on config style
+
+### Three Production Configs
+
+| Config | Stop Type | PnL @50sh | $/hr | Win% |
+|--------|-----------|-----------|------|------|
+| **AGGRESSIVE** | **180s TIME** | **$289.49** | **$9.53** | 66.7% |
+| BALANCED | 15% PRICE | $271.19 | $6.15 | 70.7% |
+| CONSERVATIVE | 15% PRICE | $209.76 | $6.19 | 75.0% |
+
+### Stop Type Selection Rule (r = -0.84 correlation)
+```
+Cycling OFF?                          → PRICE STOP
+Cycling ON + OU z-score?              → PRICE STOP
+Cycling ON + EWMA z-score + WR<61%?   → TIME STOP
+```
+
+### See: Jan 22 Findings Files
+- `research/FINAL_TRADING_CONFIGS_JAN22.md` - **Production config specs**
+- `research/TIME_STOP_STATISTICAL_ANALYSIS.md` - Statistical analysis
+- `research/VOL_FILTER_GRID_SEARCH_FINDINGS_JAN22.md` - Full grid search
+- `research/TRADING_CONFIGS.py` - Config definitions (Python)
 
 ---
 
@@ -204,3 +234,19 @@ python research/spike_param_optimizer.py --path path2 --output research/path2_re
 | `research/HEDGE_PRICING_FINDINGS.md` | Hedge formula recalibration results |
 | `research/HANDOVER_JAN18.md` | **OOS VALIDATED** - Full session handover (hedge pricing + optimizer) |
 | `research/MASTER_PLAN_TWO_PATHS.md` | This file |
+
+### Jan 22 Findings (Volatility Filter + Adaptive Stops)
+| File | Purpose |
+|------|---------|
+| `research/FINAL_TRADING_CONFIGS_JAN22.md` | **PRODUCTION CONFIGS** - Three validated configs with stop specs |
+| `research/TRADING_CONFIGS.py` | Python config definitions for backtesting |
+| `research/VOL_FILTER_GRID_SEARCH_FINDINGS_JAN22.md` | Full 1440-config grid search analysis |
+| `research/TIME_STOP_STATISTICAL_ANALYSIS.md` | Statistical analysis of time vs price stops |
+| `research/TIME_BASED_STOP_FINDINGS.md` | Time-based stop test results |
+| `research/volatility_filter_analysis.py` | Backtest with z-score filtering |
+| `research/validate_three_configs.py` | Validation script for 3 configs |
+| `research/three_config_validation_results.csv` | Validation output |
+| `research/vol_filter_grid_results_all_combined.csv` | Full grid search results (1440 rows) |
+| `research/time_stop_top50_results.csv` | Time-stop vs price-stop comparison |
+| `research/stop_out_analysis_results.csv` | Stop-out breakdown for top 10 |
+| `src/services/volatility_tracker.py` | **LiveZScoreTracker** for production |
