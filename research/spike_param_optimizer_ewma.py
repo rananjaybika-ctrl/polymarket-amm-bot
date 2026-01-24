@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Enhanced Spike Parameter Optimization Grid Search - TAKER ENTRY VERSION
+Enhanced Spike Parameter Optimization - PURE EWMA THRESHOLD VERSION
 
-This is a copy of spike_param_optimizer.py modified to use TAKER entry logic
-instead of MAKER entry logic, with taker fee calculations.
+This optimizer uses pure EWMA (Exponential Weighted Moving Average) for adaptive
+thresholds instead of OU (Ornstein-Uhlenbeck) process.
 
-Key differences from maker version:
-- Entry price: winner_ask (taker - immediate fill) instead of min(bid+0.01, ask-0.01) (maker)
-- Entry fills immediately (no order fill simulation needed)
-- Taker fees deducted from PnL
+EWMA Threshold Logic:
+    - EWMA_fast: Short-term volatility (e.g., 60s halflife)
+    - EWMA_slow: Baseline volatility (e.g., 300s halflife)
+    - ratio = EWMA_fast / EWMA_slow
+    - threshold = base_threshold * ratio (bounded by min/max)
+
+Simpler than OU - no calibration needed, self-adapting baseline.
 
 Taker Fee Formula (Polymarket):
     fee_rate = 0.0156 * (1 - abs(2 * price - 1))
@@ -85,54 +88,93 @@ REGIME_THRESHOLDS = {
     "HIGH": 0.035,
 }
 
-# OU-based adaptive threshold parameters (see PLAN_OU_ADAPTIVE_THRESHOLD.md)
-OU_BASE_THRESHOLD = 0.02
-OU_K_LOW = 0.5
-OU_K_HIGH = 1.75
-OU_SIGMOID_STEEPNESS = 1.5
-OU_MIN_THRESHOLD = 0.015  # Raised from 0.005 to filter noise (backtested Jan 20)
-OU_MAX_THRESHOLD = 0.10
-
-# Global OU parameters (loaded at runtime if --threshold-method=ou)
-_ou_params = None
+# EWMA-based adaptive threshold parameters
+EWMA_BASE_THRESHOLD = 0.02
+EWMA_MIN_THRESHOLD = 0.010  # Floor
+EWMA_MAX_THRESHOLD = 0.10   # Ceiling
+EWMA_MIN_RATIO = 0.5        # Minimum multiplier
+EWMA_MAX_RATIO = 3.0        # Maximum multiplier
 
 
-def load_ou_params(filepath: str):
-    """Load OU parameters from JSON file."""
-    global _ou_params
-    try:
-        from src.strategies.ou_volatility import OUParameters
-        _ou_params = OUParameters.load(filepath)
-        print(f"[OU] Loaded parameters: μ={_ou_params.mu:.4f}, σ_stat={_ou_params.sigma_stat:.4f}, half_life={_ou_params.half_life_sec:.1f}s")
-    except Exception as e:
-        print(f"[OU] ERROR loading parameters from {filepath}: {e}")
-        _ou_params = None
-
-
-def compute_ou_threshold(volatility: float) -> float:
+class EWMAThresholdTracker:
     """
-    Compute OU-based adaptive threshold from volatility.
+    Pure EWMA-based adaptive threshold.
 
-    Uses sigmoid mapping on z-score: threshold = base * multiplier
-    where multiplier = k_low + (k_high - k_low) / (1 + exp(-steepness * z))
+    Uses two EWMA windows:
+    - Fast EWMA: tracks current volatility
+    - Slow EWMA: tracks baseline volatility
+    - Ratio = fast/slow determines threshold multiplier
     """
-    global _ou_params
-    if _ou_params is None:
-        return OU_BASE_THRESHOLD  # Fallback to base threshold
 
-    # Compute z-score
-    vol = max(volatility, 1e-6)
-    log_vol = math.log(vol)
-    z_score = (log_vol - _ou_params.mu) / _ou_params.sigma_stat
+    def __init__(self, fast_halflife_sec: float = 60, slow_halflife_sec: float = 300,
+                 tick_interval_sec: float = 1/60):
+        self.fast_halflife = fast_halflife_sec
+        self.slow_halflife = slow_halflife_sec
+        self.tick_interval = tick_interval_sec
 
-    # Sigmoid mapping
-    z_clamped = max(-10, min(10, z_score * OU_SIGMOID_STEEPNESS))
-    sigmoid = 1.0 / (1.0 + math.exp(-z_clamped))
-    multiplier = OU_K_LOW + (OU_K_HIGH - OU_K_LOW) * sigmoid
+        # Compute decay factors (alpha = 1 - exp(-ln(2) * dt / halflife))
+        self.fast_alpha = 1 - math.exp(-math.log(2) * tick_interval_sec / fast_halflife_sec)
+        self.slow_alpha = 1 - math.exp(-math.log(2) * tick_interval_sec / slow_halflife_sec)
 
-    # Compute threshold with bounds
-    threshold = OU_BASE_THRESHOLD * multiplier
-    return max(OU_MIN_THRESHOLD, min(OU_MAX_THRESHOLD, threshold))
+        self.fast_var = None  # EWMA of squared returns
+        self.slow_var = None
+        self.last_price = None
+        self.initialized = False
+
+    def update(self, price: float) -> float:
+        """Update with new price, return adaptive threshold."""
+        if self.last_price is None:
+            self.last_price = price
+            return EWMA_BASE_THRESHOLD
+
+        # Compute return
+        ret = (price - self.last_price) / self.last_price
+        ret_sq = ret * ret
+        self.last_price = price
+
+        # Initialize or update EWMA
+        if self.fast_var is None:
+            self.fast_var = ret_sq
+            self.slow_var = ret_sq
+            return EWMA_BASE_THRESHOLD
+
+        self.fast_var = self.fast_alpha * ret_sq + (1 - self.fast_alpha) * self.fast_var
+        self.slow_var = self.slow_alpha * ret_sq + (1 - self.slow_alpha) * self.slow_var
+
+        # Compute ratio (with floor to avoid division issues)
+        slow_vol = math.sqrt(max(self.slow_var, 1e-12))
+        fast_vol = math.sqrt(max(self.fast_var, 1e-12))
+
+        ratio = fast_vol / slow_vol if slow_vol > 1e-8 else 1.0
+        ratio = max(EWMA_MIN_RATIO, min(EWMA_MAX_RATIO, ratio))
+
+        # Compute threshold
+        threshold = EWMA_BASE_THRESHOLD * ratio
+        return max(EWMA_MIN_THRESHOLD, min(EWMA_MAX_THRESHOLD, threshold))
+
+    def get_current_ratio(self) -> float:
+        """Get current fast/slow ratio."""
+        if self.fast_var is None or self.slow_var is None:
+            return 1.0
+        slow_vol = math.sqrt(max(self.slow_var, 1e-12))
+        fast_vol = math.sqrt(max(self.fast_var, 1e-12))
+        return fast_vol / slow_vol if slow_vol > 1e-8 else 1.0
+
+
+def compute_ewma_thresholds_for_btc(btc_df: pd.DataFrame, fast_halflife: float, slow_halflife: float) -> pd.Series:
+    """
+    Pre-compute EWMA thresholds for all BTC prices.
+
+    Returns a Series indexed by timestamp_ms with threshold values.
+    """
+    tracker = EWMAThresholdTracker(fast_halflife_sec=fast_halflife, slow_halflife_sec=slow_halflife)
+    thresholds = []
+
+    for price in btc_df['price'].values:
+        threshold = tracker.update(price)
+        thresholds.append(threshold)
+
+    return pd.Series(thresholds, index=btc_df['timestamp_ms'].values)
 
 # =============================================================================
 # TAKER FEE CALCULATION
@@ -187,6 +229,9 @@ class OptConfig:
     spike_lookback: int   # ticks at 60Hz
     stop_loss_pct: Optional[float]
     order_pulling: bool
+    # EWMA adaptive threshold parameters
+    ewma_fast_halflife: float = 60.0   # Fast EWMA halflife in seconds
+    ewma_slow_halflife: float = 300.0  # Slow EWMA halflife in seconds
     # NOTE: order_pull_timeout (40s) was REMOVED - it was never used for hedge orders
     # Hedge orders either fill passively, get stopped out, or ride to resolution
     entry_order_pull_timeout: float = 10.0  # seconds (entry order timeout - Path 1)
@@ -217,6 +262,7 @@ class OptConfig:
     def __hash__(self):
         return hash((self.target_shares, self.grid_levels, self.grid_spacing,
                     self.spike_lookback, self.stop_loss_pct, self.order_pulling,
+                    self.ewma_fast_halflife, self.ewma_slow_halflife,
                     self.entry_order_pull_timeout, self.grid_buycount, self.use_cycling))
 
     def to_dict(self) -> dict:
@@ -230,6 +276,8 @@ class OptConfig:
             'use_cycling': self.use_cycling,
             'spike_lookback': self.spike_lookback,
             'lookback_ms': self.lookback_ms,
+            'ewma_fast_halflife': self.ewma_fast_halflife,
+            'ewma_slow_halflife': self.ewma_slow_halflife,
             'stop_loss_pct': self.stop_loss_pct,
             'order_pulling': self.order_pulling,
             'entry_order_pull_timeout': self.entry_order_pull_timeout,
@@ -321,43 +369,49 @@ def generate_param_grid(quick: bool = False, path: str = "both") -> List[OptConf
 
     Args:
         quick: If True, use reduced parameter space for quick testing
-        path: "path1" for entry pulling experiment, "both" for full grid
+        path: "path1" for entry pulling experiment,
+              "both" for full grid including all experiments
 
     Returns:
         List of OptConfig instances to test
     """
     configs = []
 
+    # EWMA halflife options to test
+    # Fast: 30s, 60s, 120s (1-2min window for current vol)
+    # Slow: 180s, 300s, 600s (3-10min window for baseline vol)
+    ewma_fast_options = [30.0, 60.0, 120.0]
+    ewma_slow_options = [180.0, 300.0, 600.0]
+
     if quick:
         # Quick test mode: reduced parameter space
-        target_shares_list = [10, 15]
-        grid_levels_list = [1, 2]
+        target_shares_list = [30, 50]
+        grid_levels_list = [1]
         grid_spacings = [0.01]
-        lookbacks = [36, 60]
-        stop_losses = [None, 0.12]
+        lookbacks = [60, 72]  # 1000ms, 1200ms
+        stop_losses = [0.12]
         order_pulling_opts = [False]
-        entry_pull_timeouts = [10.0]  # Default only
-        # Quick mode lookbacks and buycounts
-        path1_lookbacks = [60]  # 1000ms only for quick test
-        grid_buycount_path1 = [1, 2]  # Reduced for quick test
+        entry_pull_timeouts = [10.0]
+        path1_lookbacks = [60, 72]
+        grid_buycount_path1 = [1, 2]
+        use_cycling_opts = [True]
+        ewma_fast_options = [60.0]  # Single for quick
+        ewma_slow_options = [300.0]  # Single for quick
     else:
-        # Full grid
-        # target_shares is the TOTAL shares per trade (split across grid levels)
-        target_shares_list = [15, 30, 50]
-        grid_levels_list = [1, 2, 3]
-        grid_spacings = [0.01, 0.02]
-        lookbacks = [18, 24, 30, 60, 72, 84]  # ticks at 60Hz: 300, 400, 500, 1000, 1200, 1400ms
-        stop_losses = [0.07, 0.12, 0.15]  # Focused: 7% vs 12% (best) vs 15% - removed None per user request
-        order_pulling_opts = [False]  # Irrelevant for taker (immediate fill) - fixed to OFF
-        use_cycling_opts = [True, False]  # Test cycling ON vs OFF
+        # Full grid - simplified for EWMA testing
+        target_shares_list = [30, 50]  # Reduced from 3 to 2
+        grid_levels_list = [1]  # Fixed to 1 (simpler)
+        grid_spacings = [0.01]
+        lookbacks = [60, 72, 84]  # 1000, 1200, 1400ms at 60Hz
+        stop_losses = [0.07, 0.12, 0.15]
+        order_pulling_opts = [False]
+        use_cycling_opts = [True, False]
 
-        # PATH 1: Entry Order Pulling Experiment
-        # Test entry timeouts with 1000ms lookback (best balance of signals/accuracy)
-        entry_pull_timeouts = [3.0, 5.0, 10.0, 15.0]  # Removed 7s per user request
-        path1_lookbacks = [60, 72, 84]  # 1000, 1200, 1400ms at 60Hz
+        # PATH 1 only for EWMA optimizer
+        entry_pull_timeouts = [5.0, 10.0, 15.0]  # Reduced from 4 to 3
+        path1_lookbacks = [60, 72, 84]
 
-        # Grid buycount: how many buy cycles per market
-        grid_buycount_path1 = [1, 2, 3, 5]
+        grid_buycount_path1 = [1, 2, 3]  # Reduced from 4 to 3
 
     for target_shares in target_shares_list:
         for grid_levels in grid_levels_list:
@@ -372,27 +426,33 @@ def generate_param_grid(quick: bool = False, path: str = "both") -> List[OptConf
                         for pulling in order_pulling_opts:
                             # Determine which experiments to run
                             if path == "path1":
-                                # PATH 1: Entry pulling with 1000ms, 1200ms, 1400ms lookbacks
-                                # Test both pulling ON and OFF to compare
+                                # PATH 1: Entry pulling with EWMA threshold testing
                                 if lookback not in path1_lookbacks:
                                     continue
                                 for entry_timeout in entry_pull_timeouts:
                                     for buycount in grid_buycount_path1:
                                         for cycling in use_cycling_opts:
-                                            # Skip invalid: order size < 5 shares (Polymarket min)
-                                            if target_shares // buycount < 5:
-                                                continue
-                                            configs.append(OptConfig(
-                                                target_shares=target_shares,
-                                                grid_levels=grid_levels,
-                                                grid_spacing=spacing,
-                                                spike_lookback=lookback,
-                                                stop_loss_pct=stop_loss,
-                                                order_pulling=pulling,
-                                                entry_order_pull_timeout=entry_timeout,
-                                                grid_buycount=buycount,
-                                                use_cycling=cycling,
-                                            ))
+                                            for ewma_fast in ewma_fast_options:
+                                                for ewma_slow in ewma_slow_options:
+                                                    # Skip invalid: slow must be > fast
+                                                    if ewma_slow <= ewma_fast:
+                                                        continue
+                                                    # Skip invalid: order size < 5 shares
+                                                    if target_shares // buycount < 5:
+                                                        continue
+                                                    configs.append(OptConfig(
+                                                        target_shares=target_shares,
+                                                        grid_levels=grid_levels,
+                                                        grid_spacing=spacing,
+                                                        spike_lookback=lookback,
+                                                        stop_loss_pct=stop_loss,
+                                                        order_pulling=pulling,
+                                                        ewma_fast_halflife=ewma_fast,
+                                                        ewma_slow_halflife=ewma_slow,
+                                                        entry_order_pull_timeout=entry_timeout,
+                                                        grid_buycount=buycount,
+                                                        use_cycling=cycling,
+                                                    ))
                             else:
                                 # Default: standard grid (backward compatible)
                                 configs.append(OptConfig(
@@ -432,17 +492,21 @@ def classify_regime_vectorized(atr_series: pd.Series, window: int = ATR_WINDOW) 
 
 
 def detect_spikes_for_lookback(btc_df: pd.DataFrame, lookback: int,
-                               threshold_method: str = "regime") -> pd.DataFrame:
+                               threshold_method: str = "ewma",
+                               ewma_fast_halflife: float = 60.0,
+                               ewma_slow_halflife: float = 300.0) -> pd.DataFrame:
     """
     Detect spikes using specified lookback period.
 
     Args:
         btc_df: DataFrame with timestamp_ms and price columns
         lookback: Number of ticks to look back for spike detection
-        threshold_method: One of "fixed", "regime", or "ou"
+        threshold_method: One of "fixed", "regime", or "ewma"
             - "fixed": Use fixed SPIKE_THRESHOLD (0.02%)
             - "regime": Use ATR-based regime thresholds (LOW/MEDIUM/HIGH)
-            - "ou": Use OU-based adaptive thresholds (requires _ou_params loaded)
+            - "ewma": Use pure EWMA adaptive thresholds (fast/slow ratio)
+        ewma_fast_halflife: Fast EWMA halflife in seconds (for "ewma" method)
+        ewma_slow_halflife: Slow EWMA halflife in seconds (for "ewma" method)
 
     Returns:
         DataFrame with spike detection results
@@ -455,27 +519,18 @@ def detect_spikes_for_lookback(btc_df: pd.DataFrame, lookback: int,
     df['change_pct'] = (df['price'] - df['price_prev']) / df['price_prev'] * 100
     df['magnitude'] = df['change_pct'].abs()
 
-    if threshold_method == "ou":
-        # OU-based adaptive threshold using EWMA volatility
-        # Compute rolling EWMA volatility
-        returns = df['price'].pct_change() * 100
-        ewma_halflife = 300  # 5 seconds at 60Hz
-        alpha = 1 - 0.5 ** (1.0 / ewma_halflife)
+    if threshold_method == "ewma":
+        # Pure EWMA adaptive threshold using fast/slow ratio
+        tracker = EWMAThresholdTracker(
+            fast_halflife_sec=ewma_fast_halflife,
+            slow_halflife_sec=ewma_slow_halflife
+        )
+        thresholds = []
+        for price in df['price'].values:
+            threshold = tracker.update(price)
+            thresholds.append(threshold)
 
-        # Initialize variance
-        variance = returns.iloc[:60].var() if len(returns) > 60 else 0.01
-        volatilities = []
-
-        for i, r in enumerate(returns):
-            if pd.isna(r):
-                volatilities.append(0.01)
-                continue
-            variance = alpha * (r ** 2) + (1 - alpha) * variance
-            vol = max(np.sqrt(variance), 1e-6)
-            volatilities.append(vol)
-
-        df['volatility'] = volatilities
-        df['threshold'] = df['volatility'].apply(compute_ou_threshold)
+        df['threshold'] = thresholds
         df['regime'] = df['threshold'].apply(lambda t:
             'LOW' if t < 0.015 else ('HIGH' if t > 0.025 else 'MEDIUM'))
         df['spike_detected'] = df['magnitude'] >= df['threshold']
@@ -756,6 +811,7 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
         # Scan forward for hedge
         hedge_type = "resolution"
         loser_fill = 0.0
+        entry_fill_ts = spike_ts  # For taker, entry fills at signal time
 
         for j in range(obs_idx + 1, len(mdf)):
             scan_row = mdf.iloc[j]
@@ -944,38 +1000,44 @@ def _run_config_worker(config: OptConfig) -> OptResult:
 
 
 def precompute_spikes(btc_df: pd.DataFrame, lookbacks: List[int],
-                      threshold_method: str = "regime") -> Dict[int, pd.DataFrame]:
+                      ewma_fast_halflife: float = 60.0,
+                      ewma_slow_halflife: float = 300.0) -> Dict[int, pd.DataFrame]:
     """
-    Pre-compute spikes for all lookback values.
+    Pre-compute spikes for all lookback values using EWMA threshold.
 
     Args:
         btc_df: Binance price DataFrame
         lookbacks: List of lookback tick values
-        threshold_method: "fixed", "regime", or "ou"
+        ewma_fast_halflife: Fast EWMA halflife in seconds
+        ewma_slow_halflife: Slow EWMA halflife in seconds
 
     Returns:
         Dict mapping lookback -> spikes DataFrame
     """
-    print(f"\nPre-computing spikes for all lookback values (method={threshold_method})...")
+    print(f"\nPre-computing spikes (EWMA fast={ewma_fast_halflife}s, slow={ewma_slow_halflife}s)...")
     spikes_by_lookback = {}
 
     for lookback in lookbacks:
         ms = lookback * 1000 // 60
         print(f"  Lookback {lookback} ticks ({ms}ms)...", end=' ', flush=True)
-        spikes_df = detect_spikes_for_lookback(btc_df, lookback, threshold_method)
-        # Filter out LOW regime spikes (48% accuracy = worse than coin flip)
+        spikes_df = detect_spikes_for_lookback(
+            btc_df, lookback,
+            threshold_method="ewma",
+            ewma_fast_halflife=ewma_fast_halflife,
+            ewma_slow_halflife=ewma_slow_halflife
+        )
+        # Filter out LOW regime spikes (worse than coin flip)
         spikes_only = spikes_df[
             (spikes_df['spike_detected'] == True) &
             (spikes_df['regime'] != 'LOW')
         ].copy()
         spikes_by_lookback[lookback] = spikes_only
 
-        # Show threshold stats for OU method
-        if threshold_method == "ou" and len(spikes_only) > 0:
+        if len(spikes_only) > 0:
             mean_thresh = spikes_only['threshold'].mean()
             print(f"{len(spikes_only):,} spikes (mean threshold={mean_thresh:.4f}%)")
         else:
-            print(f"{len(spikes_only):,} spikes (excl. LOW regime)")
+            print(f"0 spikes")
 
     return spikes_by_lookback
 
@@ -983,68 +1045,84 @@ def precompute_spikes(btc_df: pd.DataFrame, lookbacks: List[int],
 def run_optimization(btc_df: pd.DataFrame, obs_df: pd.DataFrame, hours: float,
                      market_resolutions: Dict[str, str], n_workers: int = 4,
                      quick: bool = False, path: str = "both",
-                     slippage: float = 0.0,
-                     threshold_method: str = "regime") -> List[OptResult]:
-    """Run all configurations in parallel."""
+                     slippage: float = 0.0) -> List[OptResult]:
+    """Run all configurations in parallel, grouped by EWMA parameters."""
     configs = generate_param_grid(quick=quick, path=path)
     print(f"\nTotal configurations to test: {len(configs)}")
     print(f"Entry slippage: +${slippage:.2f} above ask")
-    print(f"Threshold method: {threshold_method}")
+    print(f"Threshold method: EWMA (pure)")
+
+    # Group configs by (ewma_fast, ewma_slow) since spike detection depends on these
+    from collections import defaultdict
+    configs_by_ewma = defaultdict(list)
+    for c in configs:
+        key = (c.ewma_fast_halflife, c.ewma_slow_halflife)
+        configs_by_ewma[key].append(c)
+
+    ewma_combos = list(configs_by_ewma.keys())
+    print(f"Unique EWMA combos to test: {len(ewma_combos)}")
+    for fast, slow in sorted(ewma_combos):
+        print(f"  fast={fast}s, slow={slow}s: {len(configs_by_ewma[(fast, slow)])} configs")
 
     # Get unique lookback values
     lookbacks = list(set(c.spike_lookback for c in configs))
     print(f"Unique lookback values: {lookbacks}")
 
-    # Pre-compute spikes for all lookback values (major optimization)
-    spikes_by_lookback = precompute_spikes(btc_df, lookbacks, threshold_method=threshold_method)
-
     results = []
     start_time = time.time()
+    total_completed = 0
 
-    if n_workers == 1:
-        # Sequential execution for debugging
-        for i, config in enumerate(configs):
-            result = run_single_config(config, spikes_by_lookback, obs_df, hours, market_resolutions, slippage)
-            results.append(result)
-            if (i + 1) % 10 == 0 or (i + 1) == len(configs):
-                elapsed = time.time() - start_time
-                rate = (i + 1) / elapsed
-                remaining = (len(configs) - i - 1) / rate if rate > 0 else 0
-                print(f"  Progress: {i+1}/{len(configs)} ({(i+1)/len(configs)*100:.1f}%) "
-                      f"- ETA: {remaining/60:.1f}m")
-    else:
-        # Parallel execution using fork for data sharing
-        ctx = mp.get_context('fork')  # Use fork to share memory on macOS/Linux
+    # Process each EWMA combo separately (spikes depend on EWMA params)
+    for combo_idx, (ewma_fast, ewma_slow) in enumerate(sorted(ewma_combos)):
+        combo_configs = configs_by_ewma[(ewma_fast, ewma_slow)]
+        print(f"\n--- EWMA combo {combo_idx+1}/{len(ewma_combos)}: fast={ewma_fast}s, slow={ewma_slow}s ---")
 
-        # Set up global data first (for fork-based sharing)
-        global _GLOBAL_SPIKES_BY_LOOKBACK, _GLOBAL_OBS_DF, _GLOBAL_HOURS, _GLOBAL_RESOLUTIONS, _GLOBAL_SLIPPAGE
-        _GLOBAL_SPIKES_BY_LOOKBACK = spikes_by_lookback
-        _GLOBAL_OBS_DF = obs_df
-        _GLOBAL_HOURS = hours
-        _GLOBAL_RESOLUTIONS = market_resolutions
-        _GLOBAL_SLIPPAGE = slippage
+        # Pre-compute spikes for this EWMA combo
+        spikes_by_lookback = precompute_spikes(
+            btc_df, lookbacks,
+            ewma_fast_halflife=ewma_fast,
+            ewma_slow_halflife=ewma_slow
+        )
 
-        with ctx.Pool(processes=n_workers) as pool:
-            # Use imap_unordered for better progress tracking
-            completed = 0
-            for result in pool.imap_unordered(_run_config_worker, configs, chunksize=1):
+        if n_workers == 1:
+            # Sequential execution for debugging
+            for i, config in enumerate(combo_configs):
+                result = run_single_config(config, spikes_by_lookback, obs_df, hours, market_resolutions, slippage)
                 results.append(result)
-                completed += 1
+                total_completed += 1
+        else:
+            # Parallel execution using fork for data sharing
+            ctx = mp.get_context('fork')
 
-                if completed % 20 == 0 or completed == len(configs):
-                    elapsed = time.time() - start_time
-                    rate = completed / elapsed
-                    remaining = (len(configs) - completed) / rate if rate > 0 else 0
-                    pct = completed / len(configs) * 100
-                    bar_len = 30
-                    filled = int(bar_len * completed / len(configs))
-                    bar = '#' * filled + '-' * (bar_len - filled)
-                    print(f"\rProgress: [{bar}] {pct:.0f}% ({completed}/{len(configs)}) "
-                          f"- ETA: {remaining/60:.1f}m", end='', flush=True)
+            global _GLOBAL_SPIKES_BY_LOOKBACK, _GLOBAL_OBS_DF, _GLOBAL_HOURS, _GLOBAL_RESOLUTIONS, _GLOBAL_SLIPPAGE
+            _GLOBAL_SPIKES_BY_LOOKBACK = spikes_by_lookback
+            _GLOBAL_OBS_DF = obs_df
+            _GLOBAL_HOURS = hours
+            _GLOBAL_RESOLUTIONS = market_resolutions
+            _GLOBAL_SLIPPAGE = slippage
 
-    print()  # Newline after progress
+            with ctx.Pool(processes=n_workers) as pool:
+                combo_completed = 0
+                for result in pool.imap_unordered(_run_config_worker, combo_configs, chunksize=1):
+                    results.append(result)
+                    combo_completed += 1
+                    total_completed += 1
+
+                    if combo_completed % 20 == 0 or combo_completed == len(combo_configs):
+                        elapsed = time.time() - start_time
+                        rate = total_completed / elapsed if elapsed > 0 else 1
+                        remaining = (len(configs) - total_completed) / rate if rate > 0 else 0
+                        pct = total_completed / len(configs) * 100
+                        bar_len = 30
+                        filled = int(bar_len * total_completed / len(configs))
+                        bar = '#' * filled + '-' * (bar_len - filled)
+                        print(f"\rProgress: [{bar}] {pct:.0f}% ({total_completed}/{len(configs)}) "
+                              f"- ETA: {remaining/60:.1f}m", end='', flush=True)
+
+        print()  # Newline after this combo
+
     elapsed = time.time() - start_time
-    print(f"Completed in {elapsed/60:.1f} minutes ({elapsed/len(configs):.2f}s per config)")
+    print(f"\nCompleted in {elapsed/60:.1f} minutes ({elapsed/len(configs):.2f}s per config)")
 
     return results
 
@@ -1387,7 +1465,7 @@ def save_results(results: List[OptResult], output_path: str):
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Enhanced Spike Parameter Optimization Grid Search - TAKER ENTRY VERSION",
+        description="Enhanced Spike Parameter Optimization - PURE EWMA THRESHOLD VERSION",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
@@ -1403,21 +1481,15 @@ def parse_args():
                         help="Path to observer CSV file")
     parser.add_argument("--res-file", type=str, default=None,
                         help="Path to market resolutions CSV file")
-    parser.add_argument("--path", type=str, default="both",
+    parser.add_argument("--path", type=str, default="path1",
                         choices=["path1", "both"],
-                        help="Experiment path: path1=entry pulling (1000-1400ms), both=full grid")
+                        help="Experiment path (default: path1 for EWMA testing)")
     parser.add_argument("--slippage", type=float, default=0.0,
                         help="Entry slippage above ask (e.g., 0.01 means fill at ask+0.01)")
     parser.add_argument("--start-ts", type=int, default=None,
                         help="Filter data to only include timestamps >= this (ms)")
     parser.add_argument("--end-ts", type=int, default=None,
                         help="Filter data to only include timestamps <= this (ms)")
-    parser.add_argument("--threshold-method", type=str, default="regime",
-                        choices=["fixed", "regime", "ou"],
-                        help="Spike threshold method: fixed (0.02%%), regime (ATR-based), "
-                             "ou (Ornstein-Uhlenbeck adaptive)")
-    parser.add_argument("--ou-params", type=str, default="research/ou_params.json",
-                        help="Path to OU parameters JSON file (for --threshold-method=ou)")
 
     return parser.parse_args()
 
@@ -1426,24 +1498,15 @@ def main():
     args = parse_args()
 
     print("=" * 110)
-    print("ENHANCED SPIKE PARAMETER OPTIMIZATION - TAKER ENTRY (with fees)")
+    print("ENHANCED SPIKE PARAMETER OPTIMIZATION - PURE EWMA THRESHOLD")
     print("=" * 110)
     print()
     print("Entry Logic: TAKER (fill at ask, immediate execution)")
-    print("Fee Formula: 0.0156 * (1 - |2*price - 1|)")
-    print("  - Max fee at 50%: 1.56%")
-    print("  - Min fee at extremes: ~0.31%")
+    print("Threshold:   EWMA ratio (fast_vol / slow_vol)")
+    print("  - fast_vol: Short-term EWMA (30s, 60s, 120s halflife)")
+    print("  - slow_vol: Baseline EWMA (180s, 300s, 600s halflife)")
+    print("  - threshold = base × clamp(ratio, 0.5, 3.0)")
     print()
-
-    # Load OU parameters if using OU threshold method
-    if args.threshold_method == "ou":
-        print(f"Loading OU parameters from {args.ou_params}...")
-        load_ou_params(args.ou_params)
-        if _ou_params is None:
-            print("ERROR: Failed to load OU parameters. Run ou_calibration.py first.")
-            print("  python research/ou_calibration.py --all")
-            sys.exit(1)
-        print()
 
     # Load data
     btc_df, obs_df, hours, res_map = load_data(
@@ -1458,21 +1521,15 @@ def main():
 
     # Print configuration info
     configs = generate_param_grid(quick=args.quick, path=args.path)
-    path_desc = {
-        "path1": "PATH 1: Entry Pulling (1000ms, 1200ms, 1400ms lookbacks)",
-        "both": "Full Grid (all lookbacks)"
-    }
-    threshold_desc = {
-        "fixed": "Fixed 0.02%",
-        "regime": "ATR-based regime (LOW/MEDIUM/HIGH)",
-        "ou": "OU-based adaptive (z-score sigmoid)"
-    }
+
     print(f"\nOptimization Settings:")
-    print(f"  Mode:         {'Quick (reduced grid)' if args.quick else path_desc[args.path]}")
+    print(f"  Mode:         {'Quick (reduced grid)' if args.quick else 'Full EWMA grid'}")
     print(f"  Workers:      {args.workers}")
     print(f"  Configs:      {len(configs)}")
     print(f"  Signal:       enhanced (fixed)")
-    print(f"  Threshold:    {threshold_desc[args.threshold_method]}")
+    print(f"  Threshold:    Pure EWMA (fast/slow ratio)")
+    print(f"  EWMA Fast:    30s, 60s, 120s halflife")
+    print(f"  EWMA Slow:    180s, 300s, 600s halflife")
     print(f"  Min Time:     {MIN_TIME}s (fixed)")
     print(f"  Cycling:      Testing ON and OFF")
     if args.path == "path1":
@@ -1487,8 +1544,7 @@ def main():
     print("Running optimization...")
     results = run_optimization(btc_df, obs_df, hours, res_map,
                               n_workers=args.workers, quick=args.quick,
-                              path=args.path, slippage=args.slippage,
-                              threshold_method=args.threshold_method)
+                              path=args.path, slippage=args.slippage)
 
     # Print results
     print_results(results, hours, n_markets)

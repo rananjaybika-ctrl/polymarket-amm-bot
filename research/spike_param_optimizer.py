@@ -12,11 +12,8 @@ Parameter Grid:
 - stop_loss: 0.03, 0.05, 0.07, 0.12, None (added 3% and 5% for tighter SL testing)
 - order_pulling: True, False (entry order pulling)
 - entry_order_pull_timeout: 3s, 5s, 7s, 10s, 15s, 20s, 25s, 30s (Path 1: cancel stale entries)
-- hedge_ratio: 0.25, 0.50, 0.75, 1.00 (Path 2: partial hedge T1/T2 split)
-- aggressive_hedge_timeout: None, 5s, 10s, 15s (Path 2: take market if passive doesn't fill)
 
 Note: Configurations where target_shares % grid_levels != 0 are skipped.
-Note: Partial hedge (< 100%) requires stop-loss enabled for T2 protection.
 """
 
 import argparse
@@ -88,8 +85,6 @@ class OptConfig:
     # NOTE: order_pull_timeout (40s) was REMOVED - it was never used for hedge orders
     # Hedge orders either fill passively, get stopped out, or ride to resolution
     entry_order_pull_timeout: float = 10.0  # seconds (entry order timeout - Path 1)
-    hedge_ratio: float = 1.0  # 1.0 = full hedge, 0.5 = 50% hedge (Path 2)
-    aggressive_hedge_timeout: Optional[float] = None  # seconds - take market if passive doesn't fill (None = disabled)
     grid_buycount: int = 1  # How many buy cycles per market (1=single entry, 6=buy 5 shares × 6 cycles)
 
     @property
@@ -116,8 +111,7 @@ class OptConfig:
     def __hash__(self):
         return hash((self.target_shares, self.grid_levels, self.grid_spacing,
                     self.spike_lookback, self.stop_loss_pct, self.order_pulling,
-                    self.entry_order_pull_timeout, self.hedge_ratio,
-                    self.aggressive_hedge_timeout, self.grid_buycount))
+                    self.entry_order_pull_timeout, self.grid_buycount))
 
     def to_dict(self) -> dict:
         return {
@@ -132,8 +126,6 @@ class OptConfig:
             'stop_loss_pct': self.stop_loss_pct,
             'order_pulling': self.order_pulling,
             'entry_order_pull_timeout': self.entry_order_pull_timeout,
-            'hedge_ratio': self.hedge_ratio,
-            'aggressive_hedge_timeout': self.aggressive_hedge_timeout,
             'estimated_cost': self.estimated_cost,
         }
 
@@ -169,7 +161,6 @@ class OptResult:
     direction_accuracy: float
     passive_hedge_pct: float
     stoploss_hedge_pct: float
-    aggressive_hedge_pct: float  # Percentage of trades exited via aggressive hedge (market take)
     resolution_pct: float
     pulled_pct: float  # Percentage of trades cancelled due to order pulling
     capital_exceeded: bool  # True if any trade would exceed $170
@@ -178,7 +169,6 @@ class OptResult:
     # PnL breakdown
     passive_pnl: float = 0.0
     stoploss_pnl: float = 0.0
-    aggressive_pnl: float = 0.0  # PnL from aggressive hedge exits
     resolution_pnl: float = 0.0
     trades: List[TradeResult] = field(default_factory=list)
 
@@ -192,7 +182,6 @@ class OptResult:
             'direction_accuracy': self.direction_accuracy,
             'passive_hedge_pct': self.passive_hedge_pct,
             'stoploss_hedge_pct': self.stoploss_hedge_pct,
-            'aggressive_hedge_pct': self.aggressive_hedge_pct,
             'resolution_pct': self.resolution_pct,
             'pulled_pct': self.pulled_pct,
             'capital_exceeded': self.capital_exceeded,
@@ -200,7 +189,6 @@ class OptResult:
             'avg_pair_cost': self.avg_pair_cost,
             'passive_pnl': self.passive_pnl,
             'stoploss_pnl': self.stoploss_pnl,
-            'aggressive_pnl': self.aggressive_pnl,
             'resolution_pnl': self.resolution_pnl,
         })
         return result
@@ -215,8 +203,8 @@ def generate_param_grid(quick: bool = False, path: str = "both") -> List[OptConf
 
     Args:
         quick: If True, use reduced parameter space for quick testing
-        path: "path1" for entry pulling experiment, "path2" for partial hedge,
-              "both" for full grid including both experiments
+        path: "path1" for entry pulling experiment,
+              "both" for full grid
 
     Returns:
         List of OptConfig instances to test
@@ -232,13 +220,9 @@ def generate_param_grid(quick: bool = False, path: str = "both") -> List[OptConf
         stop_losses = [None, 0.12]
         order_pulling_opts = [False]
         entry_pull_timeouts = [10.0]  # Default only
-        hedge_ratios = [1.0]  # Default only
-        aggressive_hedge_timeouts = [None]  # Default only (disabled)
         # Quick mode lookbacks and buycounts
         path1_lookbacks = [60]  # 1000ms only for quick test
-        path2_lookbacks = [36]  # 600ms only for quick test
         grid_buycount_path1 = [1, 2]  # Reduced for quick test
-        grid_buycount_path2 = [1]  # Single for quick test
     else:
         # Full grid
         # target_shares is the TOTAL shares per trade (split across grid levels)
@@ -254,18 +238,8 @@ def generate_param_grid(quick: bool = False, path: str = "both") -> List[OptConf
         entry_pull_timeouts = [3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 25.0, 30.0]
         path1_lookbacks = [60, 72, 84]  # 1000, 1200, 1400ms at 60Hz
 
-        # PATH 2: Partial Hedge + Aggressive Hedge Experiment
-        # Test hedge ratios with 400ms (best resolution) + 1400ms (high accuracy experiment)
-        hedge_ratios = [0.25, 0.50, 0.75, 1.00]
-        path2_lookbacks = [18, 24, 30, 84]  # 300, 400, 500ms + 1400ms (75.7% res) at 60Hz
-        # Aggressive hedge: take market if passive doesn't fill in X seconds
-        aggressive_hedge_timeouts = [None, 5.0, 10.0, 15.0]
-
         # Grid buycount: how many buy cycles per market
-        # Path 1 (volume): more cycles for accumulation
-        # Path 2 (quality): fewer cycles, focus on quality signals
         grid_buycount_path1 = [1, 2, 3, 6]
-        grid_buycount_path2 = [1, 2]
 
     for target_shares in target_shares_list:
         for grid_levels in grid_levels_list:
@@ -297,36 +271,8 @@ def generate_param_grid(quick: bool = False, path: str = "both") -> List[OptConf
                                             stop_loss_pct=stop_loss,
                                             order_pulling=pulling,
                                             entry_order_pull_timeout=entry_timeout,
-                                            hedge_ratio=1.0,  # Full hedge for Path 1
                                             grid_buycount=buycount,
                                         ))
-                            elif path == "path2":
-                                # PATH 2: Partial hedge + aggressive hedge
-                                # Only test 300ms, 400ms, 500ms + 1400ms lookbacks
-                                if lookback not in path2_lookbacks:
-                                    continue
-                                for hedge_ratio in hedge_ratios:
-                                    # Partial hedge requires stop-loss for T2 protection
-                                    if hedge_ratio < 1.0 and stop_loss is None:
-                                        continue  # Skip unsafe: partial hedge without SL
-                                    # Test all aggressive hedge timeouts (including None = disabled)
-                                    for aggressive_timeout in aggressive_hedge_timeouts:
-                                        for buycount in grid_buycount_path2:
-                                            # Skip invalid: order size < 5 shares (Polymarket min)
-                                            if target_shares // buycount < 5:
-                                                continue
-                                            configs.append(OptConfig(
-                                                target_shares=target_shares,
-                                                grid_levels=grid_levels,
-                                                grid_spacing=spacing,
-                                                spike_lookback=lookback,
-                                                stop_loss_pct=stop_loss,
-                                                order_pulling=pulling,
-                                                entry_order_pull_timeout=10.0,  # Default for Path 2
-                                                hedge_ratio=hedge_ratio,
-                                                aggressive_hedge_timeout=aggressive_timeout,
-                                                grid_buycount=buycount,
-                                            ))
                             else:
                                 # Default: standard grid (backward compatible)
                                 configs.append(OptConfig(
@@ -337,7 +283,6 @@ def generate_param_grid(quick: bool = False, path: str = "both") -> List[OptConf
                                     stop_loss_pct=stop_loss,
                                     order_pulling=pulling,
                                     entry_order_pull_timeout=10.0,  # Default
-                                    hedge_ratio=1.0,  # Default full hedge
                                 ))
     return configs
 
@@ -743,7 +688,6 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
         # Scan forward for hedge
         hedge_type = "resolution"
         loser_fill = 0.0
-        entry_fill_ts = mdf.iloc[entry_obs_idx]['timestamp_ms']  # Track entry fill timestamp
 
         for j in range(entry_obs_idx + 1, len(mdf)):
             scan_row = mdf.iloc[j]
@@ -762,14 +706,6 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
                 hedge_type = "passive"
                 break
 
-            # Aggressive hedge: take market if passive doesn't fill within timeout
-            if config.aggressive_hedge_timeout is not None:
-                hedge_age_secs = (scan_ts - entry_fill_ts) / 1000
-                if hedge_age_secs > config.aggressive_hedge_timeout:
-                    loser_fill = curr_loser_ask  # Take current market price
-                    hedge_type = "aggressive"
-                    break
-
             # Stop-loss
             if config.stop_loss_pct is not None:
                 drop = (avg_winner_entry - winner_bid) / avg_winner_entry
@@ -786,38 +722,12 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
             else:
                 loser_fill = 1.0
 
-        # Calculate PnL with partial hedge support (Path 2 experiment)
-        # T1 = hedged portion (hedge_ratio), T2 = unhedged portion (1 - hedge_ratio)
-        # Note: Use cycle_shares (not target_shares) for this cycle's PnL
-        hedge_ratio = config.hedge_ratio
-        t1_shares = int(cycle_shares * hedge_ratio)
-        t2_shares = cycle_shares - t1_shares
-
         pair_cost = avg_winner_entry + loser_fill
 
-        if hedge_ratio >= 1.0:
-            # Full hedge (standard behavior)
-            if hedge_type == "resolution":
-                pnl = -avg_winner_entry * cycle_shares
-            else:
-                pnl = (1.0 - pair_cost) * cycle_shares
+        if hedge_type == "resolution":
+            pnl = -avg_winner_entry * cycle_shares
         else:
-            # Partial hedge: T1 hedged immediately, T2 rides to resolution
-            # T1 PnL (hedged portion)
-            if hedge_type == "resolution":
-                t1_pnl = -avg_winner_entry * t1_shares
-            else:
-                t1_pnl = (1.0 - pair_cost) * t1_shares
-
-            # T2 PnL (unhedged portion - rides to resolution)
-            if resolution == winner_side:
-                # Winner wins: T2 gets $1 per share
-                t2_pnl = (1.0 - avg_winner_entry) * t2_shares
-            else:
-                # Winner loses: T2 goes to $0
-                t2_pnl = -avg_winner_entry * t2_shares
-
-            pnl = t1_pnl + t2_pnl
+            pnl = (1.0 - pair_cost) * cycle_shares
 
         trades.append(TradeResult(
             market_slug=slug, cycle_num=cycle_num, entry_time_remaining=time_rem,
@@ -868,7 +778,7 @@ def run_single_config(config: OptConfig, spikes_by_lookback: Dict[int, pd.DataFr
         return OptResult(
             config=config, total_pnl=0, hourly_rate=0, total_trades=0,
             win_rate=0, direction_accuracy=0, passive_hedge_pct=0,
-            stoploss_hedge_pct=0, aggressive_hedge_pct=0, resolution_pct=0, pulled_pct=0,
+            stoploss_hedge_pct=0, resolution_pct=0, pulled_pct=0,
             capital_exceeded=check_capital_constraint(config),
             max_capital_used=0, avg_pair_cost=0
         )
@@ -884,7 +794,7 @@ def run_single_config(config: OptConfig, spikes_by_lookback: Dict[int, pd.DataFr
         return OptResult(
             config=config, total_pnl=0, hourly_rate=0, total_trades=total_trades,
             win_rate=0, direction_accuracy=0, passive_hedge_pct=0,
-            stoploss_hedge_pct=0, aggressive_hedge_pct=0, resolution_pct=0,
+            stoploss_hedge_pct=0, resolution_pct=0,
             pulled_pct=len(pulled_trades) / total_trades if total_trades > 0 else 0,
             capital_exceeded=check_capital_constraint(config),
             max_capital_used=max_capital, avg_pair_cost=0
@@ -899,13 +809,11 @@ def run_single_config(config: OptConfig, spikes_by_lookback: Dict[int, pd.DataFr
 
     passive = sum(1 for t in executed_trades if t.hedge_type == "passive")
     stoploss = sum(1 for t in executed_trades if t.hedge_type == "stoploss")
-    aggressive = sum(1 for t in executed_trades if t.hedge_type == "aggressive")
     resolution = sum(1 for t in executed_trades if t.hedge_type == "resolution")
     correct = sum(1 for t in executed_trades if t.correct_direction)
 
     passive_pnl = sum(t.pnl for t in executed_trades if t.hedge_type == "passive")
     stoploss_pnl = sum(t.pnl for t in executed_trades if t.hedge_type == "stoploss")
-    aggressive_pnl = sum(t.pnl for t in executed_trades if t.hedge_type == "aggressive")
     resolution_pnl = sum(t.pnl for t in executed_trades if t.hedge_type == "resolution")
 
     return OptResult(
@@ -917,7 +825,6 @@ def run_single_config(config: OptConfig, spikes_by_lookback: Dict[int, pd.DataFr
         direction_accuracy=correct / executed_count,
         passive_hedge_pct=passive / executed_count,
         stoploss_hedge_pct=stoploss / executed_count,
-        aggressive_hedge_pct=aggressive / executed_count,
         resolution_pct=resolution / executed_count,
         pulled_pct=len(pulled_trades) / total_trades if total_trades > 0 else 0,
         capital_exceeded=check_capital_constraint(config),
@@ -925,7 +832,6 @@ def run_single_config(config: OptConfig, spikes_by_lookback: Dict[int, pd.DataFr
         avg_pair_cost=avg_pair,
         passive_pnl=passive_pnl,
         stoploss_pnl=stoploss_pnl,
-        aggressive_pnl=aggressive_pnl,
         resolution_pnl=resolution_pnl,
         trades=all_trades
     )
@@ -1274,32 +1180,6 @@ def print_results(results: List[OptResult], hours: float, n_markets: int):
                 avg_rate = np.mean([r.hourly_rate for r in matching])
                 print(f"  {timeout:.0f}s: ${avg_rate:.2f}/hr (avg)")
 
-    # Hedge Ratio (Path 2 experiment)
-    unique_ratios = sorted(set(r.config.hedge_ratio for r in results))
-    if len(unique_ratios) > 1:
-        print("\nHedge Ratio (Path 2):")
-        for ratio in unique_ratios:
-            matching = [r for r in results if r.config.hedge_ratio == ratio]
-            if matching:
-                avg_rate = np.mean([r.hourly_rate for r in matching])
-                print(f"  {ratio:.0%}: ${avg_rate:.2f}/hr (avg)")
-
-    # Aggressive Hedge Timeout (Path 2 experiment)
-    unique_agg_timeouts = sorted(set(r.config.aggressive_hedge_timeout for r in results if r.config.aggressive_hedge_timeout is not None))
-    has_none = any(r.config.aggressive_hedge_timeout is None for r in results)
-    if unique_agg_timeouts or (has_none and len(unique_agg_timeouts) > 0):
-        print("\nAggressive Hedge Timeout (Path 2):")
-        if has_none:
-            matching = [r for r in results if r.config.aggressive_hedge_timeout is None]
-            if matching:
-                avg_rate = np.mean([r.hourly_rate for r in matching])
-                print(f"  None (disabled): ${avg_rate:.2f}/hr (avg)")
-        for timeout in unique_agg_timeouts:
-            matching = [r for r in results if r.config.aggressive_hedge_timeout == timeout]
-            if matching:
-                avg_rate = np.mean([r.hourly_rate for r in matching])
-                print(f"  {timeout:.0f}s: ${avg_rate:.2f}/hr (avg)")
-
     # Best config details
     if results:
         print()
@@ -1316,9 +1196,6 @@ def print_results(results: List[OptResult], hours: float, n_markets: int):
         print(f"  Stop Loss:      {best.config.stop_loss_pct*100:.0f}%" if best.config.stop_loss_pct else "  Stop Loss:      None")
         print(f"  Order Pulling:  {'ON' if best.config.order_pulling else 'OFF'}")
         print(f"  Entry Timeout:  {best.config.entry_order_pull_timeout:.0f}s")
-        print(f"  Hedge Ratio:    {best.config.hedge_ratio:.0%}")
-        agg_timeout_str = f"{best.config.aggressive_hedge_timeout:.0f}s" if best.config.aggressive_hedge_timeout else "None"
-        print(f"  Aggressive Hdg: {agg_timeout_str}")
 
         print(f"\nPerformance:")
         print(f"  Total PnL:      ${best.total_pnl:.2f}")
@@ -1330,7 +1207,6 @@ def print_results(results: List[OptResult], hours: float, n_markets: int):
         print(f"\nHedge Breakdown:")
         print(f"  Passive:        {best.passive_hedge_pct*100:.1f}% (${best.passive_pnl:.2f})")
         print(f"  Stop-Loss:      {best.stoploss_hedge_pct*100:.1f}% (${best.stoploss_pnl:.2f})")
-        print(f"  Aggressive:     {best.aggressive_hedge_pct*100:.1f}% (${best.aggressive_pnl:.2f})")
         print(f"  Resolution:     {best.resolution_pct*100:.1f}% (${best.resolution_pnl:.2f})")
         if best.pulled_pct > 0:
             print(f"  Pulled:         {best.pulled_pct*100:.1f}%")
@@ -1373,9 +1249,8 @@ def parse_args():
     parser.add_argument("--res-file", type=str, default=None,
                         help="Path to market resolutions CSV file")
     parser.add_argument("--path", type=str, default="both",
-                        choices=["path1", "path2", "both"],
-                        help="Experiment path: path1=entry pulling (800-1200ms), "
-                             "path2=partial hedge + aggressive hedge (ALL lookbacks), both=full grid")
+                        choices=["path1", "both"],
+                        help="Experiment path: path1=entry pulling (800-1200ms), both=full grid")
 
     return parser.parse_args()
 
@@ -1401,7 +1276,6 @@ def main():
     configs = generate_param_grid(quick=args.quick, path=args.path)
     path_desc = {
         "path1": "PATH 1: Entry Pulling (800ms, 1000ms, 1200ms lookbacks)",
-        "path2": "PATH 2: Partial Hedge + Aggressive Hedge (ALL lookbacks)",
         "both": "Full Grid (all lookbacks)"
     }
     print(f"\nOptimization Settings:")
@@ -1416,11 +1290,6 @@ def main():
         print(f"  Lookbacks:    Testing 800ms, 1000ms, 1200ms")
         print(f"  Entry Pull:   Testing 3s, 5s, 7s, 10s, 15s, 20s, 25s, 30s timeouts")
         print(f"  Order Pull:   Testing ON and OFF")
-    elif args.path == "path2":
-        print(f"  Lookbacks:    Testing ALL (300ms, 500ms, 600ms, 800ms, 1000ms, 1200ms)")
-        print(f"  Stop Losses:  Testing 3%, 5%, 7%, 12%, None")
-        print(f"  Hedge Ratio:  Testing 25%, 50%, 75%, 100%")
-        print(f"  Aggressive:   Testing None, 5s, 10s, 15s timeouts")
 
     # Run optimization
     print("\n" + "-" * 100)

@@ -1,5 +1,7 @@
 # Strategy Analysis: Wallet 0xa5e8...95f5
 
+> **ARCHIVED (Jan 24, 2026):** This wallet has exited Polymarket (0 trades detected in OOS4 monitoring period Jan 23-24). The contrarian strategy insights from this wallet have been incorporated into Path 2 (CONTRARIAN) and validated on OOS4. No further monitoring needed.
+
 **Generated:** 2026-01-23
 **Wallet:** `0xa5e83423126dbc6cdb34f10f37f5d27668ab95f5`
 **Analysis Period:** 2026-01-21 00:21 to 2026-01-23 02:54 UTC

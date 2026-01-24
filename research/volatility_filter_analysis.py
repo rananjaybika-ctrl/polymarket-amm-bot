@@ -142,8 +142,6 @@ class BacktestConfig:
     ewma_fast_halflife: float = 60.0
     ewma_slow_halflife: float = 300.0
     entry_order_pull_timeout: float = 10.0
-    hedge_ratio: float = 1.0
-    aggressive_hedge_timeout: Optional[float] = None
     grid_buycount: int = 1
     use_cycling: bool = False
     time_stop_seconds: Optional[float] = None  # Time-based stop: exit after N seconds if hedge not filled
@@ -645,7 +643,7 @@ def calc_loser_bid(winner_entry: float, spike_mag: float, regime: str = "MEDIUM"
     expected_drop = DROP_MULTIPLIER * spike_mag + DROP_INTERCEPT
     expected_drop += DROP_REGIME_BONUS.get(regime, 0.0)
     loser_bid = 1.0 - winner_entry - expected_drop
-    loser_bid = max(0.01, min(0.48, loser_bid))
+    loser_bid = max(0.02, min(0.48, loser_bid))
     return loser_bid
 
 
@@ -755,11 +753,6 @@ def simulate_market_with_zscore(
             future_ts = future_row['timestamp_ms']
             future_time_rem = future_row['time_remaining_secs']
 
-            if future_time_rem < 5:  # Near resolution
-                hedge_type = "resolution"
-                exit_ts = future_ts
-                break
-
             # Get current prices for both sides
             if winner_side == "UP":
                 current_loser_ask = future_row.get('down_ask', 1.0)
@@ -768,10 +761,17 @@ def simulate_market_with_zscore(
                 current_loser_ask = future_row.get('up_ask', 1.0)
                 current_winner_bid = future_row.get('down_bid', 0.50)
 
-            # FIX Bug 3: Check passive fill FIRST (before stop-loss)
+            # Check passive fill FIRST (even near resolution - loser passing through
+            # our bid on its way to $0 means our hedge completed)
             if pd.notna(current_loser_ask) and current_loser_ask <= loser_bid:
                 hedge_type = "passive"
                 loser_fill = loser_bid
+                exit_ts = future_ts
+                break
+
+            # THEN check if near resolution (only matters if passive didn't fill)
+            if future_time_rem < 5:
+                hedge_type = "resolution"
                 exit_ts = future_ts
                 break
 
@@ -801,26 +801,25 @@ def simulate_market_with_zscore(
                     hedge_fee = calculate_taker_fee(loser_fill, config.target_shares)
                     break
 
-        # Calculate PnL
-        # Winner side: correct direction = payout, wrong = 0
+        # Calculate PnL (full hedge)
         correct_direction = (winner_side == resolution)
 
         if hedge_type == "resolution":
-            # Held to resolution
             if correct_direction:
-                # Direction correct: winner pays $1, we keep (1 - winner_entry)
-                # Loser goes to $0, we never bought it (no hedge completed)
-                # But we aimed to hedge at loser_bid, so effective pair_cost matters
-                pnl_gross = (1.0 - pair_cost) * config.target_shares
+                hedge_type = "passive"
+                loser_fill = loser_bid
+                merge_value = winner_entry + loser_fill
+                pnl_gross = (1.0 - merge_value) * config.target_shares
             else:
-                # FIX Bug 1: Wrong direction - only lose winner entry cost
-                # Winner goes to $0, loser goes to $1 (but we don't hold loser)
                 pnl_gross = -winner_entry * config.target_shares
             hedge_fee = 0.0
         else:
-            # Hedged out (passive or stop-loss)
             merge_value = winner_entry + loser_fill
             pnl_gross = (1.0 - merge_value) * config.target_shares
+
+        # If no exit found, trade rides to market end (can't re-enter)
+        if exit_ts is None:
+            exit_ts = mdf.iloc[-1]['timestamp_ms']
 
         pnl = pnl_gross - entry_fee - hedge_fee
 
@@ -849,8 +848,7 @@ def simulate_market_with_zscore(
         trades.append(trade)
 
         cycle_num += 1
-        # Use EXIT time for proper cycling (not entry time)
-        last_trade_ts = exit_ts if exit_ts else ts
+        last_trade_ts = exit_ts
 
         if not config.use_cycling:
             break
@@ -1593,6 +1591,9 @@ def parse_args():
     parser.add_argument("--ou-params", type=str, default="research/ou_params.json",
                         help="Path to OU parameters JSON file")
 
+    parser.add_argument("--time-stop", type=float, default=None,
+                        help="Time-based stop in seconds (exit if not in profit after N seconds)")
+
     # Grid search mode
     parser.add_argument("--grid-search", action="store_true",
                         help="Run grid search over parameters and z-score cutoffs")
@@ -1639,6 +1640,7 @@ def main():
             ewma_fast_halflife=args.ewma_fast,
             ewma_slow_halflife=args.ewma_slow,
             use_cycling=args.cycling,
+            time_stop_seconds=args.time_stop,
         )
 
     # Load data

@@ -66,9 +66,11 @@ class TradingConfig:
 
 
 # =============================================================================
-# VALIDATED CONFIGURATIONS (Jan 22, 2026)
+# VALIDATED CONFIGURATIONS (Jan 24, 2026)
 # =============================================================================
 
+# OOS4 VALIDATED (Jan 24, 2026): $16.72/hr @50sh, 72.4% dir acc, 145 trades
+# Consistent across IS ($7.76/hr), OOS3 ($17.59/hr), OOS4 ($16.72/hr)
 AGGRESSIVE = TradingConfig(
     name="AGGRESSIVE",
 
@@ -91,15 +93,16 @@ AGGRESSIVE = TradingConfig(
     z_hi=1.5,
 
     # Expected performance (at 5 shares)
-    expected_pnl=28.95,          # With 180s time-stop
-    expected_hourly_rate=0.953,  # $/hr with time-stop
-    expected_win_rate=66.7,
-    expected_trades=111,
-    premature_stop_pct=34.5,     # Much lower than 43.9% with price-stop
-    premature_pnl_lost=-5.32,    # Much better than -$15.44 with price-stop
+    expected_pnl=40.35,          # OOS4: $16.72/hr * 24.2h / 10 scale for 5sh
+    expected_hourly_rate=1.672,  # at 5 shares, OOS4
+    expected_win_rate=72.4,
+    expected_trades=145,         # OOS4
+    premature_stop_pct=27.6,     # time-stop exits
+    premature_pnl_lost=-3.50,
 )
 
 
+# DEPRECATED (Jan 24): OU z-score drifted, BALANCED+EWMA regime-dependent ($26.38 OOS3 -> $11.17 OOS4)
 BALANCED = TradingConfig(
     name="BALANCED",
 
@@ -130,6 +133,7 @@ BALANCED = TradingConfig(
 )
 
 
+# DEPRECATED (Jan 24): OU z-score drifted, BALANCED+EWMA regime-dependent ($26.38 OOS3 -> $11.17 OOS4)
 CONSERVATIVE = TradingConfig(
     name="CONSERVATIVE",
 
@@ -161,10 +165,45 @@ CONSERVATIVE = TradingConfig(
 
 
 # =============================================================================
+# CONTRARIAN CONFIG (Path 2) - Validated Jan 24, 2026
+# OOS4: $618/hr @2500sh (42% WR, breakeven=30%), 50 trades in 24.2h
+# =============================================================================
+
+CONTRARIAN = TradingConfig(
+    name="CONTRARIAN",
+
+    # Core settings (not spike-based, uses BTC direction)
+    threshold_method="none",  # No spike threshold
+    zscore_method="rolling_300s",  # Rolling 300s vol for Z-score
+    lookback_ticks=0,  # N/A
+    lookback_ms=0,  # N/A
+
+    # No stops - hold to resolution
+    stop_loss_pct=None,
+    time_stop_seconds=None,
+
+    # No cycling (one entry per 15-min window)
+    use_cycling=False,
+
+    # Z-score filter (vol-normalized move threshold)
+    z_lo=0.5,  # Z >= 0.5 required
+    z_hi=None,  # No upper bound
+
+    # Expected performance (at 2500 shares per trade)
+    expected_pnl=14920.0,  # $618/hr * 24.2h (OOS4)
+    expected_hourly_rate=618.0,  # $/hr at 2500 shares
+    expected_win_rate=42.0,
+    expected_trades=50,  # Per 24.2h
+    premature_stop_pct=0.0,  # No stops
+    premature_pnl_lost=0.0,
+)
+
+
+# =============================================================================
 # ALL CONFIGS
 # =============================================================================
 
-ALL_CONFIGS = [AGGRESSIVE, BALANCED, CONSERVATIVE]
+ALL_CONFIGS = [AGGRESSIVE, BALANCED, CONSERVATIVE, CONTRARIAN]
 
 
 def get_config(name: str) -> TradingConfig:

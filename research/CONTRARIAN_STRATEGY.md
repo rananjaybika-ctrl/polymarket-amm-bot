@@ -1,7 +1,7 @@
 # Contrarian Mean-Reversion Strategy: Complete Research Document
 
 **Last Updated:** January 23, 2026
-**Status:** Backtested, Adaptive Gate Validated, Ready for Production Integration
+**Status:** OOS4 VALIDATED - Production Ready
 **Data:** 78.7 hours of 9ms BTC tick data (254,194 1-second bars)
 
 ---
@@ -18,6 +18,32 @@
 8. [Key Findings & Insights](#key-findings--insights)
 9. [Implementation Details](#implementation-details)
 10. [File Reference](#file-reference)
+
+---
+
+## OOS4 Validation (Jan 24, 2026)
+
+### Results
+- **Dataset**: 24.2 hours fresh data (Jan 23-24, NOT used in any optimization)
+- **Trades**: 50 (from ~48 15-min windows after gating)
+- **Win Rate**: 42% (breakeven = 30%)
+- **PnL**: $14,920 @ 2500 shares/trade
+- **Hourly Rate**: $618/hr @ 2500 shares ($12.36/hr @ 50sh equivalent)
+- **Avg Z-score at entry**: ~1.2
+- **Avg entry time**: ~90s into window
+- **Windows gated out**: ~35% (adaptive EWMA gate filtering low-vol windows)
+
+### Comparison to Prior Backtests
+| Period | Hours | Trades | Win Rate | $/hr @2500sh |
+|--------|-------|--------|----------|--------------|
+| IS (Jan 16-19) | 78.7 | ~200 | 43-54% | ~$500-800/hr |
+| OOS4 (Jan 23-24) | 24.2 | 50 | 42% | $618/hr |
+
+### Verdict: VALIDATED
+- Win rate (42%) well above breakeven (30%)
+- Consistent with in-sample performance
+- Adaptive gate successfully filters low-vol noise
+- Now designated as **Path 2** (renamed from Path 3)
 
 ---
 

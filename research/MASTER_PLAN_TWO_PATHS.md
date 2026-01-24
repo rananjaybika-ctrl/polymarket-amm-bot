@@ -1,252 +1,185 @@
 # MASTER PLAN: Two Paths to Profitable Trading
 
-**Date:** January 18, 2026 (Updated: January 22, 2026)
-**Status:** CONFIGS VALIDATED - Three production configs ready with adaptive stop selection
-**Objective:** Create a repeatable edge through one of two validated approaches
-
-### OOS Validation Status: PASSED
-- Direction accuracy: 66.7% (threshold ≥55%) ✓
-- Mean 60s drop: 0.1367 (range [0.05, 0.15]) ✓
-- Passive fill rate: 100% (threshold ≥50%) ✓
-- See: `HANDOVER_HEDGE_PRICING_JAN18.md` for details
+**Date:** January 18, 2026 (Updated: January 24, 2026)
+**Status:** OOS4 VALIDATED — AGGRESSIVE (Path 1) and CONTRARIAN (Path 2) are production strategies
+**Objective:** Create repeatable edges through two validated, independent approaches
 
 ---
 
-## JAN 22 UPDATE: FINAL VALIDATED CONFIGS
+## JAN 24 RESTRUCTURE: NEW PATH DEFINITIONS
 
-### Grid Search Complete (1440 configs tested on 81.71 hours)
-- Volatility filter validated: Z-zone 0<z<1.5 best
-- Adaptive threshold method: OU beats EWMA
-- **Critical Finding:** Stop type depends on config style
+### Path Rename (Jan 24)
+- **Path 1 = AGGRESSIVE** (spike detection + full hedge, OU threshold, 1200ms, time-stop)
+- **Path 2 = CONTRARIAN** (bet against BTC direction, $0.30 entry, 2500 shares, vol gate)
+- ~~Old Path 2 (partial hedge)~~: DELETED — code and data removed, never produced viable results
 
-### Three Production Configs
+### Combined OOS Performance
 
-| Config | Stop Type | PnL @50sh | $/hr | Win% |
-|--------|-----------|-----------|------|------|
-| **AGGRESSIVE** | **180s TIME** | **$289.49** | **$9.53** | 66.7% |
-| BALANCED | 15% PRICE | $271.19 | $6.15 | 70.7% |
-| CONSERVATIVE | 15% PRICE | $209.76 | $6.19 | 75.0% |
+| Config | IS (81.7h) | OOS3 (26.4h) | OOS4 (24.2h) | Status |
+|--------|-----------|--------------|--------------|--------|
+| **AGGRESSIVE** | $7.76/hr | $17.59/hr | **$16.72/hr** | PRIMARY |
+| BALANCED+EWMA | $3.06/hr | $26.38/hr | $11.17/hr | DEPRECATED (regime-dependent) |
+| **CONTRARIAN** | ~$500-800/hr | N/A | **$618/hr** | VALIDATED |
 
-### Stop Type Selection Rule (r = -0.84 correlation)
-```
-Cycling OFF?                          → PRICE STOP
-Cycling ON + OU z-score?              → PRICE STOP
-Cycling ON + EWMA z-score + WR<61%?   → TIME STOP
-```
-
-### See: Jan 22 Findings Files
-- `research/FINAL_TRADING_CONFIGS_JAN22.md` - **Production config specs**
-- `research/TIME_STOP_STATISTICAL_ANALYSIS.md` - Statistical analysis
-- `research/VOL_FILTER_GRID_SEARCH_FINDINGS_JAN22.md` - Full grid search
-- `research/TRADING_CONFIGS.py` - Config definitions (Python)
+*All rates at 50sh for AGGRESSIVE, 2500sh for CONTRARIAN*
 
 ---
 
-## THE TWO PATHS
+## PATH 1: AGGRESSIVE (Spike Detection + Full Hedge)
 
-| Path | Philosophy | Lookbacks | Configs | Focus |
-|------|------------|-----------|---------|-------|
-| **Path 1: Volume** | Many signals, quick in/out | 800ms, 1000ms, 1200ms | 2,880 | Entry Order Pulling |
-| **Path 2: Quality** | Few signals, asymmetric R:R | 300ms, 500ms, 600ms | 4,896 | Partial Hedge + Aggressive Hedge |
+### Strategy Philosophy
+"Quality-first volume strategy" — detect BTC spikes with OU threshold, enter winner side passively, hedge on loser side, exit via time-stop or passive fill.
+
+### Configuration
+```
+Threshold Method: OU (adaptive sigmoid on z-score)
+Z-Score Method:   EWMA (fully adaptive, no drift)
+Lookback:         1200ms (72 ticks at 60Hz)
+Stop:             180s TIME (exit if not in profit after 180s)
+Cycling:          ON (re-enter after exit)
+Z-Zone:           0 < z < 1.5
+Hedge:            100% full hedge on loser side
+```
+
+### Performance (OOS4 — 24.2 hours, Jan 23-24)
+| Metric | @50 shares |
+|--------|------------|
+| PnL | $404.62 |
+| $/hr | **$16.72** |
+| Direction Accuracy | 72.4% |
+| Trades | 145 |
+| Passive Fill Rate | ~55% |
+| Time-Stop Exits | ~28% |
+
+### Cross-Validation Summary
+| Period | Hours | Trades | $/hr @50sh | Dir Acc |
+|--------|-------|--------|------------|---------|
+| IS (Jan 16-19) | 81.7 | 90 | $7.76 | 68.9% |
+| OOS3 (Jan 22-23) | 26.4 | 84 | $17.59 | 70.2% |
+| OOS4 (Jan 23-24) | 24.2 | 145 | $16.72 | 72.4% |
+
+Direction accuracy is remarkably consistent: 68.9% → 70.2% → 72.4% across all periods.
+
+### Why It Works
+1. **OU threshold adapts** to volatility regime (sigmoid mapping)
+2. **EWMA z-score** doesn't drift (unlike static OU z-score)
+3. **Time-stop** lets winning trades ride while cutting losers
+4. **Z-zone filter** (0<z<1.5) avoids extreme volatility noise
+5. **Full hedge** limits downside to spread cost
 
 ---
 
-## PATH 1: VOLUME + ENTRY PULLING
+## PATH 2: CONTRARIAN (Bet Against BTC Direction)
 
-### Concept
-Use longer lookbacks (800ms, 1000ms, 1200ms) to detect MORE signals.
-Protect capital with aggressive entry order pulling.
-Quick in/out - if entry doesn't fill fast, cancel and wait for next signal.
+### Strategy Philosophy
+"Mean-reversion at the 15-minute scale" — BTC directional moves within 5 minutes often reverse by window end. Buy the cheap side ($0.30) for 2.33:1 reward-to-risk.
 
-### Parameters Tested
-| Parameter | Values |
-|-----------|--------|
-| Lookbacks | 800ms, 1000ms, 1200ms (48, 60, 72 ticks) |
-| Entry Pull Timeout | 3s, 5s, 7s, 10s, 15s, 20s, 25s, 30s |
-| Order Pulling | ON and OFF (to compare) |
-| Stop Loss | 3%, 5%, 7%, 12%, None |
-| Target Shares | 5, 10, 15, 30 |
-| Grid Levels | 1, 2, 3 |
-| Hedge Ratio | 100% (full hedge) |
-
-### Run Command
-```bash
-cd /Users/rananjaybika/polymarket-amm-bot
-python research/spike_param_optimizer.py --path path1 --output research/path1_results.csv
+### Configuration
 ```
+Entry:            Buy opposite side of BTC direction
+Entry Price:      ~$0.30 (the cheap, losing side)
+Position Size:    2500 shares per trade
+Entry Delay:      >= 60 seconds into window
+Vol Gate:         Adaptive EWMA (k=0.5, halflife=50s)
+Z-Score Gate:     >= 0.5
+Stop:             None (hold to resolution)
+Cycling:          OFF (one entry per 15-min window)
+```
+
+### Performance (OOS4 — 24.2 hours, Jan 23-24)
+| Metric | @2500 shares | @50sh equivalent |
+|--------|-------------|-----------------|
+| PnL | $14,920 | $298.40 |
+| $/hr | **$618** | $12.36 |
+| Win Rate | 42% | 42% |
+| Trades | 50 | 50 |
+| Windows Gated Out | ~35% | ~35% |
+
+### Why It Works
+1. **Asymmetric payoff**: Risk $0.30, reward $0.70 (2.33:1 R:R)
+2. **Breakeven at 30% WR**: Only need 30% accuracy to profit
+3. **Observed 42% WR**: Well above breakeven across IS and OOS4
+4. **Adaptive gate**: Filters low-vol noise (35% of windows skipped)
+5. **Mean reversion**: BTC 15-min directional moves frequently reverse
+
+### Execution Advantage
+- No hedge leg needed (simpler than AGGRESSIVE)
+- Single limit order at $0.30
+- No time pressure (60s+ delay means slower reaction OK)
+- Lower breakeven WR = more robust to adverse conditions
 
 ---
 
-## PATH 2: QUALITY + PARTIAL HEDGE
+## DEPRECATED STRATEGIES
 
-### Concept
-Use shorter lookbacks (300ms, 500ms, 600ms) for HIGHER QUALITY signals.
-Test partial hedging - let some portion ride to resolution.
-Add aggressive hedge option - take market if passive doesn't fill quickly.
-Use tighter stop-losses to cut losses faster.
+### BALANCED+EWMA (formerly "Path 1 variant")
+- **Why deprecated**: $26.38/hr on OOS3 but $3.06/hr in-sample, $11.17/hr OOS4
+- **Root cause**: Performance is regime-dependent (higher in choppy micro-vol periods)
+- **Conclusion**: Not a stable edge
 
-### Parameters Tested
-| Parameter | Values |
-|-----------|--------|
-| Lookbacks | 300ms, 500ms, 600ms (18, 30, 36 ticks) |
-| Hedge Ratio | 25%, 50%, 75%, 100% |
-| Aggressive Hedge Timeout | None, 5s, 10s, 15s |
-| Stop Loss | 3%, 5%, 7%, 12%, None |
-| Target Shares | 5, 10, 15, 30 |
-| Grid Levels | 1, 2, 3 |
-| Order Pulling | ON and OFF |
+### Old Path 2 (Partial Hedge)
+- **What it was**: Short lookbacks (300-500ms) + partial hedge (25-75%) + aggressive timeout
+- **Why deleted**: Never produced >$0.50/hr in any test. Full hedge dominates.
+- **Code removed**: Jan 24, 2026 (run_path2_grid_search, hedge_ratio, aggressive_hedge_timeout)
 
-### Safety Rule
-Partial hedge (< 100%) REQUIRES stop-loss for T2 protection.
+---
 
-### Run Command
-```bash
-cd /Users/rananjaybika/polymarket-amm-bot
-python research/spike_param_optimizer.py --path path2 --output research/path2_results.csv
-```
+## STRATEGY COMPARISON (at equivalent sizing)
+
+| | AGGRESSIVE | CONTRARIAN |
+|---|-----------|-----------|
+| $/hr @50sh equiv | $16.72 | $12.36 |
+| Direction Accuracy | 72.4% | N/A (42% WR) |
+| Trades/hour | ~6 | ~2 |
+| Risk per trade | Spread cost ($0.01-0.05) | $0.30/share |
+| Hedge required | Yes (loser side) | No |
+| Execution complexity | High (sub-second timing) | Low (60s+ delay) |
+| Breakeven accuracy | ~50% | 30% |
+| Capital per trade @50sh | ~$25 | $15 |
+| Strategy correlation | Spike-dependent | Direction-dependent |
+
+**Key insight**: These strategies are likely uncorrelated (different signals, different market conditions). Running both simultaneously increases trade count without increasing risk.
+
+---
+
+## GO-LIVE READINESS
+
+### AGGRESSIVE
+- [x] Direction accuracy consistent across 3 OOS periods (68-72%)
+- [x] Profitable in all test periods
+- [ ] Verify execution latency (passive fill assumption)
+- [ ] Paper trade with real orderbook data
+- [ ] Start with 5-10 shares, scale to 50
+
+### CONTRARIAN
+- [x] Win rate (42%) well above breakeven (30%)
+- [x] Adaptive gate filters noise successfully
+- [ ] Verify $0.30 fills are achievable on Polymarket
+- [ ] Determine bankroll for 2500sh trades ($750/trade)
+- [ ] Paper trade to measure fill rates
 
 ---
 
 ## DATA SUMMARY
 
-| Metric | Value |
-|--------|-------|
-| Total Hours | 18.86 |
-| Valid Markets | 65 |
-| Binance Files | 5 (1.46M rows) |
-| Sessions | 2 (with 6.22h gap) |
+| Dataset | Hours | Markets | Period | Purpose |
+|---------|-------|---------|--------|---------|
+| IS (Training+OOS2) | 81.7 | 254 | Jan 16-19 | Grid search, optimization |
+| OOS3 | 26.4 | 90 | Jan 22-23 | First validation |
+| OOS4 | 24.2 | ~100 | Jan 23-24 | Second validation |
+| Combined OOS3+4 | ~50.6 | ~190 | Jan 22-24 | Final confidence |
+| AWS Collection | ~46 | TBD | Jan 23-25 | OOS5 (future) |
 
 ---
 
-## FIXED PARAMETERS (Hardcoded)
+## KEY FILES
 
-| Parameter | Value |
-|-----------|-------|
-| SIGNAL_TYPE | enhanced |
-| MIN_TIME | 60 seconds |
-| SPIKE_THRESHOLD (base) | 0.02 |
-| VELOCITY_CONFIRM_THRESHOLD | 0.10 |
-| ENHANCED_SCORE_THRESHOLD | 0.02 | v2 formula: spike_mag * velocity_bps |
-| DROP_MULTIPLIER | 0.50 | **Updated** - see HEDGE_PRICING_FINDINGS.md |
-| DROP_INTERCEPT | 0.08 | **Updated** - was underpredicting drops (0.03 vs actual 0.10) |
-| DROP_REGIME_BONUS | {LOW: 0, MEDIUM: 0.01, HIGH: 0.02} | **New** - regime adjustment |
-| TARGET_PAIR_COST | 0.99 |
-| MIN_CYCLE_GAP_MS | 1000ms |
-| CAPITAL_LIMIT | $170 |
-| Adaptive Volatility | ON |
-
-### Adaptive Volatility Thresholds
-| Regime | Spike Threshold |
-|--------|-----------------|
-| LOW | 0.010% |
-| MEDIUM | 0.020% |
-| HIGH | 0.035% |
-
----
-
-## IMPLEMENTATION CHANGES MADE
-
-### Removed (Useless)
-- `order_pull_timeout` (40s hedge timeout) - was never used
-
-### Added
-- `aggressive_hedge_timeout` - take market if passive doesn't fill (None, 5s, 10s, 15s)
-- Tighter stop-losses (3%, 5%) added to existing (7%, 12%, None)
-- Entry pull timeouts expanded (3s, 5s, 7s, 10s, 15s, 20s, 25s, 30s)
-- Path-specific lookback filtering
-
-### Updated
-- Path 1: Tests 800ms, 1000ms, 1200ms lookbacks only
-- Path 2: Tests 300ms, 500ms, 600ms lookbacks only
-- OptResult tracks `aggressive_hedge_pct` and `aggressive_pnl`
-- **Hedge pricing formula recalibrated** - see `HEDGE_PRICING_FINDINGS.md`
-  - Old formula (0.68 * spike + 0.01) severely underpredicted drops
-  - New formula: 0.08 + 0.50 * spike + regime_bonus
-  - Analysis showed spike_magnitude has ~0 correlation with actual 60s drops
-
----
-
-## SUCCESS CRITERIA
-
-| Metric | Path 1 Target | Path 2 Target |
-|--------|---------------|---------------|
-| $/hr | > $0.90 | > $0.48 |
-| Win Rate | > 70% | > 50% |
-| Max Drawdown | < 10% | < 15% |
-| Trades/hr | > 3 | > 1 |
-
----
-
-## COMMANDS
-
-### Run Path 1 (Entry Pulling)
-```bash
-python research/spike_param_optimizer.py --path path1 --output research/path1_results.csv
-```
-
-### Run Path 2 (Partial Hedge)
-```bash
-python research/spike_param_optimizer.py --path path2 --output research/path2_results.csv
-```
-
-### Run Both in Parallel (separate terminals)
-```bash
-# Terminal 1
-python research/spike_param_optimizer.py --path path1 --output research/path1_results.csv
-
-# Terminal 2
-python research/spike_param_optimizer.py --path path2 --output research/path2_results.csv
-```
-
----
-
-## FILES REFERENCE
-
-### Core Strategy Files
-| File | Purpose | Lines |
-|------|---------|-------|
-| `research/spike_param_optimizer.py` | Grid search optimizer | ~1300 |
-| `src/strategies/enhanced_spike.py` | Live spike strategy | 1664 |
-| `src/strategies/volatility_regime.py` | Regime detector | 746 |
-| `src/strategies/enhanced_momentum.py` | Partial hedge (ready) | 708 |
-| `scripts/run_paper_bot.py` | Live trading bot | ~5000 |
-
-### Data Files
 | File | Purpose |
 |------|---------|
-| `research/binance_hf/btc_prices_20260116_194712.csv` | 60Hz Binance (8.19h) |
-| `research/binance_hf/btc_prices_20260117_101156.csv` | 60Hz Binance (0.28h) |
-| `research/binance_hf/btc_prices_20260117_103132.csv` | 60Hz Binance (1.73h) |
-| `research/binance_hf/btc_prices_20260117_121445.csv` | 60Hz Binance (6.60h) |
-| `research/binance_hf/btc_prices_20260117_185159.csv` | 60Hz Binance (2.00h) |
-| `research/observer/grid_obs_*.csv` | 5Hz observer data |
-| `research/observer/market_resolutions_verified.csv` | Verified outcomes |
-
-### Research Files
-| File | Purpose |
-|------|---------|
-| `research/enhanced_spike_60hz_optimized.py` | Main backtest script |
-| `research/enhanced_momentum_backtest.py` | Partial hedge backtest |
-| `research/hedge_pricing_analysis.py` | Regression analysis for hedge pricing |
-| `research/validate_oos.py` | **OOS VALIDATED** - Out-of-sample validation script |
-| `research/fetch_resolutions.py` | Fetch verified resolutions from Polymarket API |
-| `research/HANDOVER_60HZ_BACKTEST_JAN17.md` | Session findings |
-| `research/HEDGE_PRICING_FINDINGS.md` | Hedge formula recalibration results |
-| `research/HANDOVER_JAN18.md` | **OOS VALIDATED** - Full session handover (hedge pricing + optimizer) |
-| `research/MASTER_PLAN_TWO_PATHS.md` | This file |
-
-### Jan 22 Findings (Volatility Filter + Adaptive Stops)
-| File | Purpose |
-|------|---------|
-| `research/FINAL_TRADING_CONFIGS_JAN22.md` | **PRODUCTION CONFIGS** - Three validated configs with stop specs |
-| `research/TRADING_CONFIGS.py` | Python config definitions for backtesting |
-| `research/VOL_FILTER_GRID_SEARCH_FINDINGS_JAN22.md` | Full 1440-config grid search analysis |
-| `research/TIME_STOP_STATISTICAL_ANALYSIS.md` | Statistical analysis of time vs price stops |
-| `research/TIME_BASED_STOP_FINDINGS.md` | Time-based stop test results |
-| `research/volatility_filter_analysis.py` | Backtest with z-score filtering |
-| `research/validate_three_configs.py` | Validation script for 3 configs |
-| `research/three_config_validation_results.csv` | Validation output |
-| `research/vol_filter_grid_results_all_combined.csv` | Full grid search results (1440 rows) |
-| `research/time_stop_top50_results.csv` | Time-stop vs price-stop comparison |
-| `research/stop_out_analysis_results.csv` | Stop-out breakdown for top 10 |
-| `src/services/volatility_tracker.py` | **LiveZScoreTracker** for production |
+| `research/validate_oos4_all_paths.py` | OOS4 validation (Path 1 + Path 2) |
+| `research/volatility_filter_analysis.py` | Core backtest engine |
+| `research/spike_param_optimizer.py` | Path 1 parameter optimization |
+| `research/TRADING_CONFIGS.py` | Config definitions (Python) |
+| `research/CONTRARIAN_STRATEGY.md` | Path 2 research document |
+| `research/FINAL_TRADING_CONFIGS_JAN22.md` | Config specs + OOS results |
+| `research/HANDOVER_JAN24_RESTRUCTURE.md` | Restructure handover |

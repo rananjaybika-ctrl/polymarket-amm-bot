@@ -1,215 +1,120 @@
-# Handoff Document - Polymarket AMM Bot
+# Next Steps - Polymarket Strategy Development
 
-**Created**: 2025-12-20 21:20 PST
-
----
-
-## Original Task
-
-Implement a new "Directional Mode" for the Polymarket AMM trading bot that replicates the user's manual trading style:
-1. Start with a bias (BULLISH or BEARISH) specified via CLI
-2. Accumulate shares on the bias side
-3. If price moves against, average down on bias side
-4. If sustained impulsive move detected (via std dev of Binance BTCUSDT), flip bias and gradually hedge
-5. Priority 1 is always hedging to get pair cost < $0.95
-6. Emergency hedge with <5 mins remaining
-7. Time-decayed attractive price threshold (accept higher prices as time runs out)
-
----
-
-## Work Completed
-
-### 1. Created Binance WebSocket Client
-**File**: `/Users/rananjaybika/polymarket-amm-bot/src/api/binance_client.py` (NEW - 323 lines)
-
-- Real-time BTCUSDT price feed via public WebSocket (no API key required)
-- Strike price tracking (reference at market open)
-- Rolling window statistics for flip detection
-- Key methods:
-  - `connect()` / `disconnect()` - WebSocket lifecycle
-  - `set_strike_price()` - Set reference price at market open
-  - `get_std_dev(window_seconds)` - Standard deviation of price changes
-  - `calculate_z_score(window_seconds)` - Z-score for flip detection
-  - Properties: `current_price`, `strike_price`, `price_vs_strike_pct`
-
-### 2. Created Directional Strategy Service
-**File**: `/Users/rananjaybika/polymarket-amm-bot/src/services/directional_strategy.py` (NEW - 636 lines)
-
-**Components**:
-- `DirectionalConfig` - All configuration parameters
-- `FlipDetector` - Time-decay adjusted flip detection
-- `DirectionalTradingStrategy` - Main trading logic with phases
-
-**Trading Phases**:
-1. `ACCUMULATE` - Buy bias side at attractive prices
-2. `REBALANCE` - Priority hedge to balance position (pair cost < $0.95)
-3. `AVERAGE_DOWN` - After balanced, improve pair cost on bias side
-4. `EMERGENCY_HEDGE` - <5 mins left, immediate full hedge
-5. `BALANCED` - Fully hedged, wait for resolution
-
-**Flip Detection Algorithm**:
-```python
-time_factor = time_remaining / 900  # 0.0 to 1.0
-adjusted_sigma = 1.5 + (1.0 * time_factor)  # 1.5σ late, 2.5σ early
-time_conviction = (1 - time_factor) * abs(price_vs_strike_pct) * 10
-
-# Flip if: (z_score > adjusted_sigma OR time_conviction > 5.0) AND sustained > 30s
-```
-
-**Time-Decayed Attractive Price** (latest feature):
-```python
-def _get_attractive_price(self) -> float:
-    time_factor = min(1.0, max(0.0, self._time_remaining_secs / 900))
-    early = self.config.attractive_price_early  # $0.75
-    late = self.config.attractive_price_late    # $0.90
-    attractive = early + (late - early) * (1 - time_factor)
-    return attractive
-```
-
-| Time Remaining | Threshold |
-|----------------|-----------|
-| 15 mins | $0.75 |
-| 10 mins | $0.80 |
-| 5 mins | $0.85 |
-| 2 mins | $0.88 |
-| 0 mins | $0.90 |
-
-### 3. Modified run_paper_bot.py
-**File**: `/Users/rananjaybika/polymarket-amm-bot/scripts/run_paper_bot.py`
-
-**Changes**:
-- Added imports for directional mode components (lines 51-57)
-- Added directional mode parameters to `__init__` (lines 92-95, 118-121)
-- Added `_directional_trading_cycle()` method for directional trading logic
-- Added CLI arguments (lines 1868-1923):
-  - `--directional` - Enable directional mode
-  - `--bias BULLISH|BEARISH` - Initial trading bias
-  - `--sigma-threshold` - Std devs for flip (default: 2.0)
-  - `--sustained-seconds` - Seconds to confirm flip (default: 30)
-  - `--window-seconds` - Rolling window for stats (default: 60)
-  - `--attractive-price-early` - Max price early in market (default: 0.75)
-  - `--attractive-price-late` - Max price late in market (default: 0.90)
-  - `--hedge-increment` - Shares per hedge cycle (default: 5)
-  - `--flip-cooldown` - Seconds between flips (default: 60)
-  - `--max-position-pct` - Max shares per side as % of balance (default: 15%)
-  - `--pair-cost-target` - Target pair cost for hedging (default: 0.95)
-
-### 4. Test Run Successful
-Bot was tested and executed trades:
-```
-Single-side UP trade: 5/5 filled @ $0.7601, cost=$3.8005, balance=$96.20
-Single-side UP trade: 2/5 filled @ $0.7703, cost=$1.5407, balance=$94.66
-Single-side DOWN trade: 5/5 filled @ $0.2400, cost=$1.2001, balance=$93.46
-```
-
----
-
-## Work Remaining
-
-### Immediate
-None - the directional mode implementation is complete and tested.
-
-### Future Enhancements (Not Requested Yet)
-1. **CSV Logging Extension**: Add directional-specific columns:
-   - `btc_price`, `strike_price`, `price_vs_strike_pct`, `bias`, `phase`, `flip_count`, `z_score`, `sustained_secs`
-
-2. **Emergency Balancing Before Expiry**: Force buy at any price in final 30-60 seconds (user said "not yet" when asked)
-
-3. **Live Display Mode**: Real-time terminal display of directional metrics
-
----
-
-## Attempted Approaches
-
-### Issue: Bot Not Trading Initially
-- **Problem**: First test run showed no trades because prices ($0.51) were above the attractive threshold ($0.55)
-- **Solution**: User requested time-decayed attractive price - accept <$0.75 early, <$0.90 late
-- **Implementation**: Added `_get_attractive_price()` method with linear interpolation
-
-### Issue: AttributeError on Startup
-- **Problem**: After renaming `attractive_price` to `attractive_price_early`/`attractive_price_late`, old references remained
-- **Locations Fixed**:
-  - `directional_strategy.py:503` - `_evaluate_accumulate()`
-  - `directional_strategy.py:576` - `_evaluate_average_down()`
-  - `run_paper_bot.py:931` - Startup logging
-  - `run_paper_bot.py:1956` - DirectionalConfig instantiation
-
----
-
-## Critical Context
-
-### Key Design Decisions
-
-1. **Hedging Priority**: Priority 1 is ALWAYS hedging to get pair cost < $0.95, not accumulating on bias side
-
-2. **Emergency Hedge Threshold**: <5 minutes remaining (user changed from original 3 minutes)
-
-3. **Max Share Price Hard Cap**: $0.95 - Never buy above this, even in emergency hedge. Better to accept unhedged loss than lock in guaranteed loss.
-
-4. **Max Position Per Side**: 15% of starting balance (e.g., $100 balance = max 15 shares per side)
-
-5. **Flip Detection**: Uses Binance BTCUSDT spot price, NOT Polymarket prices. Strike = close price at market open (e.g., 1:00pm EST for 15-min market)
-
-### Configuration Defaults
-```python
-@dataclass
-class DirectionalConfig:
-    sigma_threshold: float = 2.0          # Base std devs for flip
-    sustained_seconds: float = 30.0       # Seconds to confirm flip
-    window_seconds: int = 60              # Rolling window for stats
-    flip_cooldown_seconds: float = 60.0   # Min time between flips
-    max_position_pct: float = 0.15        # 15% of balance per side
-    attractive_price_early: float = 0.75  # Max price early in market
-    attractive_price_late: float = 0.90   # Max price late in market
-    dip_threshold_pct: float = 0.02       # 2% dip to average down
-    trade_size: int = 5                   # Shares per trade
-    hedge_increment: int = 5              # Shares per hedge cycle
-    max_share_price: float = 0.95         # Never buy above
-    pair_cost_target: float = 0.95        # Target pair cost
-    emergency_threshold_secs: int = 300   # 5 minutes
-```
-
-### Backup Location
-Full-featured version (with all 4 trading modes) backed up at:
-`/Users/rananjaybika/polymarket-amm-bot-full-version/`
-
-Current version only has Accumulation Mode + new Directional Mode.
+**Updated**: 2026-01-24
 
 ---
 
 ## Current State
 
-### Status: COMPLETE
+### Active on AWS (54.170.244.221)
 
-All requested features implemented and tested:
-- [x] Binance WebSocket client for BTCUSDT price feed
-- [x] Strike price tracking at market open
-- [x] Flip detection with time decay (easier to flip late in market)
-- [x] Trading phases (accumulate → rebalance → average_down → emergency_hedge → balanced)
-- [x] Emergency hedge with <5 mins remaining
-- [x] Max 15% of balance per side
-- [x] Never buy above $0.95 (even emergency hedge)
-- [x] Time-decayed attractive price ($0.75 early → $0.90 late)
-- [x] CLI arguments for all parameters
+| Process | Duration | Ends |
+|---------|----------|------|
+| `run_data_collection.py --hours 46` | Jan 23 08:16 UTC - Jan 25 06:16 UTC | **Jan 25 12:00 PM IST** |
 
-### Run Command
+**SSH:** `ssh -i ~/Downloads/polymarket-key.pem ubuntu@54.170.244.221`
+
+**DO NOT INTERRUPT** — AWS data collection ends Jan 25. Let it finish.
+
+### Data Available
+- **Training+OOS2**: 81.71 hours (Jan 16-19), 254 markets, 7.7M BTC rows
+- **OOS3**: 26.37 hours (Jan 22-23), 90 markets — VALIDATED
+- **OOS4**: 24.2 hours (Jan 23-24) — VALIDATED
+- **Combined OOS3+OOS4**: ~50.6 hours multi-regime data
+
+### Active Strategies (Post-Restructure Jan 24)
+
+| Strategy | Path | Status | OOS4 Performance |
+|----------|------|--------|-------------------|
+| **AGGRESSIVE** | Path 1 | PRIMARY | $16.72/hr @50sh, 72.4% dir acc, 145 trades |
+| **CONTRARIAN** | Path 2 | VALIDATED | $618/hr @2500sh ($12.36/hr @50sh equiv), 42% WR, 50 trades |
+| ~~BALANCED+EWMA~~ | - | DEPRECATED | $11.17/hr @50sh (regressed from $26.38/hr OOS3, regime-dependent) |
+| ~~Path 2 partial hedge~~ | - | DELETED | Code and data removed Jan 24 |
+
+---
+
+## Jan 25 Priorities (After AWS Data Collection Ends)
+
+### Priority 1: Combined OOS3+OOS4 Final Validation
+
+~50.6 hours of multi-regime data. Tighter confidence intervals.
+
 ```bash
-# 2-hour run (120 minutes)
-python scripts/run_paper_bot.py --directional --bias BULLISH --duration 120
+# Already combined in:
+# research/observer/grid_obs_oos3_oos4_combined.csv
+# research/observer/btc_prices_oos3_oos4_combined.csv
 
-# Background run
-nohup python scripts/run_paper_bot.py --directional --bias BULLISH --duration 120 > bot_output.log 2>&1 &
-
-# Check progress
-tail -f bot_output.log
+python research/validate_oos4_all_paths.py  # Update data paths to combined
 ```
 
-### Files Modified This Session
-| File | Status |
-|------|--------|
-| `src/api/binance_client.py` | NEW (323 lines) |
-| `src/services/directional_strategy.py` | NEW (636 lines) |
-| `scripts/run_paper_bot.py` | MODIFIED (added ~200 lines) |
+**Expected**: ~290 AGGRESSIVE trades, ~100 CONTRARIAN trades.
 
-### No Running Instances
-User was provided command to run at 9:30pm PST for 2 hours.
+### Priority 2: Go-Live Preparation (AGGRESSIVE)
+
+Direction accuracy (72.4%) consistent across 3 OOS periods. Profitable in all.
+
+**Remaining concerns:**
+1. Execution latency (passive fill assumption — verify on real orderbook)
+2. Position sizing (start with $100-200 bankroll, 5-10 shares per trade)
+3. Order placement timing (1200ms lookback = need sub-second reaction)
+
+**Steps:**
+1. Set up paper trading with real orderbook data
+2. Measure actual fill rates vs backtest assumptions
+3. Start with minimum size (5 shares) to validate execution
+
+### Priority 3: CONTRARIAN Execution Design
+
+Simpler execution than AGGRESSIVE (no hedge leg), but needs:
+1. Entry price verification ($0.30 actually fillable?)
+2. Latency budget (60s+ delay means less time pressure)
+3. Position sizing ($0.30 × 2500 = $750 per trade, need bankroll plan)
+
+---
+
+## Strategy Definitions (Jan 24 Restructure)
+
+### Path 1: AGGRESSIVE (Spike Detection + Full Hedge)
+- OU threshold, EWMA z-score, 1200ms lookback
+- Cycling ON, 0 < z < 1.5, 180s time-stop
+- Full hedge on loser side
+- OOS4: $16.72/hr @50sh, 72.4% direction accuracy, 145 trades
+
+### Path 2: CONTRARIAN (Bet Against BTC Direction)
+- $0.30 entry price, 2500 shares per trade
+- Adaptive EWMA vol gate (k=0.5, halflife=50)
+- Z-score >= 0.5, delay >= 60s
+- Hold to resolution (no stops)
+- OOS4: $618/hr @2500sh, 42% WR (breakeven = 30%)
+
+---
+
+## Performance Summary (All Periods)
+
+| Period | Hours | AGGRESSIVE $/hr @50sh | AGGRESSIVE Dir% | CONTRARIAN $/hr |
+|--------|-------|----------------------|-----------------|-----------------|
+| IS (Jan 16-19) | 81.7 | $7.76 | 68.9% | N/A |
+| OOS3 (Jan 22-23) | 26.4 | $17.59 | 70.2% | N/A |
+| OOS4 (Jan 23-24) | 24.2 | $16.72 | 72.4% | $618/hr @2500sh |
+
+---
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `research/validate_oos4_all_paths.py` | OOS4 validation (AGGRESSIVE + CONTRARIAN) |
+| `research/volatility_filter_analysis.py` | Core backtest with z-score filtering |
+| `research/MASTER_PLAN_TWO_PATHS.md` | Strategy definitions (Path 1 + Path 2) |
+| `research/TRADING_CONFIGS.py` | Config definitions (Python) |
+| `research/CONTRARIAN_STRATEGY.md` | Contrarian strategy research |
+| `research/HANDOVER_JAN24_RESTRUCTURE.md` | Jan 24 restructure handover |
+
+---
+
+## Decision Points
+
+1. **AGGRESSIVE go-live**: After combined OOS3+OOS4 confirms edge, start paper trading
+2. **CONTRARIAN sizing**: At 2500sh, need $750/trade. Start smaller (500sh = $150/trade)?
+3. **Concurrent strategies**: Can run both simultaneously (different markets, different signals)
+4. **AWS data**: Use remaining collection for OOS5 validation if needed

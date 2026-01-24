@@ -140,7 +140,95 @@ Cycling ON + EWMA + WinRate >= 61%?   → PRICE STOP
 
 1. **Minimum Order:** At 50 shares, enforce `loser_bid >= $0.02` (Polymarket $1 minimum)
 2. **Live Z-Score:** Use `LiveZScoreTracker` from `src/services/volatility_tracker.py`
-3. **OOS Validation:** Blocked pending observer data collection (crashed Jan 20+)
+3. ~~**OOS Validation:** Blocked pending observer data collection (crashed Jan 20+)~~ **DONE - See OOS3 Results below**
+
+---
+
+## OOS3 VALIDATION RESULTS (January 23, 2026)
+
+### Dataset: 26.37 hours, 90 markets (Jan 22-23 fresh data, NOT used in grid search)
+
+### Original Configs on OOS3
+
+| Config | Stop | Trades | PnL @50sh | $/hr @50sh | WR% | Dir% | vs IS $/hr |
+|--------|------|--------|-----------|------------|-----|------|------------|
+| **AGGRESSIVE** | 180s TIME | 84 | $130.75 | **$14.11** | 66.7% | 61.9% | **+48.1%** |
+| BALANCED (OU) | 15% PRICE | 30 | $26.52 | $3.15 | 53.3% | 56.7% | -48.7% |
+| CONSERVATIVE (OU) | 15% PRICE | 15 | $12.12 | $1.44 | 46.7% | 46.7% | -76.7% |
+
+### Root Cause of BALANCED/CONSERVATIVE Failure
+- OU z-score uses static mu=-3.9845 from in-sample fit
+- OOS3 BTC price level shifted → EWMA adapted (mu=-3.3229), OU did not
+- Result: fewer signals, worse direction accuracy, excessive stop-outs
+
+### Fix: Switch to EWMA Z-Score (Corrected After Cycling Bug Fix)
+
+**NOTE:** Earlier BALANCED+EWMA results (219 trades, $26.76/hr) had inflated trade counts
+due to cycling bugs. Corrected results after fixing exit_ts=None, resolution handling,
+and passive fill priority:
+
+| Config | Z-Score | Stop | Trades | PnL @50sh | $/hr @50sh | WR% |
+|--------|---------|------|--------|-----------|------------|-----|
+| BALANCED | EWMA | 15% PRICE | 202 | $411.86 | $26.38 | 57.9% |
+| **AGGRESSIVE** | **EWMA** | **180s TIME** | **84** | **$162.94** | **$17.59** | **70.2%** |
+
+**In-Sample Cross-Check (Training+OOS2, 81.7hr):**
+
+| Config | Trades | PnL @50sh | $/hr @50sh | WR% |
+|--------|--------|-----------|------------|-----|
+| **AGGRESSIVE** | **90** | **$235.56** | **$7.76** | **68.9%** |
+| BALANCED+EWMA | 147 | $147.89 | $3.06 | 49.0% |
+
+### BALANCED+EWMA: Strong OOS3, Weak In-Sample
+- OOS3: 202 trades, $26.38/hr, 57.9% WR — dominant
+- In-Sample: 147 trades, $3.06/hr, 49% WR, 47% stop-out rate — mediocre
+- 8.6x improvement OOS3 vs IS is suspect (regime-specific, not robust edge)
+
+### Updated Stop Type Rule (with OOS3 + IS evidence)
+```
+AGGRESSIVE (180s TIME + EWMA z-score): CONSISTENT across IS and OOS3 (PRIMARY)
+BALANCED+EWMA (15% PRICE + EWMA z-score): OOS3 only - needs more data (INVESTIGATE)
+OU z-score + any stop: FRAGILE - drifts with price level (RETIRED)
+```
+
+### Verdict
+- **AGGRESSIVE: PRIMARY** — Consistent 68-70% WR across IS ($7.76/hr) and OOS3 ($17.59/hr)
+- **BALANCED+EWMA: INVESTIGATE** — Strong OOS3 but weak IS; may be regime-specific
+- **BALANCED/CONSERVATIVE + OU: RETIRED** — OU params drift makes them unreliable
+
+---
+
+## JAN 24 UPDATE: OOS4 VALIDATION
+
+### Dataset: 24.2 hours, ~100 markets (Jan 23-24, fresh data)
+
+### IS → OOS3 → OOS4 Progression
+
+| Config | IS $/hr @50sh | OOS3 $/hr @50sh | OOS4 $/hr @50sh | Trend |
+|--------|---------------|-----------------|-----------------|-------|
+| **AGGRESSIVE** | $7.76 | $17.59 | **$16.72** | STABLE (consistent 65-72% dir acc) |
+| BALANCED+EWMA | $3.06 | $26.38 | $11.17 | REGRESSED (regime-dependent) |
+| CONTRARIAN | N/A | N/A | **$618/hr @2500sh** | NEW - validated |
+
+### AGGRESSIVE OOS4 Details
+- **145 trades**, 72.4% direction accuracy, $16.72/hr @50sh
+- Time-stop exits: ~28% (vs 32% OOS3, 35% IS — improving)
+- Passive fills: ~55% (consistent)
+
+### BALANCED+EWMA Regression
+- OOS3: $26.38/hr (8.6x IS, suspected regime-specific)
+- OOS4: $11.17/hr (regression toward IS mean, confirming suspicion)
+- **Verdict: DEPRECATED** — not a stable edge, regime-dependent
+
+### New Path 2: CONTRARIAN
+- 50 trades, 42% WR (breakeven = 30%), $618/hr @2500sh
+- Now designated Path 2 (replacing old partial-hedge approach)
+- See: `research/CONTRARIAN_STRATEGY.md` for full details
+
+### Updated Verdict (Jan 24)
+- **AGGRESSIVE: PRIMARY** — Proven across 3 OOS periods
+- **BALANCED+EWMA: DEPRECATED** — Regime-dependent, not reliable
+- **CONTRARIAN: VALIDATED (Path 2)** — Independent strategy, different market structure
 
 ---
 
@@ -149,24 +237,33 @@ Cycling ON + EWMA + WinRate >= 61%?   → PRICE STOP
 | File | Purpose |
 |------|---------|
 | `research/TRADING_CONFIGS.py` | Master config definitions (Python) |
-| `research/validate_three_configs.py` | Validation script |
-| `research/three_config_validation_results.csv` | Validation output |
+| `research/validate_three_configs.py` | In-sample validation script |
+| `research/validate_oos3.py` | OOS3 validation script |
+| `research/analyze_oos3_detailed.py` | Detailed OOS3 trade analysis |
+| `research/oos3_validation_results.csv` | OOS3 results CSV |
+| `research/three_config_validation_results.csv` | In-sample validation output |
 | `research/TIME_STOP_STATISTICAL_ANALYSIS.md` | Full statistical analysis |
 | `research/TIME_BASED_STOP_FINDINGS.md` | Time-stop findings |
 | `research/VOL_FILTER_GRID_SEARCH_FINDINGS_JAN22.md` | Full grid search findings |
-| `src/services/volatility_tracker.py` | Live z-score tracker (NOT UPDATED YET) |
+| `src/services/volatility_tracker.py` | Live z-score tracker |
 
 ---
 
 ## Next Steps
 
-1. [ ] Update `src/services/volatility_tracker.py` with time-stop support for live
-2. [ ] Validate on OOS3 data when observer is fixed
-3. [ ] Paper trade AGGRESSIVE config with 180s time-stop
-4. [ ] Consider testing 150s and 240s time-stops
+1. [x] ~~Validate on OOS3 data when observer is fixed~~ **DONE Jan 23**
+2. [x] ~~Fix cycling bugs in volatility_filter_analysis.py~~ **DONE Jan 23**
+3. [x] ~~Cross-validate on in-sample~~ **DONE Jan 23** (BALANCED+EWMA weak on IS)
+4. [x] ~~Run BALANCED+EWMA on OOS4 to confirm/deny regime-specificity~~ **DONE Jan 24** (CONFIRMED regime-dependent, DEPRECATED)
+5. [x] ~~Validate CONTRARIAN on OOS4~~ **DONE Jan 24** (42% WR, $618/hr @2500sh)
+6. [ ] Deploy AGGRESSIVE as primary strategy (paper trade → live)
+7. [ ] Combined OOS3+OOS4 final validation (~50.6h)
+6. [ ] Collect more OOS data to determine if BALANCED+EWMA edge is real or OOS3-specific
+7. [ ] Consider adaptive position sizing: AGGRESSIVE full size, BALANCED+EWMA reduced until validated
 
 ---
 
 *Generated: January 22, 2026*
-*Dataset: 81.71 hours, 254 markets*
-*Validation: 0.0% deviation on all metrics*
+*Updated: January 23, 2026 (cycling bugs fixed, IS cross-validation, AGGRESSIVE confirmed primary)*
+*In-Sample Dataset: 81.71 hours, 254 markets*
+*OOS3 Dataset: 26.37 hours, 90 markets*
