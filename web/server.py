@@ -230,7 +230,7 @@ class AggressiveBotConfig(BaseModel):
     zscore_method: str = "ewma"           # Z-score tracking method
     lookback_ms: int = 1200               # Spike lookback in milliseconds
     time_stop_seconds: float = 180.0      # Time-stop exit (3 minutes)
-    use_cycling: bool = True              # Keep trading after target hit
+    use_cycling: bool = True              # Keep trading after hedge achieved, merge, continue
     z_lo: float = 0.0                     # Z-score lower bound for entry
     z_hi: float = 1.5                     # Z-score upper bound for entry
     base_size: int = 50                   # Order size per trade
