@@ -335,9 +335,6 @@ strategies = {
     "aggressive": StrategyState("aggressive"),          # Path 1: Spike detection + velocity confirmation
     "contrarian": StrategyState("contrarian"),          # Path 2: Bet against BTC direction
     "volume_weighted": StrategyState("volume_weighted"), # Gabagool-style grid maker
-    # Legacy - keep for backward compat but not shown in UI
-    "standard": StrategyState("standard"),
-    "accumulation": None,  # Will point to "standard" for backward compat
 }
 
 # Legacy global state for backward compatibility
@@ -446,13 +443,8 @@ async def handle_auto_restart(strategy_name: str):
                 await broadcast_status()
                 strategy.task = asyncio.create_task(run_volume_weighted_bot(vw_config, strategy))
             else:
-                # Accumulation strategies (standard) ONLY
-                accum_config = AccumulationBotConfig(**config)
-                strategy.status["running"] = True
-                strategy.status["error"] = None
-                strategy.status["restarted_at"] = now.isoformat()
-                await broadcast_status()
-                strategy.task = asyncio.create_task(run_accumulation_bot(accum_config, strategy))
+                logger.warning(f"[AUTO-RESTART] Unknown strategy: {strategy_name}")
+                return
 
             logger.info(f"[AUTO-RESTART] Successfully restarted {strategy_name}")
 
@@ -572,14 +564,10 @@ async def get_status(username: str = Depends(verify_credentials)):
         "aggressive": strategies["aggressive"].status,
         "contrarian": strategies["contrarian"].status,
         "volume_weighted": strategies["volume_weighted"].status,
-        # Legacy format for backward compatibility
-        "standard": strategies["standard"].status,
-        "accumulation": strategies["standard"].status,  # Alias to standard
         "running": (
             strategies["aggressive"].status["running"] or
             strategies["contrarian"].status["running"] or
-            strategies["volume_weighted"].status["running"] or
-            strategies["standard"].status["running"]
+            strategies["volume_weighted"].status["running"]
         ),
         "kill_switch_active": is_kill_switch_active(),
     }
@@ -880,100 +868,8 @@ async def emergency_stop(username: str = Depends(verify_credentials)):
 
 
 # =============================================================================
-# NEW DUAL-STRATEGY ENDPOINTS
+# STRATEGY ENDPOINTS
 # =============================================================================
-
-@app.post("/api/start/accumulation")
-async def start_accumulation(config: AccumulationBotConfig, username: str = Depends(verify_credentials)):
-    """Start an Accumulation trading strategy. Requires authentication."""
-    # Clear kill switch when user explicitly starts - they want to run
-    clear_kill_switch()
-
-    # Determine which strategy slot to use based on accum_mode
-    strategy_name = config.accum_mode
-    if strategy_name != "standard":
-        strategy_name = "standard"
-
-    strategy = strategies[strategy_name]
-
-    # Check if actually running (task exists and not done) vs just stale status
-    actually_running = (
-        strategy.status["running"] and
-        strategy.task is not None and
-        not strategy.task.done()
-    )
-
-    if actually_running:
-        return JSONResponse(
-            status_code=400,
-            content={"error": f"{strategy_name.title()} accumulation is already running"}
-        )
-
-    # Reset stale status if task is done but status wasn't updated
-    if strategy.status["running"] and (strategy.task is None or strategy.task.done()):
-        strategy.status["running"] = False
-        strategy.reset_trading_data()  # Clear stale position data
-        strategy.task = None
-
-    # Validate datetime
-    try:
-        start_dt = datetime.fromisoformat(config.start_datetime)
-        end_dt = datetime.fromisoformat(config.end_datetime)
-        now = datetime.now()
-        if end_dt <= start_dt:
-            return JSONResponse(status_code=400, content={"error": "End time must be after start time"})
-    except ValueError as e:
-        return JSONResponse(status_code=400, content={"error": f"Invalid datetime: {e}"})
-
-    # Validate balance for live mode
-    if config.mode == "live":
-        try:
-            from src.config import Config
-            from src.api.polymarket_client import PolymarketClient
-
-            pm_config = Config()
-            pm_config.validate()
-            client = PolymarketClient(pm_config)
-            await client.connect()
-            actual_balance = await client.get_balance()
-            await client.disconnect()
-
-            if config.starting_balance > actual_balance:
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "error": f"Starting balance ${config.starting_balance:.2f} exceeds "
-                                 f"Polymarket balance ${actual_balance:.2f}"
-                    }
-                )
-            logger.info(f"[LIVE] Balance check passed: ${actual_balance:.2f} available")
-        except Exception as e:
-            return JSONResponse(status_code=400, content={"error": f"Failed to check Polymarket balance: {e}"})
-
-    # Update strategy status
-    strategy.status = {
-        "running": True,
-        "strategy": strategy_name,
-        "accum_mode": config.accum_mode,
-        "error": None,
-        "config": config.dict(),
-        "start_time": datetime.now(timezone.utc).isoformat(),
-        "balance": config.starting_balance,
-    }
-
-    # Start bot in background
-    strategy.task = asyncio.create_task(run_accumulation_bot(config, strategy))
-
-    await broadcast_status()
-    return {"status": "started", "strategy": strategy_name, "accum_mode": config.accum_mode, "config": config.dict()}
-
-
-@app.post("/api/start/standard")
-async def start_standard(config: AccumulationBotConfig, username: str = Depends(verify_credentials)):
-    """Start Standard accumulation mode. Requires authentication."""
-    config.accum_mode = "standard"
-    return await start_accumulation(config)
-
 
 @app.post("/api/start/aggressive")
 async def start_aggressive(config: AggressiveBotConfig, username: str = Depends(verify_credentials)):
@@ -1755,8 +1651,6 @@ async def websocket_endpoint(websocket: WebSocket):
             "aggressive": strategies["aggressive"].status,
             "contrarian": strategies["contrarian"].status,
             "volume_weighted": strategies["volume_weighted"].status,
-            "standard": strategies["standard"].status,
-            "accumulation": strategies["standard"].status,  # Legacy alias
         })
 
         # Keep connection alive
@@ -1776,8 +1670,6 @@ async def broadcast_status():
         "aggressive": strategies["aggressive"].status,
         "contrarian": strategies["contrarian"].status,
         "volume_weighted": strategies["volume_weighted"].status,
-        "standard": strategies["standard"].status,
-        "accumulation": strategies["standard"].status,  # Legacy alias
     }
     for ws in connected_websockets[:]:
         try:
