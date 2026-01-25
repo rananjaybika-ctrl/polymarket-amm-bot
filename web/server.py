@@ -223,7 +223,7 @@ class AggressiveBotConfig(BaseModel):
     market: str = "btc-15m"
     start_datetime: str  # ISO format (local time from browser)
     end_datetime: str
-    starting_balance: float = 500.0
+    starting_balance: float = 170.0
 
     # Path 1 parameters
     threshold_method: str = "ou"          # "ou" for adaptive, "fixed" for static
@@ -247,7 +247,7 @@ class ContrarianBotConfig(BaseModel):
     market: str = "btc-15m"
     start_datetime: str  # ISO format (local time from browser)
     end_datetime: str
-    starting_balance: float = 500.0
+    starting_balance: float = 170.0
 
     # Path 2 parameters
     pullback_threshold: float = 0.0001    # 0.01% pullback from peak to trigger
@@ -255,7 +255,7 @@ class ContrarianBotConfig(BaseModel):
     entry_price_min: float = 0.20         # Entry price floor ($0.20)
     min_delay_seconds: int = 60           # Wait 60s from window start
     z_threshold: float = 0.5              # Minimum z-score for entry
-    shares_per_trade: int = 2500          # Large size for contrarian bets
+    shares_per_trade: int = 50            # Shares per trade
 
 
 class VolumeWeightedBotConfig(BaseModel):
@@ -267,7 +267,7 @@ class VolumeWeightedBotConfig(BaseModel):
     market: str = "btc-15m"
     start_datetime: str  # ISO format (local time from browser)
     end_datetime: str
-    starting_balance: float = 500.0
+    starting_balance: float = 170.0
 
     # VW-specific parameters (Gabagool-style)
     vw_imbalance_pct: float = 0.20        # Max 20% imbalance tolerance

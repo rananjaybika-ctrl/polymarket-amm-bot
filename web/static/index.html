@@ -23,26 +23,26 @@
 
         <!-- Mode Cards Container -->
         <div class="cards-container">
-            <!-- ========== CALCULUS MAKER MODE CARD ========== -->
-            <div class="mode-card" id="card-calculus-maker">
+            <!-- ========== AGGRESSIVE MODE CARD ========== -->
+            <div class="mode-card" id="card-aggressive">
                 <div class="card-header">
-                    <h2>CALCULUS MAKER</h2>
-                    <div class="status-badge stopped" id="badge-calculus-maker">
+                    <h2>AGGRESSIVE</h2>
+                    <div class="status-badge stopped" id="badge-aggressive">
                         <span class="status-dot"></span>
                         <span class="status-text">Stopped</span>
                     </div>
                 </div>
 
                 <!-- Live Data Section -->
-                <div class="card-live-data" id="live-calculus-maker">
+                <div class="card-live-data" id="live-aggressive">
                     <div class="market-row">
                         <span class="market-label">Market:</span>
-                        <span class="market-value" id="calculus-maker-market">--</span>
-                        <span class="time-remaining" id="calculus-maker-time">--:--</span>
+                        <span class="market-value" id="aggressive-market">--</span>
+                        <span class="time-remaining" id="aggressive-time">--:--</span>
                     </div>
                     <div class="market-prices-row">
-                        <span class="price up" id="calculus-maker-up-price">UP $--</span>
-                        <span class="price down" id="calculus-maker-down-price">DOWN $--</span>
+                        <span class="price up" id="aggressive-up-price">UP $--</span>
+                        <span class="price down" id="aggressive-down-price">DOWN $--</span>
                     </div>
                     <table class="position-table">
                         <thead>
@@ -56,56 +56,56 @@
                         <tbody>
                             <tr class="up-row">
                                 <td class="side-label">up</td>
-                                <td class="avg-price up" id="calculus-maker-up-avg">--</td>
-                                <td class="qty up" id="calculus-maker-up-qty">--</td>
-                                <td class="cost" id="calculus-maker-up-cost">--</td>
+                                <td class="avg-price up" id="aggressive-up-avg">--</td>
+                                <td class="qty up" id="aggressive-up-qty">--</td>
+                                <td class="cost" id="aggressive-up-cost">--</td>
                             </tr>
                             <tr class="down-row">
                                 <td class="side-label">down</td>
-                                <td class="avg-price down" id="calculus-maker-down-avg">--</td>
-                                <td class="qty down" id="calculus-maker-down-qty">--</td>
-                                <td class="cost" id="calculus-maker-down-cost">--</td>
+                                <td class="avg-price down" id="aggressive-down-avg">--</td>
+                                <td class="qty down" id="aggressive-down-qty">--</td>
+                                <td class="cost" id="aggressive-down-cost">--</td>
                             </tr>
                         </tbody>
                     </table>
                     <div class="metrics-row">
                         <div class="metric pairs">
-                            <span class="value" id="calculus-maker-pairs">--</span>
-                            <span class="label">@ <span id="calculus-maker-avg-pair-cost">--</span></span>
+                            <span class="value" id="aggressive-pairs">--</span>
+                            <span class="label">@ <span id="aggressive-avg-pair-cost">--</span></span>
                         </div>
                         <div class="metric">
                             <span class="label">Locked PNL</span>
-                            <span class="value pnl" id="calculus-maker-locked-pnl">--</span>
+                            <span class="value pnl" id="aggressive-locked-pnl">--</span>
                         </div>
                         <div class="metric">
                             <span class="label">Range PNL</span>
-                            <span class="value pnl" id="calculus-maker-pnl-range">--</span>
+                            <span class="value pnl" id="aggressive-pnl-range">--</span>
                         </div>
                         <div class="metric">
                             <span class="label">Balance</span>
-                            <span class="value" id="calculus-maker-balance">--</span>
+                            <span class="value" id="aggressive-balance">--</span>
                         </div>
                         <div class="metric">
                             <span class="label">Session P&L</span>
-                            <span class="value pnl" id="calculus-maker-realized-pnl">--</span>
+                            <span class="value pnl" id="aggressive-realized-pnl">--</span>
                         </div>
                     </div>
                 </div>
 
                 <!-- Collapsible Config -->
                 <div class="card-config">
-                    <button type="button" class="config-toggle expanded" id="toggle-calculus-maker">
+                    <button type="button" class="config-toggle expanded" id="toggle-aggressive">
                         <span class="toggle-icon">&#9660;</span> Config
                     </button>
-                    <div class="config-content expanded" id="config-calculus-maker">
+                    <div class="config-content expanded" id="config-aggressive">
                         <div class="config-row">
                             <div class="toggle-group mode-toggle">
                                 <label class="toggle-option">
-                                    <input type="radio" name="calculus_maker_mode" value="paper" checked>
+                                    <input type="radio" name="aggressive_mode" value="paper" checked>
                                     <span>Paper</span>
                                 </label>
                                 <label class="toggle-option live-option">
-                                    <input type="radio" name="calculus_maker_mode" value="live">
+                                    <input type="radio" name="aggressive_mode" value="live">
                                     <span>LIVE</span>
                                 </label>
                             </div>
@@ -113,365 +113,43 @@
                         <div class="config-grid">
                             <div class="config-field">
                                 <label>Start</label>
-                                <input type="datetime-local" id="calculus-maker-start" required>
+                                <input type="datetime-local" id="aggressive-start" required>
                             </div>
                             <div class="config-field">
                                 <label>End</label>
-                                <input type="datetime-local" id="calculus-maker-end" required>
+                                <input type="datetime-local" id="aggressive-end" required>
                             </div>
                             <div class="config-field">
                                 <label>Balance</label>
-                                <input type="number" id="calculus-maker-balance-input" value="170" min="1">
+                                <input type="number" id="aggressive-balance-input" value="170" min="1">
                             </div>
                             <div class="config-field">
-                                <label>Target Shares</label>
-                                <input type="number" id="calculus-maker-target" value="15" min="5" step="5" title="Target shares per side (multiples of 5)">
+                                <label>Lookback (ms)</label>
+                                <input type="number" id="aggressive-lookback" value="1200" min="100" step="100" title="Spike detection lookback in milliseconds">
                             </div>
                             <div class="config-field">
-                                <label>Min Shares</label>
-                                <input type="number" id="calculus-maker-min-shares" value="5" min="5" step="5" title="Minimum order size (Polymarket min = 5)">
+                                <label>Time Stop (s)</label>
+                                <input type="number" id="aggressive-time-stop" value="180" min="30" step="30" title="Exit if position held too long without profit">
                             </div>
                             <div class="config-field">
-                                <label>m_min</label>
-                                <input type="number" id="calculus-maker-m-min" value="0.005" step="0.001" min="0" max="0.1" title="Late market threshold (accept 0.5% edge)">
+                                <label>Z-Lo</label>
+                                <input type="number" id="aggressive-z-lo" value="0.0" step="0.1" min="0" max="2" title="Z-score lower bound for entry">
                             </div>
                             <div class="config-field">
-                                <label>m_max</label>
-                                <input type="number" id="calculus-maker-m-max" value="0.025" step="0.005" min="0" max="0.2" title="Early market threshold (require 2.5% edge)">
+                                <label>Z-Hi</label>
+                                <input type="number" id="aggressive-z-hi" value="1.5" step="0.1" min="0.5" max="3" title="Z-score upper bound for entry">
                             </div>
                             <div class="config-field">
-                                <label>Lambda</label>
-                                <input type="number" id="calculus-maker-lambda" value="0.004" step="0.001" min="0.001" max="0.05" title="Decay constant for mispricing threshold">
-                            </div>
-                            <div class="config-field">
-                                <label>Max Pair $</label>
-                                <input type="number" id="calculus-maker-max-pair" value="0.98" step="0.005" title="Maximum pair cost to accept">
-                            </div>
-                            <div class="config-field">
-                                <label>Imbal %</label>
-                                <input type="number" id="calculus-maker-imbalance" value="0.20" step="0.05" title="Max imbalance as % of position">
-                            </div>
-                            <div class="config-field">
-                                <label>Hard Max</label>
-                                <input type="number" id="calculus-maker-hard-max" value="10" step="1" min="1" title="HARD LIMIT: Stop ALL trading if imbalance >= this (shares)">
-                            </div>
-                            <div class="config-field">
-                                <label>Max Loss $</label>
-                                <input type="number" id="calculus-maker-max-loss" value="7" step="1" min="0" title="Stop trading if daily loss exceeds this amount (0 = disabled)">
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Action Buttons -->
-                <div class="card-actions">
-                    <button class="btn btn-start" id="btn-start-calculus-maker">START</button>
-                    <button class="btn btn-stop" id="btn-stop-calculus-maker" disabled>STOP</button>
-                    <button class="btn btn-nuke" id="btn-nuke-calculus-maker" disabled>NUKE</button>
-                </div>
-                <div id="error-calculus-maker" class="card-error hidden"></div>
-            </div>
-
-            <!-- ========== FAIR VALUE MM MODE CARD ========== -->
-            <div class="mode-card" id="card-fair-value-mm">
-                <div class="card-header">
-                    <h2>FAIR VALUE MM</h2>
-                    <div class="status-badge stopped" id="badge-fair-value-mm">
-                        <span class="status-dot"></span>
-                        <span class="status-text">Stopped</span>
-                    </div>
-                </div>
-
-                <!-- Live Data Section -->
-                <div class="card-live-data" id="live-fair-value-mm">
-                    <div class="market-row">
-                        <span class="market-label">Market:</span>
-                        <span class="market-value" id="fair-value-mm-market">--</span>
-                        <span class="time-remaining" id="fair-value-mm-time">--:--</span>
-                    </div>
-                    <div class="market-prices-row">
-                        <span class="price up" id="fair-value-mm-up-price">UP $--</span>
-                        <span class="price down" id="fair-value-mm-down-price">DOWN $--</span>
-                    </div>
-                    <table class="position-table">
-                        <thead>
-                            <tr>
-                                <th></th>
-                                <th>avg price</th>
-                                <th>qty</th>
-                                <th>cost</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr class="up-row">
-                                <td class="side-label">up</td>
-                                <td class="avg-price up" id="fair-value-mm-up-avg">--</td>
-                                <td class="qty up" id="fair-value-mm-up-qty">--</td>
-                                <td class="cost" id="fair-value-mm-up-cost">--</td>
-                            </tr>
-                            <tr class="down-row">
-                                <td class="side-label">down</td>
-                                <td class="avg-price down" id="fair-value-mm-down-avg">--</td>
-                                <td class="qty down" id="fair-value-mm-down-qty">--</td>
-                                <td class="cost" id="fair-value-mm-down-cost">--</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                    <div class="metrics-row">
-                        <div class="metric pairs">
-                            <span class="value" id="fair-value-mm-pairs">--</span>
-                            <span class="label">@ <span id="fair-value-mm-avg-pair-cost">--</span></span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Locked PNL</span>
-                            <span class="value pnl" id="fair-value-mm-locked-pnl">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Range PNL</span>
-                            <span class="value pnl" id="fair-value-mm-pnl-range">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Balance</span>
-                            <span class="value" id="fair-value-mm-balance">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Session P&L</span>
-                            <span class="value pnl" id="fair-value-mm-realized-pnl">--</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Collapsible Config -->
-                <div class="card-config">
-                    <button type="button" class="config-toggle expanded" id="toggle-fair-value-mm">
-                        <span class="toggle-icon">&#9660;</span> Config
-                    </button>
-                    <div class="config-content expanded" id="config-fair-value-mm">
-                        <div class="config-row">
-                            <div class="toggle-group mode-toggle">
-                                <label class="toggle-option">
-                                    <input type="radio" name="fair_value_mm_mode" value="paper" checked>
-                                    <span>Paper</span>
-                                </label>
-                                <label class="toggle-option live-option">
-                                    <input type="radio" name="fair_value_mm_mode" value="live">
-                                    <span>LIVE</span>
-                                </label>
-                            </div>
-                        </div>
-                        <div class="config-grid">
-                            <div class="config-field">
-                                <label>Start</label>
-                                <input type="datetime-local" id="fair-value-mm-start" required>
-                            </div>
-                            <div class="config-field">
-                                <label>End</label>
-                                <input type="datetime-local" id="fair-value-mm-end" required>
-                            </div>
-                            <div class="config-field">
-                                <label>Balance</label>
-                                <input type="number" id="fair-value-mm-balance-input" value="170" min="1">
-                            </div>
-                            <div class="config-field">
-                                <label>Edge $</label>
-                                <input type="number" id="fair-value-mm-edge" value="0.02" step="0.01" min="0.01" max="0.10" title="Edge below fair value (e.g., 0.02 = 2 cents)">
-                            </div>
-                            <div class="config-field">
-                                <label>Sens Early</label>
-                                <input type="number" id="fair-value-mm-sens-early" value="0.10" step="0.05" min="0.05" max="0.50" title="Price sensitivity at market open (10%)">
-                            </div>
-                            <div class="config-field">
-                                <label>Sens Late</label>
-                                <input type="number" id="fair-value-mm-sens-late" value="0.50" step="0.05" min="0.20" max="1.00" title="Price sensitivity near resolution (50%)">
-                            </div>
-                            <div class="config-field">
-                                <label>Reprice Thresh</label>
-                                <input type="number" id="fair-value-mm-reprice" value="0.03" step="0.01" min="0.01" max="0.10" title="Reprice if fair value changes more than this (3 cents)">
-                            </div>
-                            <div class="config-field">
-                                <label>Max Shares</label>
-                                <input type="number" id="fair-value-mm-max-shares" value="50" min="5" step="5" title="Maximum order size per trade">
-                            </div>
-                            <div class="config-field">
-                                <label>Min Shares</label>
-                                <input type="number" id="fair-value-mm-min-shares" value="5" min="5" step="5" title="Minimum order size (Polymarket min = 5)">
-                            </div>
-                            <div class="config-field">
-                                <label>m_min</label>
-                                <input type="number" id="fair-value-mm-m-min" value="0.01" step="0.001" min="0" max="0.1" title="Late market threshold (accept 1% edge)">
-                            </div>
-                            <div class="config-field">
-                                <label>m_max</label>
-                                <input type="number" id="fair-value-mm-m-max" value="0.04" step="0.005" min="0" max="0.2" title="Early market threshold (require 4% edge)">
-                            </div>
-                            <div class="config-field">
-                                <label>Lambda</label>
-                                <input type="number" id="fair-value-mm-lambda" value="0.005" step="0.001" min="0.001" max="0.05" title="Decay constant for mispricing threshold">
-                            </div>
-                            <div class="config-field">
-                                <label>Max Pair $</label>
-                                <input type="number" id="fair-value-mm-max-pair" value="0.995" step="0.005" title="Maximum pair cost to accept">
-                            </div>
-                            <div class="config-field">
-                                <label>Imbal %</label>
-                                <input type="number" id="fair-value-mm-imbalance" value="0.20" step="0.05" title="Max imbalance as % of position">
-                            </div>
-                            <div class="config-field">
-                                <label>Max Loss $</label>
-                                <input type="number" id="fair-value-mm-max-loss" value="7" step="1" min="0" title="Stop trading if daily loss exceeds this amount (0 = disabled)">
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Action Buttons -->
-                <div class="card-actions">
-                    <button class="btn btn-start" id="btn-start-fair-value-mm">START</button>
-                    <button class="btn btn-stop" id="btn-stop-fair-value-mm" disabled>STOP</button>
-                    <button class="btn btn-nuke" id="btn-nuke-fair-value-mm" disabled>NUKE</button>
-                </div>
-                <div id="error-fair-value-mm" class="card-error hidden"></div>
-            </div>
-
-            <!-- ========== SPREAD CAPTURE MODE CARD ========== -->
-            <div class="mode-card" id="card-spread-capture">
-                <div class="card-header">
-                    <h2>SPREAD CAPTURE</h2>
-                    <div class="status-badge stopped" id="badge-spread-capture">
-                        <span class="status-dot"></span>
-                        <span class="status-text">Stopped</span>
-                    </div>
-                </div>
-
-                <!-- Live Data Section -->
-                <div class="card-live-data" id="live-spread-capture">
-                    <div class="market-row">
-                        <span class="market-label">Market:</span>
-                        <span class="market-value" id="spread-capture-market">--</span>
-                        <span class="time-remaining" id="spread-capture-time">--:--</span>
-                    </div>
-                    <div class="market-prices-row">
-                        <span class="price up" id="spread-capture-up-price">UP $--</span>
-                        <span class="price down" id="spread-capture-down-price">DOWN $--</span>
-                    </div>
-                    <table class="position-table">
-                        <thead>
-                            <tr>
-                                <th></th>
-                                <th>avg price</th>
-                                <th>qty</th>
-                                <th>cost</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr class="up-row">
-                                <td class="side-label">up</td>
-                                <td class="avg-price up" id="spread-capture-up-avg">--</td>
-                                <td class="qty up" id="spread-capture-up-qty">--</td>
-                                <td class="cost" id="spread-capture-up-cost">--</td>
-                            </tr>
-                            <tr class="down-row">
-                                <td class="side-label">down</td>
-                                <td class="avg-price down" id="spread-capture-down-avg">--</td>
-                                <td class="qty down" id="spread-capture-down-qty">--</td>
-                                <td class="cost" id="spread-capture-down-cost">--</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                    <div class="metrics-row">
-                        <div class="metric pairs">
-                            <span class="value" id="spread-capture-pairs">--</span>
-                            <span class="label">@ <span id="spread-capture-avg-pair-cost">--</span></span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Locked PNL</span>
-                            <span class="value pnl" id="spread-capture-locked-pnl">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Range PNL</span>
-                            <span class="value pnl" id="spread-capture-pnl-range">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Balance</span>
-                            <span class="value" id="spread-capture-balance">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Session P&L</span>
-                            <span class="value pnl" id="spread-capture-realized-pnl">--</span>
-                        </div>
-                        <div class="metric">
-                            <span class="label">Merged Pairs</span>
-                            <span class="value pnl" id="spread-capture-merged-profit">--</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Collapsible Config -->
-                <div class="card-config">
-                    <button type="button" class="config-toggle expanded" id="toggle-spread-capture">
-                        <span class="toggle-icon">&#9660;</span> Config
-                    </button>
-                    <div class="config-content expanded" id="config-spread-capture">
-                        <div class="config-row">
-                            <div class="toggle-group mode-toggle">
-                                <label class="toggle-option">
-                                    <input type="radio" name="spread_capture_mode" value="paper" id="spread-capture-paper" checked>
-                                    <span>Paper</span>
-                                </label>
-                                <label class="toggle-option live-option">
-                                    <input type="radio" name="spread_capture_mode" value="live" id="spread-capture-live">
-                                    <span>LIVE</span>
-                                </label>
-                            </div>
-                        </div>
-                        <div class="config-grid">
-                            <div class="config-field">
-                                <label>Start</label>
-                                <input type="datetime-local" id="spread-capture-start" required>
-                            </div>
-                            <div class="config-field">
-                                <label>End</label>
-                                <input type="datetime-local" id="spread-capture-end" required>
-                            </div>
-                            <div class="config-field">
-                                <label>Balance</label>
-                                <input type="number" id="spread-capture-balance-input" value="170" min="1">
-                            </div>
-                            <div class="config-field">
-                                <label>Target Shares</label>
-                                <input type="number" id="spread-capture-target" value="15" min="5" step="5" title="Total target per market">
-                            </div>
-                            <div class="config-field">
-                                <label>Entry Size</label>
-                                <input type="number" id="spread-capture-entry-size" value="5" min="5" step="1" title="Shares per entry order">
-                            </div>
-                            <div class="config-field">
-                                <label>Min Profit</label>
-                                <input type="number" id="spread-capture-min-profit" value="0.005" step="0.001" min="0" max="0.05" title="Minimum profit per pair (profit ceiling)">
-                            </div>
-                            <div class="config-field">
-                                <label>Max Price</label>
-                                <input type="number" id="spread-capture-max-price" value="0.95" step="0.01" min="0.50" max="0.99" title="Never buy above this price">
-                            </div>
-                            <div class="config-field">
-                                <label>Hard Max</label>
-                                <input type="number" id="spread-capture-max-imbalance" value="10" min="1" step="1" title="Defer to emergency above this imbalance">
-                            </div>
-                            <div class="config-field">
-                                <label>Max Loss $</label>
-                                <input type="number" id="spread-capture-max-loss" value="7" step="1" min="0" title="Stop trading if daily loss exceeds this amount (0 = disabled)">
-                            </div>
-                            <div class="config-field">
-                                <label>Grid Levels</label>
-                                <input type="number" id="spread-capture-grid-levels" value="1" min="1" max="10" step="1" title="Number of price levels per side for continuous quoting">
-                            </div>
-                            <div class="config-field">
-                                <label>Imbal %</label>
-                                <input type="number" id="spread-capture-imbalance-pct" value="0.10" step="0.01" min="0.05" max="0.50" title="Max inventory imbalance as percentage (10% = 0.10)">
+                                <label>Base Size</label>
+                                <input type="number" id="aggressive-base-size" value="50" min="5" step="5" title="Shares per trade">
                             </div>
                             <div class="config-field">
                                 <label>Cycling</label>
-                                <input type="checkbox" id="spread-capture-enable-cycling" title="If checked, keep cycling after hitting target. If unchecked, stop at target shares.">
+                                <input type="checkbox" id="aggressive-cycling" checked title="Keep trading after target hit">
+                            </div>
+                            <div class="config-field">
+                                <label>Max Loss $</label>
+                                <input type="number" id="aggressive-max-loss" value="0" step="1" min="0" title="Stop trading if daily loss exceeds this (0 = disabled)">
                             </div>
                         </div>
                     </div>
@@ -479,11 +157,285 @@
 
                 <!-- Action Buttons -->
                 <div class="card-actions">
-                    <button class="btn btn-start" id="btn-start-spread-capture">START</button>
-                    <button class="btn btn-stop" id="btn-stop-spread-capture" disabled>STOP</button>
-                    <button class="btn btn-nuke" id="btn-nuke-spread-capture" disabled>NUKE</button>
+                    <button class="btn btn-start" id="btn-start-aggressive">START</button>
+                    <button class="btn btn-stop" id="btn-stop-aggressive" disabled>STOP</button>
+                    <button class="btn btn-nuke" id="btn-nuke-aggressive" disabled>NUKE</button>
                 </div>
-                <div id="error-spread-capture" class="card-error hidden"></div>
+                <div id="error-aggressive" class="card-error hidden"></div>
+            </div>
+
+            <!-- ========== CONTRARIAN MODE CARD ========== -->
+            <div class="mode-card" id="card-contrarian">
+                <div class="card-header">
+                    <h2>CONTRARIAN</h2>
+                    <div class="status-badge stopped" id="badge-contrarian">
+                        <span class="status-dot"></span>
+                        <span class="status-text">Stopped</span>
+                    </div>
+                </div>
+
+                <!-- Live Data Section -->
+                <div class="card-live-data" id="live-contrarian">
+                    <div class="market-row">
+                        <span class="market-label">Market:</span>
+                        <span class="market-value" id="contrarian-market">--</span>
+                        <span class="time-remaining" id="contrarian-time">--:--</span>
+                    </div>
+                    <div class="market-prices-row">
+                        <span class="price up" id="contrarian-up-price">UP $--</span>
+                        <span class="price down" id="contrarian-down-price">DOWN $--</span>
+                    </div>
+                    <table class="position-table">
+                        <thead>
+                            <tr>
+                                <th></th>
+                                <th>avg price</th>
+                                <th>qty</th>
+                                <th>cost</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="up-row">
+                                <td class="side-label">up</td>
+                                <td class="avg-price up" id="contrarian-up-avg">--</td>
+                                <td class="qty up" id="contrarian-up-qty">--</td>
+                                <td class="cost" id="contrarian-up-cost">--</td>
+                            </tr>
+                            <tr class="down-row">
+                                <td class="side-label">down</td>
+                                <td class="avg-price down" id="contrarian-down-avg">--</td>
+                                <td class="qty down" id="contrarian-down-qty">--</td>
+                                <td class="cost" id="contrarian-down-cost">--</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div class="metrics-row">
+                        <div class="metric pairs">
+                            <span class="value" id="contrarian-pairs">--</span>
+                            <span class="label">@ <span id="contrarian-avg-pair-cost">--</span></span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Locked PNL</span>
+                            <span class="value pnl" id="contrarian-locked-pnl">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Range PNL</span>
+                            <span class="value pnl" id="contrarian-pnl-range">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Balance</span>
+                            <span class="value" id="contrarian-balance">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Session P&L</span>
+                            <span class="value pnl" id="contrarian-realized-pnl">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Collapsible Config -->
+                <div class="card-config">
+                    <button type="button" class="config-toggle expanded" id="toggle-contrarian">
+                        <span class="toggle-icon">&#9660;</span> Config
+                    </button>
+                    <div class="config-content expanded" id="config-contrarian">
+                        <div class="config-row">
+                            <div class="toggle-group mode-toggle">
+                                <label class="toggle-option">
+                                    <input type="radio" name="contrarian_mode" value="paper" checked>
+                                    <span>Paper</span>
+                                </label>
+                                <label class="toggle-option live-option">
+                                    <input type="radio" name="contrarian_mode" value="live">
+                                    <span>LIVE</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="config-grid">
+                            <div class="config-field">
+                                <label>Start</label>
+                                <input type="datetime-local" id="contrarian-start" required>
+                            </div>
+                            <div class="config-field">
+                                <label>End</label>
+                                <input type="datetime-local" id="contrarian-end" required>
+                            </div>
+                            <div class="config-field">
+                                <label>Balance</label>
+                                <input type="number" id="contrarian-balance-input" value="170" min="1">
+                            </div>
+                            <div class="config-field">
+                                <label>Pullback</label>
+                                <input type="number" id="contrarian-pullback" value="0.0001" step="0.0001" min="0.0001" max="0.01" title="Pullback threshold from peak (0.01% = 0.0001)">
+                            </div>
+                            <div class="config-field">
+                                <label>Retracement</label>
+                                <input type="number" id="contrarian-retracement" value="0.30" step="0.05" min="0.10" max="0.90" title="Minimum retracement fraction (30% = 0.30)">
+                            </div>
+                            <div class="config-field">
+                                <label>Entry Min $</label>
+                                <input type="number" id="contrarian-entry-min" value="0.20" step="0.05" min="0.10" max="0.50" title="Minimum entry price floor">
+                            </div>
+                            <div class="config-field">
+                                <label>Delay (s)</label>
+                                <input type="number" id="contrarian-delay" value="60" min="30" max="300" step="30" title="Minimum delay from window start before entry">
+                            </div>
+                            <div class="config-field">
+                                <label>Z Threshold</label>
+                                <input type="number" id="contrarian-z-thresh" value="0.5" step="0.1" min="0" max="2" title="Minimum z-score for entry">
+                            </div>
+                            <div class="config-field">
+                                <label>Shares</label>
+                                <input type="number" id="contrarian-shares" value="50" min="5" step="5" title="Shares per trade">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="card-actions">
+                    <button class="btn btn-start" id="btn-start-contrarian">START</button>
+                    <button class="btn btn-stop" id="btn-stop-contrarian" disabled>STOP</button>
+                    <button class="btn btn-nuke" id="btn-nuke-contrarian" disabled>NUKE</button>
+                </div>
+                <div id="error-contrarian" class="card-error hidden"></div>
+            </div>
+
+            <!-- ========== VOLUME WEIGHTED MODE CARD ========== -->
+            <div class="mode-card" id="card-volume-weighted">
+                <div class="card-header">
+                    <h2>VOLUME WEIGHTED</h2>
+                    <div class="status-badge stopped" id="badge-volume-weighted">
+                        <span class="status-dot"></span>
+                        <span class="status-text">Stopped</span>
+                    </div>
+                </div>
+
+                <!-- Live Data Section -->
+                <div class="card-live-data" id="live-volume-weighted">
+                    <div class="market-row">
+                        <span class="market-label">Market:</span>
+                        <span class="market-value" id="volume-weighted-market">--</span>
+                        <span class="time-remaining" id="volume-weighted-time">--:--</span>
+                    </div>
+                    <div class="market-prices-row">
+                        <span class="price up" id="volume-weighted-up-price">UP $--</span>
+                        <span class="price down" id="volume-weighted-down-price">DOWN $--</span>
+                    </div>
+                    <table class="position-table">
+                        <thead>
+                            <tr>
+                                <th></th>
+                                <th>avg price</th>
+                                <th>qty</th>
+                                <th>cost</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="up-row">
+                                <td class="side-label">up</td>
+                                <td class="avg-price up" id="volume-weighted-up-avg">--</td>
+                                <td class="qty up" id="volume-weighted-up-qty">--</td>
+                                <td class="cost" id="volume-weighted-up-cost">--</td>
+                            </tr>
+                            <tr class="down-row">
+                                <td class="side-label">down</td>
+                                <td class="avg-price down" id="volume-weighted-down-avg">--</td>
+                                <td class="qty down" id="volume-weighted-down-qty">--</td>
+                                <td class="cost" id="volume-weighted-down-cost">--</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div class="metrics-row">
+                        <div class="metric pairs">
+                            <span class="value" id="volume-weighted-pairs">--</span>
+                            <span class="label">@ <span id="volume-weighted-avg-pair-cost">--</span></span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Locked PNL</span>
+                            <span class="value pnl" id="volume-weighted-locked-pnl">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Range PNL</span>
+                            <span class="value pnl" id="volume-weighted-pnl-range">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Balance</span>
+                            <span class="value" id="volume-weighted-balance">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">Session P&L</span>
+                            <span class="value pnl" id="volume-weighted-realized-pnl">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Collapsible Config -->
+                <div class="card-config">
+                    <button type="button" class="config-toggle expanded" id="toggle-volume-weighted">
+                        <span class="toggle-icon">&#9660;</span> Config
+                    </button>
+                    <div class="config-content expanded" id="config-volume-weighted">
+                        <div class="config-row">
+                            <div class="toggle-group mode-toggle">
+                                <label class="toggle-option">
+                                    <input type="radio" name="volume_weighted_mode" value="paper" checked>
+                                    <span>Paper</span>
+                                </label>
+                                <label class="toggle-option live-option">
+                                    <input type="radio" name="volume_weighted_mode" value="live">
+                                    <span>LIVE</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="config-grid">
+                            <div class="config-field">
+                                <label>Start</label>
+                                <input type="datetime-local" id="volume-weighted-start" required>
+                            </div>
+                            <div class="config-field">
+                                <label>End</label>
+                                <input type="datetime-local" id="volume-weighted-end" required>
+                            </div>
+                            <div class="config-field">
+                                <label>Balance</label>
+                                <input type="number" id="volume-weighted-balance-input" value="170" min="1">
+                            </div>
+                            <div class="config-field">
+                                <label>Imbal %</label>
+                                <input type="number" id="volume-weighted-imbalance" value="0.20" step="0.05" min="0.10" max="0.50" title="Max imbalance tolerance (20% = 0.20)">
+                            </div>
+                            <div class="config-field">
+                                <label>Cheap $</label>
+                                <input type="number" id="volume-weighted-cheap" value="0.45" step="0.05" min="0.20" max="0.60" title="Buy aggressively below this price">
+                            </div>
+                            <div class="config-field">
+                                <label>Hedge Trig %</label>
+                                <input type="number" id="volume-weighted-hedge-trigger" value="0.15" step="0.05" min="0.05" max="0.30" title="Start hedging at this imbalance">
+                            </div>
+                            <div class="config-field">
+                                <label>Max Hedge $</label>
+                                <input type="number" id="volume-weighted-max-hedge" value="0.85" step="0.05" min="0.50" max="0.95" title="Maximum price for hedge buys">
+                            </div>
+                            <div class="config-field">
+                                <label>Target Shares</label>
+                                <input type="number" id="volume-weighted-target" value="50" min="10" step="10" title="Target shares per side">
+                            </div>
+                            <div class="config-field">
+                                <label>Max Loss $</label>
+                                <input type="number" id="volume-weighted-max-loss" value="0" step="1" min="0" title="Stop trading if daily loss exceeds this (0 = disabled)">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="card-actions">
+                    <button class="btn btn-start" id="btn-start-volume-weighted">START</button>
+                    <button class="btn btn-stop" id="btn-stop-volume-weighted" disabled>STOP</button>
+                    <button class="btn btn-nuke" id="btn-nuke-volume-weighted" disabled>NUKE</button>
+                </div>
+                <div id="error-volume-weighted" class="card-error hidden"></div>
             </div>
 
         </div>
@@ -495,7 +447,7 @@
 
         <!-- Footer -->
         <footer class="dashboard-footer">
-            <p>PolyBot v3.0 | <a href="/api/status" target="_blank">API Status</a></p>
+            <p>PolyBot v4.0 | <a href="/api/status" target="_blank">API Status</a></p>
         </footer>
     </div>
 
