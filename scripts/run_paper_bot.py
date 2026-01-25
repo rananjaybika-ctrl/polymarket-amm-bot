@@ -1312,20 +1312,21 @@ class PaperTradingBot:
             self._telegram.on_status(self._handle_telegram_status)
             self._telegram.on_balance(self._handle_telegram_balance)
 
-            # Register graceful stop handlers for ALL strategy types
+            # Register graceful stop handlers for strategy types
             # Each bot only responds to its own strategy button
-            if self.accum_mode == "calculus_maker":
-                mode_label = "Calculus MAKER"
-                self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
-            elif self.accum_mode == "fair_value_mm":
-                mode_label = "Fair Value MM"
-                self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
-            elif self.accum_mode == "spread_capture":
-                mode_label = "Spread Capture (Continuous Velocity)"
-                self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
+            if self.accum_mode == "aggressive":
+                mode_label = "AGGRESSIVE"
+                self._telegram.on_graceful_stop_aggressive(self._handle_telegram_graceful_stop)
+            elif self.accum_mode == "contrarian":
+                mode_label = "CONTRARIAN"
+                self._telegram.on_graceful_stop_contrarian(self._handle_telegram_graceful_stop)
+            elif self.accum_mode == "volume_weighted":
+                mode_label = "VOLUME_WEIGHTED"
+                self._telegram.on_graceful_stop_volume_weighted(self._handle_telegram_graceful_stop)
             else:
-                mode_label = "Standard Mode"
-                self._telegram.on_graceful_stop_calculus_maker(self._handle_telegram_graceful_stop)
+                mode_label = self.accum_mode.upper()
+                # Default to aggressive handler for other modes
+                self._telegram.on_graceful_stop_aggressive(self._handle_telegram_graceful_stop)
 
             await self._telegram.start()
             await self._telegram.send_info(
