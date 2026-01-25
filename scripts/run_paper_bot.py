@@ -80,6 +80,8 @@ from src.strategies.opportunistic_mm import (
     OpportunisticMMStrategy,
     MMPhase,
 )
+from src.strategies.enhanced_spike import EnhancedSpikeStrategy
+from src.strategies.contrarian import ContrarianStrategy
 from src.services.trend_detector import TrendDetector, TrendState, TrendDirection
 from src.api.websocket_client import UserWebSocketClient, OrderFill, MarketResolved
 from src.utils.market_detector import MarketTypeDetector
@@ -507,6 +509,17 @@ class PaperTradingBot:
         spread_max_imbalance_pct: float = 0.10,  # Max inventory imbalance (10%)
         spread_enable_cycling: bool = True,   # Re-enter same market (optimal per backtest)
         spread_min_velocity_bps: float = 0.50,  # Only trade zones 5-6 (velocity >= 0.50) - matches backtest
+        # AGGRESSIVE (Path 1) specific parameters
+        zscore_lo: float = 0.0,               # Z-score lower bound for entry
+        zscore_hi: float = 1.5,               # Z-score upper bound for entry
+        time_stop_seconds: float = 180.0,     # Time-stop exit (3 minutes)
+        # CONTRARIAN (Path 2) specific parameters
+        contrarian_pullback_threshold: float = 0.0001,  # 0.01% pullback from peak
+        contrarian_retracement_min: float = 0.30,       # Must retrace 30% of move
+        contrarian_entry_price_min: float = 0.20,       # Entry price floor
+        contrarian_min_delay_seconds: int = 60,         # Wait from window start
+        contrarian_z_threshold: float = 0.5,            # Min z-score for entry
+        contrarian_shares_per_trade: int = 2500,        # Large size for contrarian bets
     ):
         self.initial_balance = initial_balance
         self.trading_mode = trading_mode
@@ -578,6 +591,19 @@ class PaperTradingBot:
         self.spread_max_imbalance_pct = spread_max_imbalance_pct
         self.spread_enable_cycling = spread_enable_cycling
         self.spread_min_velocity_bps = spread_min_velocity_bps
+
+        # AGGRESSIVE (Path 1) specific parameters
+        self.zscore_lo = zscore_lo
+        self.zscore_hi = zscore_hi
+        self.time_stop_seconds = time_stop_seconds
+
+        # CONTRARIAN (Path 2) specific parameters
+        self.contrarian_pullback_threshold = contrarian_pullback_threshold
+        self.contrarian_retracement_min = contrarian_retracement_min
+        self.contrarian_entry_price_min = contrarian_entry_price_min
+        self.contrarian_min_delay_seconds = contrarian_min_delay_seconds
+        self.contrarian_z_threshold = contrarian_z_threshold
+        self.contrarian_shares_per_trade = contrarian_shares_per_trade
 
         # Track order replacements per side for chase count
         self._replacement_count: dict[str, int] = {}  # "market_slug_SIDE" -> count
@@ -743,6 +769,46 @@ class PaperTradingBot:
             logger.info(
                 f"[MM] Initialized: base_size={self.spread_base_size}, "
                 f"max_pos={max_position}, rebalance={rebalance_threshold:.0%}"
+            )
+
+        # AGGRESSIVE Strategy (Path 1): Spike detection with velocity confirmation
+        # Uses EnhancedSpikeStrategy with Z-score filter and time-stop
+        self._aggressive_strategy: Optional["EnhancedSpikeStrategy"] = None
+        if self.accum_mode == "aggressive":
+            from src.strategies.enhanced_spike import EnhancedSpikeStrategy
+            self._aggressive_strategy = EnhancedSpikeStrategy(
+                base_size=self.spread_base_size,
+                spike_lookback=self.spread_spike_lookback,
+                time_stop_seconds=self.time_stop_seconds,
+                zscore_lo=self.zscore_lo,
+                zscore_hi=self.zscore_hi,
+                zscore_filter_enabled=True,
+                enable_cycling=self.spread_enable_cycling,
+            )
+            logger.info(
+                f"[AGGRESSIVE] Initialized: base_size={self.spread_base_size}, "
+                f"spike_lookback={self.spread_spike_lookback}, time_stop={self.time_stop_seconds}s, "
+                f"z_bounds=[{self.zscore_lo}, {self.zscore_hi}]"
+            )
+
+        # CONTRARIAN Strategy (Path 2): Bet against BTC direction at reversal
+        # Uses window-based reversal detection with adaptive vol gate
+        self._contrarian_strategy: Optional["ContrarianStrategy"] = None
+        if self.accum_mode == "contrarian":
+            from src.strategies.contrarian import ContrarianStrategy
+            self._contrarian_strategy = ContrarianStrategy(
+                pullback_threshold=self.contrarian_pullback_threshold,
+                retracement_min=self.contrarian_retracement_min,
+                entry_price_min=self.contrarian_entry_price_min,
+                min_delay_seconds=self.contrarian_min_delay_seconds,
+                z_threshold=self.contrarian_z_threshold,
+                shares_per_trade=self.contrarian_shares_per_trade,
+            )
+            logger.info(
+                f"[CONTRARIAN] Initialized: pullback={self.contrarian_pullback_threshold:.4%}, "
+                f"retracement={self.contrarian_retracement_min:.0%}, "
+                f"entry_min=${self.contrarian_entry_price_min}, "
+                f"z_thresh={self.contrarian_z_threshold}, size={self.contrarian_shares_per_trade}"
             )
 
         # Telegram notifications and remote control
@@ -1072,7 +1138,7 @@ class PaperTradingBot:
         )
 
     @classmethod
-    def from_calculus_config(
+    def from_aggressive_config(
         cls,
         config: dict,
         web_callback: Optional[Callable[[dict], None]] = None,
@@ -1080,181 +1146,148 @@ class PaperTradingBot:
         session_end_utc: Optional[datetime] = None,
         trading_mode: str = "paper",
     ) -> "PaperTradingBot":
-        """Create bot instance from Calculus MAKER web UI configuration.
+        """Create bot instance from AGGRESSIVE (Path 1) web UI configuration.
 
-        Uses exponential decay mispricing threshold and quadratic size ramp.
+        Uses EnhancedSpikeStrategy with spike detection, velocity confirmation,
+        OU adaptive threshold, and time-stop exit logic.
 
         Args:
-            config: Dictionary with calculus maker configuration values
+            config: Dictionary with aggressive strategy configuration values
             web_callback: Optional callback for web UI updates
             session_start_utc: UTC start time - only trade markets ending AFTER this
             session_end_utc: UTC end time - only trade markets ending BEFORE this
+            trading_mode: "paper" or "live"
 
         Returns:
-            PaperTradingBot instance configured for calculus maker mode
+            PaperTradingBot instance configured for aggressive mode
         """
-        # Get trading mode (paper or live)
         trading_mode = config.get("mode", "paper")
 
         return cls(
             initial_balance=config.get("starting_balance", 500.0),
-            # Set accum_mode to calculus_maker
-            accum_mode="calculus_maker",
-            # Calculus MAKER specific parameters
-            calc_m_min=config.get("m_min", 0.005),  # 0.5% edge late
-            calc_m_max=config.get("m_max", 0.025),  # 2.5% edge early
-            calc_lambda=config.get("lambda_decay", 0.004),
-            calc_max_shares=config.get("max_shares", 50),
-            calc_min_shares=config.get("min_shares", 5),
-            calc_max_pair_cost=config.get("max_pair_cost", 0.995),
-            # Gradual chase: disabled by default to prevent stranded positions
-            # When OFF: jumps to ask immediately, fills both sides or neither
-            gradual_chase_enabled=config.get("gradual_chase_enabled", False),
-            # Sequential ordering: place expensive side first, wait for fill before cheap side
-            # When ON (default): prevents asymmetric fills (30/10 disaster fix)
-            # When OFF: place both sides simultaneously - faster but risky
-            sequential_ordering_enabled=config.get("sequential_ordering_enabled", True),
-            # Max daily loss: stop trading if cumulative loss exceeds this amount
-            # Stops placing new orders but keeps existing positions
-            max_daily_loss=config.get("max_daily_loss", 10.0),
-            # General parameters
-            accum_max_share_price=config.get("max_share_price", 0.98),
-            accum_max_imbalance_pct=config.get("max_imbalance_pct", 0.20),
-            hard_max_imbalance=config.get("hard_max_imbalance", 10),
-            accum_target_shares=config.get("max_shares", 50),
-            # Output - use trading_mode to determine CSV prefix
-            csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_calculus_maker.csv",
-            live_display=True,
-            # Web callback
-            web_callback=web_callback,
-            # Strategy name
-            strategy_name="calculus_maker",
-            # Trading mode
-            trading_mode=trading_mode,
-            # CRITICAL: Session time window for market selection enforcement
-            session_start_utc=session_start_utc,
-            session_end_utc=session_end_utc,
-        )
-
-    @classmethod
-    def from_fair_value_mm_config(
-        cls,
-        config: dict,
-        web_callback: Optional[Callable[[dict], None]] = None,
-        session_start_utc: Optional[datetime] = None,
-        session_end_utc: Optional[datetime] = None,
-        trading_mode: str = "paper",
-    ) -> "PaperTradingBot":
-        """Create bot instance from Fair Value MM web UI configuration.
-
-        Uses Binance price feed to calculate fair value for UP/DOWN shares.
-        Posts at fair_value - edge (like real market makers).
-
-        Args:
-            config: Dictionary with fair value MM configuration values
-            web_callback: Optional callback for web UI updates
-            session_start_utc: UTC start time - only trade markets ending AFTER this
-            session_end_utc: UTC end time - only trade markets ending BEFORE this
-
-        Returns:
-            PaperTradingBot instance configured for fair value MM mode
-        """
-        # Get trading mode (paper or live)
-        trading_mode = config.get("mode", "paper")
-
-        return cls(
-            initial_balance=config.get("starting_balance", 500.0),
-            # Set accum_mode to fair_value_mm
-            accum_mode="fair_value_mm",
-            # Fair Value MM specific parameters
-            fv_edge=config.get("fv_edge", 0.02),  # 2 cent edge
-            fv_sensitivity_early=config.get("fv_sensitivity_early", 0.10),
-            fv_sensitivity_late=config.get("fv_sensitivity_late", 0.50),
-            fv_reprice_threshold=config.get("fv_reprice_threshold", 0.03),
-            # Reuse calculus maker parameters for should_buy() and get_size()
-            calc_m_min=config.get("m_min", 0.005),
-            calc_m_max=config.get("m_max", 0.025),
-            calc_lambda=config.get("lambda_decay", 0.004),
-            calc_max_shares=config.get("max_shares", 50),
-            calc_min_shares=config.get("min_shares", 5),
-            calc_max_pair_cost=config.get("max_pair_cost", 0.995),
-            # Max daily loss protection
-            max_daily_loss=config.get("max_daily_loss", 10.0),
-            # General parameters
-            accum_max_share_price=config.get("max_share_price", 0.98),
-            accum_max_imbalance_pct=config.get("max_imbalance_pct", 0.20),
-            hard_max_imbalance=config.get("hard_max_imbalance", 10),
-            accum_target_shares=config.get("max_shares", 50),
-            # Output
-            csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_fair_value_mm.csv",
-            live_display=True,
-            # Web callback
-            web_callback=web_callback,
-            # Strategy name
-            strategy_name="fair_value_mm",
-            # Trading mode
-            trading_mode=trading_mode,
-            # CRITICAL: Session time window for market selection enforcement
-            session_start_utc=session_start_utc,
-            session_end_utc=session_end_utc,
-        )
-
-    @classmethod
-    def from_spread_capture_config(
-        cls,
-        config: dict,
-        web_callback: Optional[Callable[[dict], None]] = None,
-        session_start_utc: Optional[datetime] = None,
-        session_end_utc: Optional[datetime] = None,
-        trading_mode: str = "paper",
-    ) -> "PaperTradingBot":
-        """Create bot instance from Spread Capture web UI configuration.
-
-        Continuous velocity market maker with two-sided quoting.
-        Dynamically adjusts quote offsets based on BTC velocity.
-
-        Args:
-            config: Dictionary with spread capture configuration values
-            web_callback: Optional callback for web UI updates
-            session_start_utc: UTC start time - only trade markets ending AFTER this
-            session_end_utc: UTC end time - only trade markets ending BEFORE this
-
-        Returns:
-            PaperTradingBot instance configured for spread capture mode
-        """
-        trading_mode = config.get("mode", "paper")
-
-        # NEW: Continuous velocity mode params (optimizer winner Jan 18)
-        base_size = config.get("base_size", config.get("entry_size", 30))
-        grid_levels = config.get("grid_levels", 1)  # Optimizer winner
-        spike_lookback = config.get("spike_lookback", 3)  # 300ms at 5Hz (robust across sessions)
-        max_imbalance_pct = config.get("max_imbalance_pct", 0.10)
-        enable_cycling = config.get("enable_cycling", True)  # Optimizer winner
-
-        return cls(
-            initial_balance=config.get("starting_balance", 500.0),
-            # Set accum_mode to spread_capture
-            accum_mode="spread_capture",
-            # NEW: Continuous velocity mode parameters (optimizer winner Jan 18)
-            spread_base_size=base_size,
-            spread_grid_levels=grid_levels,
-            spread_spike_lookback=spike_lookback,
-            spread_max_imbalance_pct=max_imbalance_pct,
-            spread_enable_cycling=enable_cycling,
-            # Spread Capture specific parameters (legacy support)
-            calc_min_shares=config.get("entry_size", 5),  # Entry size per order
-            accum_target_shares=config.get("target_shares", 15),  # Total target
-            accum_max_share_price=config.get("max_share_price", 0.95),
-            hard_max_imbalance=config.get("hard_max_imbalance", 10),
+            # Set accum_mode to aggressive (uses EnhancedSpikeStrategy)
+            accum_mode="aggressive",
+            # AGGRESSIVE specific parameters
+            spread_base_size=config.get("base_size", 50),
+            spread_enable_cycling=config.get("use_cycling", True),
+            # Z-score bounds for entry filtering
+            zscore_lo=config.get("z_lo", 0.0),
+            zscore_hi=config.get("z_hi", 1.5),
+            # Time-stop for exit
+            time_stop_seconds=config.get("time_stop_seconds", 180.0),
+            # Spike detection lookback
+            spread_spike_lookback=config.get("lookback_ms", 1200) // 100,  # Convert ms to ticks
             # Max daily loss protection
             max_daily_loss=config.get("max_daily_loss", 0.0),
             # Output
-            csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_spread_capture.csv",
+            csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_aggressive.csv",
             live_display=True,
             # Web callback
             web_callback=web_callback,
             # Strategy name
-            strategy_name="spread_capture",
+            strategy_name="aggressive",
+            # Trading mode
+            trading_mode=trading_mode,
+            # Session time window
+            session_start_utc=session_start_utc,
+            session_end_utc=session_end_utc,
+        )
+
+    @classmethod
+    def from_contrarian_config(
+        cls,
+        config: dict,
+        web_callback: Optional[Callable[[dict], None]] = None,
+        session_start_utc: Optional[datetime] = None,
+        session_end_utc: Optional[datetime] = None,
+        trading_mode: str = "paper",
+    ) -> "PaperTradingBot":
+        """Create bot instance from CONTRARIAN (Path 2) web UI configuration.
+
+        Bets against BTC direction at 15-min scale when reversal detected.
+        Uses ContrarianStrategy with adaptive vol gate.
+
+        Args:
+            config: Dictionary with contrarian strategy configuration values
+            web_callback: Optional callback for web UI updates
+            session_start_utc: UTC start time - only trade markets ending AFTER this
+            session_end_utc: UTC end time - only trade markets ending BEFORE this
+            trading_mode: "paper" or "live"
+
+        Returns:
+            PaperTradingBot instance configured for contrarian mode
+        """
+        trading_mode = config.get("mode", "paper")
+
+        return cls(
+            initial_balance=config.get("starting_balance", 500.0),
+            # Set accum_mode to contrarian (uses ContrarianStrategy)
+            accum_mode="contrarian",
+            # CONTRARIAN specific parameters
+            contrarian_pullback_threshold=config.get("pullback_threshold", 0.0001),
+            contrarian_retracement_min=config.get("retracement_min", 0.30),
+            contrarian_entry_price_min=config.get("entry_price_min", 0.20),
+            contrarian_min_delay_seconds=config.get("min_delay_seconds", 60),
+            contrarian_z_threshold=config.get("z_threshold", 0.5),
+            contrarian_shares_per_trade=config.get("shares_per_trade", 2500),
+            # Output
+            csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_contrarian.csv",
+            live_display=True,
+            # Web callback
+            web_callback=web_callback,
+            # Strategy name
+            strategy_name="contrarian",
+            # Trading mode
+            trading_mode=trading_mode,
+            # Session time window
+            session_start_utc=session_start_utc,
+            session_end_utc=session_end_utc,
+        )
+
+    @classmethod
+    def from_volume_weighted_config(
+        cls,
+        config: dict,
+        web_callback: Optional[Callable[[dict], None]] = None,
+        session_start_utc: Optional[datetime] = None,
+        session_end_utc: Optional[datetime] = None,
+        trading_mode: str = "paper",
+    ) -> "PaperTradingBot":
+        """Create bot instance from Volume Weighted (Gabagool-style) web UI configuration.
+
+        Grid maker with aggressive cheap accumulation and conservative hedging.
+
+        Args:
+            config: Dictionary with volume weighted configuration values
+            web_callback: Optional callback for web UI updates
+            session_start_utc: UTC start time - only trade markets ending AFTER this
+            session_end_utc: UTC end time - only trade markets ending BEFORE this
+            trading_mode: "paper" or "live"
+
+        Returns:
+            PaperTradingBot instance configured for volume weighted mode
+        """
+        trading_mode = config.get("mode", "paper")
+
+        return cls(
+            initial_balance=config.get("starting_balance", 500.0),
+            # Set accum_mode to volume_weighted (uses should_buy_vw)
+            accum_mode="volume_weighted",
+            # VW (Gabagool-style) specific parameters
+            vw_imbalance_pct=config.get("vw_imbalance_pct", 0.20),
+            vw_cheap_threshold=config.get("vw_cheap_threshold", 0.45),
+            vw_hedge_trigger_pct=config.get("vw_hedge_trigger_pct", 0.15),
+            vw_max_hedge_price=config.get("vw_max_hedge_price", 0.85),
+            accum_target_shares=config.get("target_shares", 50),
+            # Max daily loss protection
+            max_daily_loss=config.get("max_daily_loss", 0.0),
+            # Output
+            csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_volume_weighted.csv",
+            live_display=True,
+            # Web callback
+            web_callback=web_callback,
+            # Strategy name
+            strategy_name="volume_weighted",
             # Trading mode
             trading_mode=trading_mode,
             # Session time window
@@ -2872,6 +2905,30 @@ class PaperTradingBot:
                 current_down=current_down,
             )
             return  # Spread capture handles its own logic
+
+        # ============================================================================
+        # AGGRESSIVE MODE (Path 1): Spike detection with velocity confirmation
+        # ============================================================================
+        if self.accum_mode == "aggressive" and self._aggressive_strategy:
+            await self._run_aggressive_cycle(
+                market=market,
+                position=position,
+                current_up=current_up,
+                current_down=current_down,
+            )
+            return  # Aggressive handles its own logic
+
+        # ============================================================================
+        # CONTRARIAN MODE (Path 2): Bet against BTC direction at reversal
+        # ============================================================================
+        if self.accum_mode == "contrarian" and self._contrarian_strategy:
+            await self._run_contrarian_cycle(
+                market=market,
+                position=position,
+                current_up=current_up,
+                current_down=current_down,
+            )
+            return  # Contrarian handles its own logic
 
         # Check if we've hit target shares
         if current_up >= self.accum_target_shares and current_down >= self.accum_target_shares:
@@ -4760,6 +4817,348 @@ class PaperTradingBot:
 
             except Exception as e:
                 logger.error(f"[SPREADCAP] Order execution error: {e}")
+
+    async def _run_aggressive_cycle(
+        self,
+        market,
+        position,
+        current_up: float,
+        current_down: float,
+    ) -> None:
+        """
+        Dedicated trading cycle for AGGRESSIVE (Path 1) strategy.
+
+        Uses EnhancedSpikeStrategy with spike detection, velocity confirmation,
+        OU adaptive threshold, and time-stop exit logic.
+        """
+        if not self._aggressive_strategy:
+            logger.warning("[AGGRESSIVE] Strategy not initialized")
+            return
+
+        strategy = self._aggressive_strategy
+        time_remaining_secs = market.time_remaining()
+
+        # Hard stop enforcement
+        current_imbalance = abs(current_up - current_down)
+        is_actively_hedging = strategy.state.first_fill_side is not None
+        in_hard_stop = current_imbalance >= self.hard_max_imbalance and not is_actively_hedging
+
+        if in_hard_stop:
+            now = time.time()
+            if now - self._last_hard_stop_log >= 60:
+                logger.warning(
+                    f"🛑 [AGGRESSIVE] HARD STOP: Imbalance {current_imbalance:.0f} >= {self.hard_max_imbalance}"
+                )
+                self._last_hard_stop_log = now
+
+        # Process WebSocket fills (live mode)
+        if self.trading_mode == "live" and hasattr(self, '_ws_fill_queue'):
+            while not self._ws_fill_queue.empty():
+                try:
+                    ws_fill = self._ws_fill_queue.get_nowait()
+                    fill_side = ws_fill.get("side")
+                    fill_size = int(ws_fill.get("size", 0))
+                    fill_price = ws_fill.get("price", 0)
+
+                    if fill_side and fill_size > 0:
+                        strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
+                        logger.info(f"[AGGRESSIVE] Fill: {fill_side} {fill_size} @ ${fill_price:.4f}")
+                except asyncio.QueueEmpty:
+                    break
+
+        # Sync position from REST
+        current_up_cost = position.up_cost if position else 0.0
+        current_down_cost = position.down_cost if position else 0.0
+
+        if hasattr(self._engine, 'sync_position'):
+            try:
+                synced_pos = await self._engine.sync_position(market)
+                if synced_pos:
+                    position = synced_pos
+                    current_up = round(position.up_size)
+                    current_down = round(position.down_size)
+
+                    # Sync to strategy state
+                    if current_up != strategy.state.up_shares or current_down != strategy.state.down_shares:
+                        strategy.state.up_shares = current_up
+                        strategy.state.down_shares = current_down
+                        strategy.state.up_cost = position.up_cost
+                        strategy.state.down_cost = position.down_cost
+                        strategy.state.up_avg_price = position.up_avg_price
+                        strategy.state.down_avg_price = position.down_avg_price
+            except Exception as e:
+                logger.warning(f"[AGGRESSIVE] Position sync failed: {e}")
+
+        # Check rotation
+        if self._rotator.should_rotate():
+            await self._handle_market_rotation(market)
+            return
+
+        # Get orderbook
+        opportunity = None
+        for attempt in range(self.max_retries):
+            try:
+                opportunity = await self._analyzer.analyze_asymmetric_opportunity(
+                    market=market,
+                    current_up_size=current_up,
+                    current_down_size=current_down,
+                    current_up_cost=current_up_cost,
+                    current_down_cost=current_down_cost,
+                    pair_cost_threshold=1.00,
+                )
+                break
+            except Exception:
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(0.5)
+
+        if not opportunity or opportunity.up_ask is None or opportunity.down_ask is None:
+            return
+
+        up_ask = opportunity.up_ask
+        down_ask = opportunity.down_ask
+        up_bid = opportunity.up_bid or (up_ask * 0.98)
+        down_bid = opportunity.down_bid or (down_ask * 0.98)
+
+        self._last_up_price = up_ask
+        self._last_down_price = down_ask
+        self._update_live_display()
+
+        # Get velocity
+        velocity_bps = 0.0
+        if self._trend_detector:
+            trend_signal = self._trend_detector.get_trend_signal()
+            if trend_signal:
+                velocity_bps = trend_signal.velocity_bps
+
+        # Get Binance price for spike detection
+        binance_price = None
+        if self._binance_client and self._binance_client.current_price > 0:
+            binance_price = self._binance_client.current_price
+
+        if in_hard_stop:
+            return
+
+        # Generate quotes
+        current_time = time.time()
+        quotes = strategy.get_quotes(
+            up_bid=up_bid,
+            up_ask=up_ask,
+            down_bid=down_bid,
+            down_ask=down_ask,
+            velocity_bps=velocity_bps,
+            time_remaining=time_remaining_secs,
+            current_time=current_time,
+            binance_price=binance_price,
+        )
+
+        if not quotes:
+            return
+
+        # Execute quotes
+        for quote in quotes:
+            side = quote["side"]
+            price = quote["price"]
+            size = quote["size"]
+
+            # Auto-size for $1.00 minimum
+            if price > 0 and size * price < 1.0:
+                size = int(1.0 / price) + 1
+
+            best_ask = up_ask if side == "UP" else down_ask
+
+            try:
+                exec_kwargs = {
+                    "market": market,
+                    "side": side,
+                    "price": price,
+                    "size": size,
+                    "best_ask": best_ask,
+                }
+                if self.trading_mode == "paper":
+                    exec_kwargs["use_pending_orders"] = True
+
+                result = await self._engine.execute_single_side_trade(**exec_kwargs)
+
+                if result.get("success"):
+                    filled_size = result.get("filled_size", 0)
+                    filled_price = result.get("filled_price", price)
+
+                    if filled_size > 0:
+                        strategy.on_fill(side=side, price=filled_price, size=int(filled_size))
+                        self._trade_count += 1
+                        self._send_web_update()
+
+                        await self._log_trade({
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "market_slug": market.slug,
+                            "side": side,
+                            "price": filled_price,
+                            "size": filled_size,
+                            "mode": "aggressive",
+                            "velocity_bps": velocity_bps,
+                        })
+
+                        logger.info(f"[AGGRESSIVE] Filled: {side} {filled_size} @ ${filled_price:.4f}")
+
+            except Exception as e:
+                logger.error(f"[AGGRESSIVE] Order execution error: {e}")
+
+    async def _run_contrarian_cycle(
+        self,
+        market,
+        position,
+        current_up: float,
+        current_down: float,
+    ) -> None:
+        """
+        Dedicated trading cycle for CONTRARIAN (Path 2) strategy.
+
+        Bets against BTC direction at 15-min scale when reversal detected.
+        Uses window-based reversal detection with adaptive vol gate.
+        """
+        if not self._contrarian_strategy:
+            logger.warning("[CONTRARIAN] Strategy not initialized")
+            return
+
+        strategy = self._contrarian_strategy
+        time_remaining_secs = market.time_remaining()
+
+        # Process WebSocket fills (live mode)
+        if self.trading_mode == "live" and hasattr(self, '_ws_fill_queue'):
+            while not self._ws_fill_queue.empty():
+                try:
+                    ws_fill = self._ws_fill_queue.get_nowait()
+                    fill_side = ws_fill.get("side")
+                    fill_size = int(ws_fill.get("size", 0))
+                    fill_price = ws_fill.get("price", 0)
+
+                    if fill_side and fill_size > 0:
+                        strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
+                        logger.info(f"[CONTRARIAN] Fill: {fill_side} {fill_size} @ ${fill_price:.4f}")
+                except asyncio.QueueEmpty:
+                    break
+
+        # Check rotation
+        if self._rotator.should_rotate():
+            await self._handle_market_rotation(market)
+            return
+
+        # Get orderbook
+        current_up_cost = position.up_cost if position else 0.0
+        current_down_cost = position.down_cost if position else 0.0
+
+        opportunity = None
+        for attempt in range(self.max_retries):
+            try:
+                opportunity = await self._analyzer.analyze_asymmetric_opportunity(
+                    market=market,
+                    current_up_size=current_up,
+                    current_down_size=current_down,
+                    current_up_cost=current_up_cost,
+                    current_down_cost=current_down_cost,
+                    pair_cost_threshold=1.00,
+                )
+                break
+            except Exception:
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(0.5)
+
+        if not opportunity or opportunity.up_ask is None or opportunity.down_ask is None:
+            return
+
+        up_ask = opportunity.up_ask
+        down_ask = opportunity.down_ask
+        up_bid = opportunity.up_bid or (up_ask * 0.98)
+        down_bid = opportunity.down_bid or (down_ask * 0.98)
+
+        self._last_up_price = up_ask
+        self._last_down_price = down_ask
+        self._update_live_display()
+
+        # Get Binance price for reversal detection
+        binance_price = None
+        if self._binance_client and self._binance_client.current_price > 0:
+            binance_price = self._binance_client.current_price
+
+        # Initialize window on new market
+        if self._is_new_market and binance_price:
+            # Calculate pre-window volatility from trend detector
+            pre_vol = 0.0001  # Default
+            if self._trend_detector:
+                trend_signal = self._trend_detector.get_trend_signal()
+                if trend_signal:
+                    pre_vol = abs(trend_signal.velocity_bps) / 100.0
+
+            strategy.on_window_start(
+                btc_price=binance_price,
+                pre_vol=pre_vol,
+                timestamp=time.time(),
+            )
+            self._is_new_market = False
+
+        # Generate quotes
+        current_time = time.time()
+        quotes = strategy.get_quotes(
+            up_bid=up_bid,
+            up_ask=up_ask,
+            down_bid=down_bid,
+            down_ask=down_ask,
+            time_remaining=time_remaining_secs,
+            current_time=current_time,
+            binance_price=binance_price,
+        )
+
+        if not quotes:
+            return
+
+        # Execute quotes
+        for quote in quotes:
+            side = quote["side"]
+            price = quote["price"]
+            size = quote["size"]
+
+            # Auto-size for $1.00 minimum
+            if price > 0 and size * price < 1.0:
+                size = int(1.0 / price) + 1
+
+            best_ask = up_ask if side == "UP" else down_ask
+
+            try:
+                exec_kwargs = {
+                    "market": market,
+                    "side": side,
+                    "price": price,
+                    "size": size,
+                    "best_ask": best_ask,
+                }
+                if self.trading_mode == "paper":
+                    exec_kwargs["use_pending_orders"] = True
+
+                result = await self._engine.execute_single_side_trade(**exec_kwargs)
+
+                if result.get("success"):
+                    filled_size = result.get("filled_size", 0)
+                    filled_price = result.get("filled_price", price)
+
+                    if filled_size > 0:
+                        strategy.on_fill(side=side, price=filled_price, size=int(filled_size))
+                        self._trade_count += 1
+                        self._send_web_update()
+
+                        await self._log_trade({
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "market_slug": market.slug,
+                            "side": side,
+                            "price": filled_price,
+                            "size": filled_size,
+                            "mode": "contrarian",
+                            "retracement": strategy.state.window_direction.value,
+                        })
+
+                        logger.info(f"[CONTRARIAN] Filled: {side} {filled_size} @ ${filled_price:.4f}")
+
+            except Exception as e:
+                logger.error(f"[CONTRARIAN] Order execution error: {e}")
 
     async def _setup_user_websocket(self) -> bool:
         """

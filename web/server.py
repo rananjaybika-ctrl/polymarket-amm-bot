@@ -213,13 +213,11 @@ class AccumulationBotConfig(BaseModel):
     accum_buy_both_sides: bool = True
 
 
-class CalculusMakerBotConfig(BaseModel):
-    """Configuration for Calculus MAKER strategy from web UI.
+class AggressiveBotConfig(BaseModel):
+    """Configuration for AGGRESSIVE (Path 1) strategy from web UI.
 
-    Uses exponential decay mispricing threshold and quadratic size ramp.
-    Mathematical models:
-        Mispricing: m(t) = m_min + (m_max - m_min) * e^(-lambda*(900-t))
-        Inverted Size: size(t) = min_shares + (max_shares - min_shares) * (t/900)^2
+    Spike detection with velocity confirmation, OU adaptive threshold,
+    and time-stop exit logic. Uses EnhancedSpikeStrategy.
     """
     mode: str  # "paper" or "live"
     market: str = "btc-15m"
@@ -227,35 +225,23 @@ class CalculusMakerBotConfig(BaseModel):
     end_datetime: str
     starting_balance: float = 500.0
 
-    # Calculus MAKER specific parameters
-    max_shares: int = 50                  # Maximum order size per trade
-    min_shares: int = 5                   # Minimum order size (Polymarket min = 5)
-    m_min: float = 0.01                   # Late market threshold (accept 1% edge)
-    m_max: float = 0.04                   # Early market threshold (require 4% edge)
-    lambda_decay: float = 0.005           # Decay constant for mispricing threshold
-    max_pair_cost: float = 0.995          # Maximum pair cost to accept
-    max_imbalance_pct: float = 0.20       # Max imbalance as % of position (20% = 6 shares)
-    hard_max_imbalance: int = 10          # HARD LIMIT: Stop ALL trading if imbalance >= this
-    max_share_price: float = 0.98         # Never buy above this price
+    # Path 1 parameters
+    threshold_method: str = "ou"          # "ou" for adaptive, "fixed" for static
+    zscore_method: str = "ewma"           # Z-score tracking method
+    lookback_ms: int = 1200               # Spike lookback in milliseconds
+    time_stop_seconds: float = 180.0      # Time-stop exit (3 minutes)
+    use_cycling: bool = True              # Keep trading after target hit
+    z_lo: float = 0.0                     # Z-score lower bound for entry
+    z_hi: float = 1.5                     # Z-score upper bound for entry
+    base_size: int = 50                   # Order size per trade
+    max_daily_loss: float = 0.0           # Stop trading if loss exceeds (0=disabled)
 
 
-    # Gradual Chase: Time-aware price chasing for unfilled orders
-    # When True: chases in small steps based on time remaining (reduces slippage)
-    # When False: jumps directly to ask price (faster fills, more expensive)
-    # To disable gradual chase, set this to False
-    gradual_chase_enabled: bool = True
+class ContrarianBotConfig(BaseModel):
+    """Configuration for CONTRARIAN (Path 2) strategy from web UI.
 
-    # Max Daily Loss: Stop trading if cumulative loss exceeds this amount
-    # Set to 0 to disable the limit
-    # When limit is hit, bot stops placing new orders but keeps existing positions
-    max_daily_loss: float = 0.0
-
-
-class FairValueMMBotConfig(BaseModel):
-    """Configuration for Fair Value MM strategy from web UI.
-
-    Uses Binance price feed to calculate fair value for UP/DOWN shares.
-    Posts at fair_value - edge (like real market makers).
+    Bet against BTC direction at 15-min scale when reversal detected.
+    Uses window-based reversal detection with adaptive vol gate.
     """
     mode: str  # "paper" or "live"
     market: str = "btc-15m"
@@ -263,31 +249,19 @@ class FairValueMMBotConfig(BaseModel):
     end_datetime: str
     starting_balance: float = 500.0
 
-    # Fair Value MM specific parameters
-    fv_edge: float = 0.02                 # Edge below fair value (2 cents)
-    fv_sensitivity_early: float = 0.10    # Price sensitivity at market open (10%)
-    fv_sensitivity_late: float = 0.50     # Price sensitivity near resolution (50%)
-    fv_reprice_threshold: float = 0.03    # Reprice if fair value changes 3c
-
-    # Reuse calculus maker parameters for should_buy() and get_size()
-    max_shares: int = 50
-    min_shares: int = 5
-    m_min: float = 0.01
-    m_max: float = 0.04
-    lambda_decay: float = 0.005
-    max_pair_cost: float = 0.995
-    max_imbalance_pct: float = 0.20
-    max_share_price: float = 0.98
-
-    # Max Daily Loss protection
-    max_daily_loss: float = 0.0
+    # Path 2 parameters
+    pullback_threshold: float = 0.0001    # 0.01% pullback from peak to trigger
+    retracement_min: float = 0.30         # Must retrace 30% of move
+    entry_price_min: float = 0.20         # Entry price floor ($0.20)
+    min_delay_seconds: int = 60           # Wait 60s from window start
+    z_threshold: float = 0.5              # Minimum z-score for entry
+    shares_per_trade: int = 2500          # Large size for contrarian bets
 
 
-class SpreadCaptureBotConfig(BaseModel):
-    """Configuration for Spread Capture strategy from web UI.
+class VolumeWeightedBotConfig(BaseModel):
+    """Configuration for Volume Weighted (VW/Gabagool-style) strategy from web UI.
 
-    Continuous velocity market maker with two-sided quoting.
-    Dynamically adjusts quote offsets based on BTC velocity.
+    Grid maker with aggressive cheap accumulation and conservative hedging.
     """
     mode: str  # "paper" or "live"
     market: str = "btc-15m"
@@ -295,23 +269,15 @@ class SpreadCaptureBotConfig(BaseModel):
     end_datetime: str
     starting_balance: float = 500.0
 
-    # Continuous Velocity Mode parameters (NEW - replaces sequential mode)
-    base_size: int = 10                   # Base order size per quote level
-    grid_levels: int = 1                  # Number of price levels per side
-    max_imbalance_pct: float = 0.10       # Max inventory imbalance (10%)
-
-    # Spread Capture specific parameters (legacy support)
-    entry_size: int = 5                   # Shares per entry order (alias for base_size)
-    target_shares: int = 15               # Total target per market
-    min_profit: float = 0.005             # Minimum profit per pair (profit ceiling)
-    max_share_price: float = 0.95         # Never buy above this
-    enable_cycling: bool = False          # If False, stop at target; if True, keep cycling
+    # VW-specific parameters (Gabagool-style)
+    vw_imbalance_pct: float = 0.20        # Max 20% imbalance tolerance
+    vw_cheap_threshold: float = 0.45      # Buy aggressively below this price
+    vw_hedge_trigger_pct: float = 0.15    # Start hedging at 15% imbalance
+    vw_max_hedge_price: float = 0.85      # Max price for hedge buys
 
     # Shared parameters
-    hard_max_imbalance: int = 10          # Defer to emergency above this
-
-    # Max Daily Loss protection
-    max_daily_loss: float = 0.0
+    target_shares: int = 50               # Target shares per side
+    max_daily_loss: float = 0.0           # Stop trading if loss exceeds (0=disabled)
 
 
 # Legacy config for backward compatibility
@@ -364,11 +330,11 @@ class StrategyState:
         self.status["balance"] = None
 
 
-# Multi-strategy state - supports running multiple accumulation modes simultaneously
+# Multi-strategy state - supports running multiple strategies simultaneously
 strategies = {
-    "calculus_maker": StrategyState("calculus_maker"),  # Calculus MAKER (exponential decay + quadratic size)
-    "fair_value_mm": StrategyState("fair_value_mm"),    # Fair Value MM (Binance-based pricing)
-    "spread_capture": StrategyState("spread_capture"),  # Spread Capture (continuous velocity mode)
+    "aggressive": StrategyState("aggressive"),          # Path 1: Spike detection + velocity confirmation
+    "contrarian": StrategyState("contrarian"),          # Path 2: Bet against BTC direction
+    "volume_weighted": StrategyState("volume_weighted"), # Gabagool-style grid maker
     # Legacy - keep for backward compat but not shown in UI
     "standard": StrategyState("standard"),
     "accumulation": None,  # Will point to "standard" for backward compat
@@ -457,14 +423,28 @@ async def handle_auto_restart(strategy_name: str):
         logger.info(f"[AUTO-RESTART] Restarting {strategy_name} with {remaining/60:.1f} minutes remaining")
 
         try:
-            if strategy_name == "calculus_maker":
-                # Calculus MAKER strategy - use its own runner, NOT accumulation_bot
-                calc_config = CalculusMakerBotConfig(**config)
+            # Route to appropriate bot runner based on strategy type
+            if strategy_name == "aggressive":
+                aggressive_config = AggressiveBotConfig(**config)
                 strategy.status["running"] = True
                 strategy.status["error"] = None
                 strategy.status["restarted_at"] = now.isoformat()
                 await broadcast_status()
-                strategy.task = asyncio.create_task(run_calculus_bot(calc_config, strategy))
+                strategy.task = asyncio.create_task(run_aggressive_bot(aggressive_config, strategy))
+            elif strategy_name == "contrarian":
+                contrarian_config = ContrarianBotConfig(**config)
+                strategy.status["running"] = True
+                strategy.status["error"] = None
+                strategy.status["restarted_at"] = now.isoformat()
+                await broadcast_status()
+                strategy.task = asyncio.create_task(run_contrarian_bot(contrarian_config, strategy))
+            elif strategy_name == "volume_weighted":
+                vw_config = VolumeWeightedBotConfig(**config)
+                strategy.status["running"] = True
+                strategy.status["error"] = None
+                strategy.status["restarted_at"] = now.isoformat()
+                await broadcast_status()
+                strategy.task = asyncio.create_task(run_volume_weighted_bot(vw_config, strategy))
             else:
                 # Accumulation strategies (standard) ONLY
                 accum_config = AccumulationBotConfig(**config)
@@ -589,16 +569,16 @@ async def root(username: str = Depends(verify_credentials)):
 async def get_status(username: str = Depends(verify_credentials)):
     """Get current bot status for all strategies. Requires authentication."""
     return {
-        "calculus_maker": strategies["calculus_maker"].status,
-        "fair_value_mm": strategies["fair_value_mm"].status,
-        "spread_capture": strategies["spread_capture"].status,
+        "aggressive": strategies["aggressive"].status,
+        "contrarian": strategies["contrarian"].status,
+        "volume_weighted": strategies["volume_weighted"].status,
         # Legacy format for backward compatibility
         "standard": strategies["standard"].status,
         "accumulation": strategies["standard"].status,  # Alias to standard
         "running": (
-            strategies["calculus_maker"].status["running"] or
-            strategies["fair_value_mm"].status["running"] or
-            strategies["spread_capture"].status["running"] or
+            strategies["aggressive"].status["running"] or
+            strategies["contrarian"].status["running"] or
+            strategies["volume_weighted"].status["running"] or
             strategies["standard"].status["running"]
         ),
         "kill_switch_active": is_kill_switch_active(),
@@ -895,7 +875,7 @@ async def emergency_stop(username: str = Depends(verify_credentials)):
     # Notify connected clients
     await broadcast_status()
 
-    logger.info(f"[NUKE-ALL] Complete: stopped {len(results['strategies_stopped'])} strategies, closed {results['positions_closed']} positions")
+    logger.info(f"[NUKE-ALL] Complete: stopped {len(results['strategies_stopped'])} strategies, cancelled {results['orders_cancelled']} orders")
     return results
 
 
@@ -995,13 +975,12 @@ async def start_standard(config: AccumulationBotConfig, username: str = Depends(
     return await start_accumulation(config)
 
 
-@app.post("/api/start/calculus_maker")
-async def start_calculus_maker(config: CalculusMakerBotConfig, username: str = Depends(verify_credentials)):
-    """Start the Calculus MAKER trading strategy. Requires authentication."""
-    # Clear kill switch when user explicitly starts - they want to run
+@app.post("/api/start/aggressive")
+async def start_aggressive(config: AggressiveBotConfig, username: str = Depends(verify_credentials)):
+    """Start the AGGRESSIVE (Path 1) trading strategy. Requires authentication."""
     clear_kill_switch()
 
-    strategy = strategies["calculus_maker"]
+    strategy = strategies["aggressive"]
 
     # Check if actually running (task exists and not done) vs just stale status
     actually_running = (
@@ -1013,7 +992,7 @@ async def start_calculus_maker(config: CalculusMakerBotConfig, username: str = D
     if actually_running:
         return JSONResponse(
             status_code=400,
-            content={"error": "Calculus MAKER strategy is already running"}
+            content={"error": "AGGRESSIVE strategy is already running"}
         )
 
     # Reset stale status if task is done but status wasn't updated
@@ -1031,13 +1010,11 @@ async def start_calculus_maker(config: CalculusMakerBotConfig, username: str = D
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": f"Invalid datetime: {e}"})
 
-    # Validate Calculus MAKER parameters
-    if config.min_shares < 5:
-        return JSONResponse(status_code=400, content={"error": "Min shares must be at least 5 (Polymarket minimum)"})
-    if config.max_shares < config.min_shares:
-        return JSONResponse(status_code=400, content={"error": "Max shares must be >= min shares"})
-    if config.m_min >= config.m_max:
-        return JSONResponse(status_code=400, content={"error": "m_min must be less than m_max"})
+    # Validate AGGRESSIVE parameters
+    if config.base_size < 5:
+        return JSONResponse(status_code=400, content={"error": "Base size must be at least 5 (Polymarket minimum)"})
+    if config.z_lo >= config.z_hi:
+        return JSONResponse(status_code=400, content={"error": "z_lo must be less than z_hi"})
 
     # Validate balance for live mode
     if config.mode == "live":
@@ -1067,7 +1044,7 @@ async def start_calculus_maker(config: CalculusMakerBotConfig, username: str = D
     # Update strategy status
     strategy.status = {
         "running": True,
-        "strategy": "calculus_maker",
+        "strategy": "aggressive",
         "error": None,
         "config": config.dict(),
         "start_time": datetime.now(timezone.utc).isoformat(),
@@ -1075,105 +1052,18 @@ async def start_calculus_maker(config: CalculusMakerBotConfig, username: str = D
     }
 
     # Start bot in background
-    strategy.task = asyncio.create_task(run_calculus_bot(config, strategy))
+    strategy.task = asyncio.create_task(run_aggressive_bot(config, strategy))
 
     await broadcast_status()
-    return {"status": "started", "strategy": "calculus_maker", "config": config.dict()}
+    return {"status": "started", "strategy": "aggressive", "config": config.dict()}
 
 
-@app.post("/api/start/fair_value_mm")
-async def start_fair_value_mm(config: FairValueMMBotConfig, username: str = Depends(verify_credentials)):
-    """Start the Fair Value MM trading strategy. Requires authentication."""
-    # Clear kill switch when user explicitly starts - they want to run
+@app.post("/api/start/contrarian")
+async def start_contrarian(config: ContrarianBotConfig, username: str = Depends(verify_credentials)):
+    """Start the CONTRARIAN (Path 2) trading strategy. Requires authentication."""
     clear_kill_switch()
 
-    strategy = strategies["fair_value_mm"]
-
-    # Check if actually running (task exists and not done) vs just stale status
-    actually_running = (
-        strategy.status["running"] and
-        strategy.task is not None and
-        not strategy.task.done()
-    )
-
-    if actually_running:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Fair Value MM strategy is already running"}
-        )
-
-    # Reset stale status if task is done but status wasn't updated
-    if strategy.status["running"] and (strategy.task is None or strategy.task.done()):
-        strategy.status["running"] = False
-        strategy.reset_trading_data()
-        strategy.task = None
-
-    # Validate datetime
-    try:
-        start_dt = datetime.fromisoformat(config.start_datetime)
-        end_dt = datetime.fromisoformat(config.end_datetime)
-        if end_dt <= start_dt:
-            return JSONResponse(status_code=400, content={"error": "End time must be after start time"})
-    except ValueError as e:
-        return JSONResponse(status_code=400, content={"error": f"Invalid datetime: {e}"})
-
-    # Validate Fair Value MM parameters
-    if config.min_shares < 5:
-        return JSONResponse(status_code=400, content={"error": "Min shares must be at least 5 (Polymarket minimum)"})
-    if config.max_shares < config.min_shares:
-        return JSONResponse(status_code=400, content={"error": "Max shares must be >= min shares"})
-    if config.fv_edge < 0.01 or config.fv_edge > 0.10:
-        return JSONResponse(status_code=400, content={"error": "Edge must be between 1c and 10c"})
-
-    # Validate balance for live mode
-    if config.mode == "live":
-        try:
-            from src.config import Config
-            from src.api.polymarket_client import PolymarketClient
-
-            pm_config = Config()
-            pm_config.validate()
-            client = PolymarketClient(pm_config)
-            await client.connect()
-            actual_balance = await client.get_balance()
-            await client.disconnect()
-
-            if config.starting_balance > actual_balance:
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "error": f"Starting balance ${config.starting_balance:.2f} exceeds "
-                                 f"Polymarket balance ${actual_balance:.2f}"
-                    }
-                )
-            logger.info(f"[LIVE] Balance check passed: ${actual_balance:.2f} available")
-        except Exception as e:
-            return JSONResponse(status_code=400, content={"error": f"Failed to check Polymarket balance: {e}"})
-
-    # Update strategy status
-    strategy.status = {
-        "running": True,
-        "strategy": "fair_value_mm",
-        "error": None,
-        "config": config.dict(),
-        "start_time": datetime.now(timezone.utc).isoformat(),
-        "balance": config.starting_balance,
-    }
-
-    # Start bot in background
-    strategy.task = asyncio.create_task(run_fair_value_mm_bot(config, strategy))
-
-    await broadcast_status()
-    return {"status": "started", "strategy": "fair_value_mm", "config": config.dict()}
-
-
-@app.post("/api/start/spread_capture")
-async def start_spread_capture(config: SpreadCaptureBotConfig, username: str = Depends(verify_credentials)):
-    """Start the Spread Capture trading strategy. Requires authentication."""
-    # Clear kill switch when user explicitly starts
-    clear_kill_switch()
-
-    strategy = strategies["spread_capture"]
+    strategy = strategies["contrarian"]
 
     # Check if actually running
     actually_running = (
@@ -1185,7 +1075,7 @@ async def start_spread_capture(config: SpreadCaptureBotConfig, username: str = D
     if actually_running:
         return JSONResponse(
             status_code=400,
-            content={"error": "Spread Capture strategy is already running"}
+            content={"error": "CONTRARIAN strategy is already running"}
         )
 
     # Reset stale status
@@ -1203,11 +1093,11 @@ async def start_spread_capture(config: SpreadCaptureBotConfig, username: str = D
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": f"Invalid datetime: {e}"})
 
-    # Validate parameters
-    if config.entry_size < 5:
-        return JSONResponse(status_code=400, content={"error": "Entry size must be at least 5 (Polymarket minimum)"})
-    if config.target_shares < config.entry_size:
-        return JSONResponse(status_code=400, content={"error": "Target shares must be >= entry size"})
+    # Validate CONTRARIAN parameters
+    if config.shares_per_trade < 5:
+        return JSONResponse(status_code=400, content={"error": "Shares per trade must be at least 5"})
+    if config.retracement_min < 0.1 or config.retracement_min > 0.9:
+        return JSONResponse(status_code=400, content={"error": "Retracement min must be between 0.1 and 0.9"})
 
     # Validate balance for live mode
     if config.mode == "live":
@@ -1237,7 +1127,7 @@ async def start_spread_capture(config: SpreadCaptureBotConfig, username: str = D
     # Update strategy status
     strategy.status = {
         "running": True,
-        "strategy": "spread_capture",
+        "strategy": "contrarian",
         "error": None,
         "config": config.dict(),
         "start_time": datetime.now(timezone.utc).isoformat(),
@@ -1245,10 +1135,93 @@ async def start_spread_capture(config: SpreadCaptureBotConfig, username: str = D
     }
 
     # Start bot in background
-    strategy.task = asyncio.create_task(run_spread_capture_bot(config, strategy))
+    strategy.task = asyncio.create_task(run_contrarian_bot(config, strategy))
 
     await broadcast_status()
-    return {"status": "started", "strategy": "spread_capture", "config": config.dict()}
+    return {"status": "started", "strategy": "contrarian", "config": config.dict()}
+
+
+@app.post("/api/start/volume_weighted")
+async def start_volume_weighted(config: VolumeWeightedBotConfig, username: str = Depends(verify_credentials)):
+    """Start the Volume Weighted (Gabagool-style) trading strategy. Requires authentication."""
+    clear_kill_switch()
+
+    strategy = strategies["volume_weighted"]
+
+    # Check if actually running
+    actually_running = (
+        strategy.status["running"] and
+        strategy.task is not None and
+        not strategy.task.done()
+    )
+
+    if actually_running:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Volume Weighted strategy is already running"}
+        )
+
+    # Reset stale status
+    if strategy.status["running"] and (strategy.task is None or strategy.task.done()):
+        strategy.status["running"] = False
+        strategy.reset_trading_data()
+        strategy.task = None
+
+    # Validate datetime
+    try:
+        start_dt = datetime.fromisoformat(config.start_datetime)
+        end_dt = datetime.fromisoformat(config.end_datetime)
+        if end_dt <= start_dt:
+            return JSONResponse(status_code=400, content={"error": "End time must be after start time"})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": f"Invalid datetime: {e}"})
+
+    # Validate VW parameters
+    if config.vw_cheap_threshold < 0.20 or config.vw_cheap_threshold > 0.60:
+        return JSONResponse(status_code=400, content={"error": "Cheap threshold must be between $0.20 and $0.60"})
+    if config.vw_max_hedge_price < 0.50 or config.vw_max_hedge_price > 0.95:
+        return JSONResponse(status_code=400, content={"error": "Max hedge price must be between $0.50 and $0.95"})
+
+    # Validate balance for live mode
+    if config.mode == "live":
+        try:
+            from src.config import Config
+            from src.api.polymarket_client import PolymarketClient
+
+            pm_config = Config()
+            pm_config.validate()
+            client = PolymarketClient(pm_config)
+            await client.connect()
+            actual_balance = await client.get_balance()
+            await client.disconnect()
+
+            if config.starting_balance > actual_balance:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": f"Starting balance ${config.starting_balance:.2f} exceeds "
+                                 f"Polymarket balance ${actual_balance:.2f}"
+                    }
+                )
+            logger.info(f"[LIVE] Balance check passed: ${actual_balance:.2f} available")
+        except Exception as e:
+            return JSONResponse(status_code=400, content={"error": f"Failed to check Polymarket balance: {e}"})
+
+    # Update strategy status
+    strategy.status = {
+        "running": True,
+        "strategy": "volume_weighted",
+        "error": None,
+        "config": config.dict(),
+        "start_time": datetime.now(timezone.utc).isoformat(),
+        "balance": config.starting_balance,
+    }
+
+    # Start bot in background
+    strategy.task = asyncio.create_task(run_volume_weighted_bot(config, strategy))
+
+    await broadcast_status()
+    return {"status": "started", "strategy": "volume_weighted", "config": config.dict()}
 
 
 @app.post("/api/stop/{strategy_name}")
@@ -1526,24 +1499,22 @@ async def run_accumulation_bot(config: AccumulationBotConfig, strategy: Strategy
         logger.info(f"[{accum_mode}] Cleared restart config - no auto-restart will occur")
 
 
-async def run_calculus_bot(config: CalculusMakerBotConfig, strategy: StrategyState):
-    """Run the Calculus MAKER trading bot asynchronously with resilience.
+async def run_aggressive_bot(config: AggressiveBotConfig, strategy: StrategyState):
+    """Run the AGGRESSIVE (Path 1) trading bot asynchronously.
 
-    Uses exponential decay mispricing threshold and quadratic size ramp.
+    Uses EnhancedSpikeStrategy with spike detection, velocity confirmation,
+    OU adaptive threshold, and time-stop exit logic.
     """
-    # Store config for auto-restart
-    restart_configs["calculus_maker"] = config.dict()
+    restart_configs["aggressive"] = config.dict()
 
     try:
         from scripts.run_paper_bot import PaperTradingBot
 
-        # CRITICAL: Normalize times to UTC at the API boundary
         start_dt_utc = normalize_datetime_to_utc(config.start_datetime)
         end_dt_utc = normalize_datetime_to_utc(config.end_datetime)
 
-        logger.info(f"[calculus_maker] Session time window (UTC): {start_dt_utc.isoformat()} to {end_dt_utc.isoformat()}")
+        logger.info(f"[aggressive] Session time window (UTC): {start_dt_utc.isoformat()} to {end_dt_utc.isoformat()}")
 
-        # Wait until start time (compare in UTC)
         now_utc = datetime.now(timezone.utc)
         if start_dt_utc > now_utc:
             wait_seconds = (start_dt_utc - now_utc).total_seconds()
@@ -1557,11 +1528,9 @@ async def run_calculus_bot(config: CalculusMakerBotConfig, strategy: StrategySta
         await broadcast_status()
 
         duration_minutes = (end_dt_utc - start_dt_utc).total_seconds() / 60.0
-        web_callback = create_web_callback_for_strategy("calculus_maker")
+        web_callback = create_web_callback_for_strategy("aggressive")
 
-        # Create Calculus MAKER bot with strategy-specific config
-        # Pass the config as a dict with calculus_maker specific parameters
-        bot = PaperTradingBot.from_calculus_config(
+        bot = PaperTradingBot.from_aggressive_config(
             config.dict(),
             web_callback=web_callback,
             session_start_utc=start_dt_utc,
@@ -1570,21 +1539,18 @@ async def run_calculus_bot(config: CalculusMakerBotConfig, strategy: StrategySta
         )
         strategy.instance = bot
 
-        logger.info("[calculus_maker] Initializing bot...")
+        logger.info("[aggressive] Initializing bot...")
         await bot.initialize()
 
-        logger.info(f"[calculus_maker] Starting trading loop for {duration_minutes:.1f} minutes")
+        logger.info(f"[aggressive] Starting trading loop for {duration_minutes:.1f} minutes")
         await bot.run(duration_minutes=duration_minutes)
 
         strategy.status["running"] = False
         strategy.status["completed"] = True
         strategy.reset_trading_data()
         strategy.instance = None
-        # Clear restart config on normal completion
-        if "calculus_maker" in restart_configs:
-            del restart_configs["calculus_maker"]
-            logger.info("[calculus_maker] Cleared restart config - session completed normally")
-        logger.info("[calculus_maker] Trading session completed normally")
+        restart_configs.pop("aggressive", None)
+        logger.info("[aggressive] Trading session completed normally")
         await broadcast_status()
 
     except asyncio.CancelledError:
@@ -1592,10 +1558,8 @@ async def run_calculus_bot(config: CalculusMakerBotConfig, strategy: StrategySta
         strategy.status["error"] = "Stopped by user"
         strategy.reset_trading_data()
         strategy.instance = None
-        if "calculus_maker" in restart_configs:
-            del restart_configs["calculus_maker"]
-            logger.info("[calculus_maker] Cleared restart config - stopped by user")
-        logger.info("[calculus_maker] Stopped by user")
+        restart_configs.pop("aggressive", None)
+        logger.info("[aggressive] Stopped by user")
         await broadcast_status()
         raise
     except Exception as e:
@@ -1603,33 +1567,27 @@ async def run_calculus_bot(config: CalculusMakerBotConfig, strategy: StrategySta
         strategy.status["error"] = str(e)
         strategy.reset_trading_data()
         strategy.instance = None
-        logger.error(f"[calculus_maker] Error: {e}")
-        logger.error(f"[calculus_maker] Traceback: {traceback.format_exc()}")
+        logger.error(f"[aggressive] Error: {e}")
+        logger.error(f"[aggressive] Traceback: {traceback.format_exc()}")
         await broadcast_status()
-        # FIXED: Clear restart_configs on crash to prevent rogue auto-restart
-        restart_configs.pop("calculus_maker", None)
-        logger.info("[calculus_maker] Cleared restart config - no auto-restart will occur")
+        restart_configs.pop("aggressive", None)
 
 
-async def run_fair_value_mm_bot(config: FairValueMMBotConfig, strategy: StrategyState):
-    """Run the Fair Value MM trading bot asynchronously with resilience.
+async def run_contrarian_bot(config: ContrarianBotConfig, strategy: StrategyState):
+    """Run the CONTRARIAN (Path 2) trading bot asynchronously.
 
-    Uses Binance price feed to calculate fair value for UP/DOWN shares.
-    Posts at fair_value - edge (like real market makers).
+    Bets against BTC direction at 15-min scale when reversal detected.
     """
-    # Store config for auto-restart
-    restart_configs["fair_value_mm"] = config.dict()
+    restart_configs["contrarian"] = config.dict()
 
     try:
         from scripts.run_paper_bot import PaperTradingBot
 
-        # CRITICAL: Normalize times to UTC at the API boundary
         start_dt_utc = normalize_datetime_to_utc(config.start_datetime)
         end_dt_utc = normalize_datetime_to_utc(config.end_datetime)
 
-        logger.info(f"[fair_value_mm] Session time window (UTC): {start_dt_utc.isoformat()} to {end_dt_utc.isoformat()}")
+        logger.info(f"[contrarian] Session time window (UTC): {start_dt_utc.isoformat()} to {end_dt_utc.isoformat()}")
 
-        # Wait until start time (compare in UTC)
         now_utc = datetime.now(timezone.utc)
         if start_dt_utc > now_utc:
             wait_seconds = (start_dt_utc - now_utc).total_seconds()
@@ -1643,10 +1601,9 @@ async def run_fair_value_mm_bot(config: FairValueMMBotConfig, strategy: Strategy
         await broadcast_status()
 
         duration_minutes = (end_dt_utc - start_dt_utc).total_seconds() / 60.0
-        web_callback = create_web_callback_for_strategy("fair_value_mm")
+        web_callback = create_web_callback_for_strategy("contrarian")
 
-        # Create Fair Value MM bot with strategy-specific config
-        bot = PaperTradingBot.from_fair_value_mm_config(
+        bot = PaperTradingBot.from_contrarian_config(
             config.dict(),
             web_callback=web_callback,
             session_start_utc=start_dt_utc,
@@ -1655,21 +1612,18 @@ async def run_fair_value_mm_bot(config: FairValueMMBotConfig, strategy: Strategy
         )
         strategy.instance = bot
 
-        logger.info("[fair_value_mm] Initializing bot...")
+        logger.info("[contrarian] Initializing bot...")
         await bot.initialize()
 
-        logger.info(f"[fair_value_mm] Starting trading loop for {duration_minutes:.1f} minutes")
+        logger.info(f"[contrarian] Starting trading loop for {duration_minutes:.1f} minutes")
         await bot.run(duration_minutes=duration_minutes)
 
         strategy.status["running"] = False
         strategy.status["completed"] = True
         strategy.reset_trading_data()
         strategy.instance = None
-        # Clear restart config on normal completion
-        if "fair_value_mm" in restart_configs:
-            del restart_configs["fair_value_mm"]
-            logger.info("[fair_value_mm] Cleared restart config - session completed normally")
-        logger.info("[fair_value_mm] Trading session completed normally")
+        restart_configs.pop("contrarian", None)
+        logger.info("[contrarian] Trading session completed normally")
         await broadcast_status()
 
     except asyncio.CancelledError:
@@ -1677,10 +1631,8 @@ async def run_fair_value_mm_bot(config: FairValueMMBotConfig, strategy: Strategy
         strategy.status["error"] = "Stopped by user"
         strategy.reset_trading_data()
         strategy.instance = None
-        if "fair_value_mm" in restart_configs:
-            del restart_configs["fair_value_mm"]
-            logger.info("[fair_value_mm] Cleared restart config - stopped by user")
-        logger.info("[fair_value_mm] Stopped by user")
+        restart_configs.pop("contrarian", None)
+        logger.info("[contrarian] Stopped by user")
         await broadcast_status()
         raise
     except Exception as e:
@@ -1688,32 +1640,27 @@ async def run_fair_value_mm_bot(config: FairValueMMBotConfig, strategy: Strategy
         strategy.status["error"] = str(e)
         strategy.reset_trading_data()
         strategy.instance = None
-        logger.error(f"[fair_value_mm] Error: {e}")
-        logger.error(f"[fair_value_mm] Traceback: {traceback.format_exc()}")
+        logger.error(f"[contrarian] Error: {e}")
+        logger.error(f"[contrarian] Traceback: {traceback.format_exc()}")
         await broadcast_status()
-        # FIXED: Clear restart_configs on crash to prevent rogue auto-restart
-        restart_configs.pop("fair_value_mm", None)
-        logger.info("[fair_value_mm] Cleared restart config - no auto-restart will occur")
+        restart_configs.pop("contrarian", None)
 
 
-async def run_spread_capture_bot(config: SpreadCaptureBotConfig, strategy: StrategyState):
-    """Run the Spread Capture trading bot asynchronously.
+async def run_volume_weighted_bot(config: VolumeWeightedBotConfig, strategy: StrategyState):
+    """Run the Volume Weighted (Gabagool-style) trading bot asynchronously.
 
-    Velocity-based spread capture for sub-$1.00 pair opportunities.
+    Grid maker with aggressive cheap accumulation and conservative hedging.
     """
-    # Store config for auto-restart
-    restart_configs["spread_capture"] = config.dict()
+    restart_configs["volume_weighted"] = config.dict()
 
     try:
         from scripts.run_paper_bot import PaperTradingBot
 
-        # Normalize times to UTC
         start_dt_utc = normalize_datetime_to_utc(config.start_datetime)
         end_dt_utc = normalize_datetime_to_utc(config.end_datetime)
 
-        logger.info(f"[spread_capture] Session time window (UTC): {start_dt_utc.isoformat()} to {end_dt_utc.isoformat()}")
+        logger.info(f"[volume_weighted] Session time window (UTC): {start_dt_utc.isoformat()} to {end_dt_utc.isoformat()}")
 
-        # Wait until start time
         now_utc = datetime.now(timezone.utc)
         if start_dt_utc > now_utc:
             wait_seconds = (start_dt_utc - now_utc).total_seconds()
@@ -1727,10 +1674,9 @@ async def run_spread_capture_bot(config: SpreadCaptureBotConfig, strategy: Strat
         await broadcast_status()
 
         duration_minutes = (end_dt_utc - start_dt_utc).total_seconds() / 60.0
-        web_callback = create_web_callback_for_strategy("spread_capture")
+        web_callback = create_web_callback_for_strategy("volume_weighted")
 
-        # Create Spread Capture bot
-        bot = PaperTradingBot.from_spread_capture_config(
+        bot = PaperTradingBot.from_volume_weighted_config(
             config.dict(),
             web_callback=web_callback,
             session_start_utc=start_dt_utc,
@@ -1739,20 +1685,18 @@ async def run_spread_capture_bot(config: SpreadCaptureBotConfig, strategy: Strat
         )
         strategy.instance = bot
 
-        logger.info("[spread_capture] Initializing bot...")
+        logger.info("[volume_weighted] Initializing bot...")
         await bot.initialize()
 
-        logger.info(f"[spread_capture] Starting trading loop for {duration_minutes:.1f} minutes")
+        logger.info(f"[volume_weighted] Starting trading loop for {duration_minutes:.1f} minutes")
         await bot.run(duration_minutes=duration_minutes)
 
         strategy.status["running"] = False
         strategy.status["completed"] = True
         strategy.reset_trading_data()
         strategy.instance = None
-        if "spread_capture" in restart_configs:
-            del restart_configs["spread_capture"]
-            logger.info("[spread_capture] Cleared restart config - session completed normally")
-        logger.info("[spread_capture] Trading session completed normally")
+        restart_configs.pop("volume_weighted", None)
+        logger.info("[volume_weighted] Trading session completed normally")
         await broadcast_status()
 
     except asyncio.CancelledError:
@@ -1760,10 +1704,8 @@ async def run_spread_capture_bot(config: SpreadCaptureBotConfig, strategy: Strat
         strategy.status["error"] = "Stopped by user"
         strategy.reset_trading_data()
         strategy.instance = None
-        if "spread_capture" in restart_configs:
-            del restart_configs["spread_capture"]
-            logger.info("[spread_capture] Cleared restart config - stopped by user")
-        logger.info("[spread_capture] Stopped by user")
+        restart_configs.pop("volume_weighted", None)
+        logger.info("[volume_weighted] Stopped by user")
         await broadcast_status()
         raise
     except Exception as e:
@@ -1771,11 +1713,10 @@ async def run_spread_capture_bot(config: SpreadCaptureBotConfig, strategy: Strat
         strategy.status["error"] = str(e)
         strategy.reset_trading_data()
         strategy.instance = None
-        logger.error(f"[spread_capture] Error: {e}")
-        logger.error(f"[spread_capture] Traceback: {traceback.format_exc()}")
+        logger.error(f"[volume_weighted] Error: {e}")
+        logger.error(f"[volume_weighted] Traceback: {traceback.format_exc()}")
         await broadcast_status()
-        restart_configs.pop("spread_capture", None)
-        logger.info("[spread_capture] Cleared restart config - no auto-restart will occur")
+        restart_configs.pop("volume_weighted", None)
 
 
 def create_web_callback_for_strategy(strategy_name: str):
@@ -1811,9 +1752,9 @@ async def websocket_endpoint(websocket: WebSocket):
         # Send current status for all strategies on connect
         await websocket.send_json({
             "type": "status",
-            "calculus_maker": strategies["calculus_maker"].status,
-            "fair_value_mm": strategies["fair_value_mm"].status,
-            "spread_capture": strategies["spread_capture"].status,
+            "aggressive": strategies["aggressive"].status,
+            "contrarian": strategies["contrarian"].status,
+            "volume_weighted": strategies["volume_weighted"].status,
             "standard": strategies["standard"].status,
             "accumulation": strategies["standard"].status,  # Legacy alias
         })
@@ -1832,9 +1773,9 @@ async def broadcast_status():
     """Broadcast status to all connected WebSocket clients."""
     status_msg = {
         "type": "status",
-        "calculus_maker": strategies["calculus_maker"].status,
-        "fair_value_mm": strategies["fair_value_mm"].status,
-        "spread_capture": strategies["spread_capture"].status,
+        "aggressive": strategies["aggressive"].status,
+        "contrarian": strategies["contrarian"].status,
+        "volume_weighted": strategies["volume_weighted"].status,
         "standard": strategies["standard"].status,
         "accumulation": strategies["standard"].status,  # Legacy alias
     }
