@@ -99,10 +99,9 @@ class TelegramNotifier:
         self._on_balance: Optional[Callable[[], Awaitable[str]]] = None
 
         # Graceful stop callbacks (stop after current market ends)
-        self._on_graceful_stop_calculus_maker: Optional[Callable[[], Awaitable[None]]] = None
-        self._on_graceful_stop_simple_hedger: Optional[Callable[[], Awaitable[None]]] = None
-        self._on_graceful_stop_directional: Optional[Callable[[], Awaitable[None]]] = None
-        self._on_graceful_stop_enhanced_spike: Optional[Callable[[], Awaitable[None]]] = None
+        self._on_graceful_stop_aggressive: Optional[Callable[[], Awaitable[None]]] = None
+        self._on_graceful_stop_contrarian: Optional[Callable[[], Awaitable[None]]] = None
+        self._on_graceful_stop_volume_weighted: Optional[Callable[[], Awaitable[None]]] = None
 
         # Polling state
         self._running = False
@@ -205,10 +204,9 @@ class TelegramNotifier:
                 ],
                 # Graceful stop buttons (stop after current market)
                 [
-                    {"text": "\u23F8 Calc", "callback_data": "graceful_stop_calculus_maker"},
-                    {"text": "\u23F8 Simple", "callback_data": "graceful_stop_simple_hedger"},
-                    {"text": "\u23F8 Dir", "callback_data": "graceful_stop_directional"},
-                    {"text": "\u23F8 Enh", "callback_data": "graceful_stop_enhanced_spike"},
+                    {"text": "\u23F8 AGG", "callback_data": "graceful_stop_aggressive"},
+                    {"text": "\u23F8 CTR", "callback_data": "graceful_stop_contrarian"},
+                    {"text": "\u23F8 VW", "callback_data": "graceful_stop_volume_weighted"},
                 ],
                 [
                     {"text": "\u2622\ufe0f NUKE ALL", "callback_data": "nuke_all"},
@@ -401,21 +399,17 @@ class TelegramNotifier:
         """Register callback for /balance command (should return balance string)."""
         self._on_balance = callback
 
-    def on_graceful_stop_calculus_maker(self, callback: Callable[[], Awaitable[None]]) -> None:
-        """Register callback for graceful stop of Calculus Maker mode (stops after current market)."""
-        self._on_graceful_stop_calculus_maker = callback
+    def on_graceful_stop_aggressive(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Register callback for graceful stop of AGGRESSIVE mode (stops after current market)."""
+        self._on_graceful_stop_aggressive = callback
 
-    def on_graceful_stop_simple_hedger(self, callback: Callable[[], Awaitable[None]]) -> None:
-        """Register callback for graceful stop of Simple Hedger mode (stops after current market)."""
-        self._on_graceful_stop_simple_hedger = callback
+    def on_graceful_stop_contrarian(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Register callback for graceful stop of CONTRARIAN mode (stops after current market)."""
+        self._on_graceful_stop_contrarian = callback
 
-    def on_graceful_stop_directional(self, callback: Callable[[], Awaitable[None]]) -> None:
-        """Register callback for graceful stop of Directional mode (stops after current market)."""
-        self._on_graceful_stop_directional = callback
-
-    def on_graceful_stop_enhanced_spike(self, callback: Callable[[], Awaitable[None]]) -> None:
-        """Register callback for graceful stop of Enhanced Spike mode (stops after current market)."""
-        self._on_graceful_stop_enhanced_spike = callback
+    def on_graceful_stop_volume_weighted(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Register callback for graceful stop of VOLUME_WEIGHTED mode (stops after current market)."""
+        self._on_graceful_stop_volume_weighted = callback
 
     async def _handle_command(self, command: str, chat_id: str) -> None:
         """Handle incoming command."""
@@ -483,11 +477,10 @@ class TelegramNotifier:
 /stop - Stop the bot gracefully
 /sell_all - Emergency sell all positions
 
-<b>Modes:</b>
-\u2022 <b>Calculus Maker</b> - Dynamic mispricing detection
-\u2022 <b>Simple Hedger</b> - Flip-based hedging strategy
-\u2022 <b>Grid Maker</b> - Gabagool-style hedging
-\u2022 <b>Directional</b> - Bias-based with Binance feed"""
+<b>Strategies:</b>
+\u2022 <b>AGGRESSIVE</b> - Spike detection with velocity confirmation
+\u2022 <b>CONTRARIAN</b> - Bet against BTC at reversal points
+\u2022 <b>VOLUME_WEIGHTED</b> - Gabagool-style grid maker"""
             await self.send_message(help_text)
 
         elif command.startswith("/"):
@@ -528,7 +521,7 @@ class TelegramNotifier:
 \u2022 <b>Help</b> - Show this message
 \u2022 <b>Balances</b> - Check live & paper balances
 \u2022 <b>Status</b> - Get current bot status
-\u2022 <b>Calc/Simple/Dir</b> - Graceful stop strategy
+\u2022 <b>AGG/CTR/VW</b> - Graceful stop strategy
 \u2022 <b>NUKE ALL</b> - Emergency sell all & stop
 
 <b>Text Commands:</b>
@@ -539,11 +532,10 @@ class TelegramNotifier:
 /panel - Show control panel
 /help - Show this message
 
-<b>Modes:</b>
-\u2022 <b>Calculus Maker</b> - Dynamic mispricing detection
-\u2022 <b>Simple Hedger</b> - Flip-based hedging strategy
-\u2022 <b>Spread Capture</b> - Continuous velocity-based MM
-\u2022 <b>Directional</b> - Bias-based with Binance feed"""
+<b>Strategies:</b>
+\u2022 <b>AGGRESSIVE</b> - Spike detection with velocity confirmation
+\u2022 <b>CONTRARIAN</b> - Bet against BTC at reversal points
+\u2022 <b>VOLUME_WEIGHTED</b> - Gabagool-style grid maker"""
             await self.send_message(help_text)
 
         elif data == "balances":
@@ -579,37 +571,29 @@ class TelegramNotifier:
                 await self.send_message("<i>Stop handler not registered.</i>")
 
         # Graceful stop handlers (stop after current market ends)
-        elif data == "graceful_stop_calculus_maker":
-            if self._on_graceful_stop_calculus_maker:
-                await self.send_message("\u23F8 <b>Calculus Maker: Will stop after current market...</b>")
-                await self._on_graceful_stop_calculus_maker()
-                await self.send_message("\u2705 Calculus Maker mode flagged for graceful stop.")
+        elif data == "graceful_stop_aggressive":
+            if self._on_graceful_stop_aggressive:
+                await self.send_message("\u23F8 <b>AGGRESSIVE: Will stop after current market...</b>")
+                await self._on_graceful_stop_aggressive()
+                await self.send_message("\u2705 AGGRESSIVE mode flagged for graceful stop.")
             else:
-                await self.send_message("<i>Calculus Maker mode not running.</i>")
+                await self.send_message("<i>AGGRESSIVE mode not running.</i>")
 
-        elif data == "graceful_stop_simple_hedger":
-            if self._on_graceful_stop_simple_hedger:
-                await self.send_message("\u23F8 <b>Simple Hedger: Will stop after current market...</b>")
-                await self._on_graceful_stop_simple_hedger()
-                await self.send_message("\u2705 Simple Hedger mode flagged for graceful stop.")
+        elif data == "graceful_stop_contrarian":
+            if self._on_graceful_stop_contrarian:
+                await self.send_message("\u23F8 <b>CONTRARIAN: Will stop after current market...</b>")
+                await self._on_graceful_stop_contrarian()
+                await self.send_message("\u2705 CONTRARIAN mode flagged for graceful stop.")
             else:
-                await self.send_message("<i>Simple Hedger mode not running.</i>")
+                await self.send_message("<i>CONTRARIAN mode not running.</i>")
 
-        elif data == "graceful_stop_directional":
-            if self._on_graceful_stop_directional:
-                await self.send_message("\u23F8 <b>Directional: Will stop after current market...</b>")
-                await self._on_graceful_stop_directional()
-                await self.send_message("\u2705 Directional mode flagged for graceful stop.")
+        elif data == "graceful_stop_volume_weighted":
+            if self._on_graceful_stop_volume_weighted:
+                await self.send_message("\u23F8 <b>VOLUME_WEIGHTED: Will stop after current market...</b>")
+                await self._on_graceful_stop_volume_weighted()
+                await self.send_message("\u2705 VOLUME_WEIGHTED mode flagged for graceful stop.")
             else:
-                await self.send_message("<i>Directional mode not running.</i>")
-
-        elif data == "graceful_stop_enhanced_spike":
-            if self._on_graceful_stop_enhanced_spike:
-                await self.send_message("\u23F8 <b>Enhanced Spike: Will stop after current market...</b>")
-                await self._on_graceful_stop_enhanced_spike()
-                await self.send_message("\u2705 Enhanced Spike mode flagged for graceful stop.")
-            else:
-                await self.send_message("<i>Enhanced Spike mode not running.</i>")
+                await self.send_message("<i>VOLUME_WEIGHTED mode not running.</i>")
 
     async def _poll_updates(self) -> None:
         """Poll for new messages/commands and button callbacks."""
