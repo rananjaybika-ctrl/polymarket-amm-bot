@@ -812,6 +812,7 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
         hedge_type = "resolution"
         loser_fill = 0.0
         entry_fill_ts = spike_ts  # For taker, entry fills at signal time
+        hedge_fill_ts = market_end  # Default to resolution time
 
         for j in range(obs_idx + 1, len(mdf)):
             scan_row = mdf.iloc[j]
@@ -828,6 +829,7 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
             if curr_loser_ask <= loser_target:
                 loser_fill = loser_target
                 hedge_type = "passive"
+                hedge_fill_ts = scan_ts
                 break
 
             # Stop-loss (taker exit)
@@ -836,6 +838,7 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
                 if drop >= config.stop_loss_pct:
                     loser_fill = curr_loser_ask
                     hedge_type = "stoploss"
+                    hedge_fill_ts = scan_ts
                     break
 
         # Resolution handling - if direction correct, loser MUST fill (goes to $0)
@@ -877,7 +880,7 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
         # Track cycle completion for grid_buycount limit
         cycles_completed += 1
         total_shares_accumulated += cycle_shares
-        last_trade_ts = spike_ts
+        last_trade_ts = hedge_fill_ts  # FIXED: Use hedge fill time, not entry time
 
     return trades
 

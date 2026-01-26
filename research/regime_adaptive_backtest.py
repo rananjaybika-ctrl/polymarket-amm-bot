@@ -410,8 +410,12 @@ def calc_loser_bid(winner_entry: float, spike_mag: float) -> float:
 
 def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
                     slug: str, resolution: str,
-                    confirm_func, zone_config: str = "ALL") -> List[TradeResult]:
-    """Simulate trading with a specific confirmation function."""
+                    confirm_func, zone_config: str = "ALL",
+                    enable_cycling: bool = True) -> List[TradeResult]:
+    """Simulate trading with a specific confirmation function.
+
+    FIXED: Proper cycling logic - blocks new entries until hedge fills.
+    """
     mdf = obs_df[obs_df['market_slug'] == slug].copy()
     mdf = mdf.sort_values('timestamp_ms').reset_index(drop=True)
 
@@ -425,8 +429,11 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
                                (spikes_df['timestamp_ms'] <= market_end)].copy()
 
     trades = []
+
+    # PROPER CYCLING: Track position state, not just time gap
+    in_position = False
+    last_hedge_ts = 0
     MIN_CYCLE_GAP_MS = 1000
-    last_trade_ts = 0
 
     # Create regime tracker for this market
     regime_tracker = RegimeTracker()
@@ -441,7 +448,12 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
         if zscore < ZSCORE_LO or zscore > ZSCORE_HI:
             continue
 
-        if (spike_ts - last_trade_ts) < MIN_CYCLE_GAP_MS:
+        # PROPER CYCLING: Block if still in position
+        if in_position:
+            continue
+
+        # Enforce gap after hedge fill
+        if (spike_ts - last_hedge_ts) < MIN_CYCLE_GAP_MS:
             continue
 
         # Find nearest observer row
@@ -487,9 +499,13 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
 
         loser_target = calc_loser_bid(winner_entry, spike_mag)
 
-        # Scan forward for hedge
+        # PROPER CYCLING: Enter position
+        in_position = True
+
+        # Scan forward for hedge and track fill timestamp
         hedge_type = "resolution"
         loser_fill = 0.0
+        hedge_fill_ts = market_end
 
         for j in range(obs_idx + 1, len(mdf)):
             scan_row = mdf.iloc[j]
@@ -502,6 +518,7 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
             if curr_loser_ask <= loser_target:
                 loser_fill = loser_target
                 hedge_type = "passive"
+                hedge_fill_ts = scan_row['timestamp_ms']
                 break
 
         if hedge_type == "resolution":
@@ -534,7 +551,13 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
             method_used=method_used,
         ))
 
-        last_trade_ts = spike_ts
+        # PROPER CYCLING: Exit position after hedge simulation
+        in_position = False
+        last_hedge_ts = hedge_fill_ts
+
+        # If cycling disabled, stop after first trade
+        if not enable_cycling:
+            break
 
     return trades
 
@@ -681,6 +704,8 @@ def main():
                         default="ALL", help="Velocity zone filter")
     parser.add_argument("--grid-zones", action="store_true",
                         help="Run grid search across all zone configs")
+    parser.add_argument("--csv-output", type=str, default=None,
+                        help="Output CSV path for results")
     args = parser.parse_args()
 
     if args.all:
@@ -703,9 +728,10 @@ def main():
     load_ou_params()
 
     all_period_results = {}
+    # NOTE: BASELINE is ONLY run in velocity_options_backtest.py to avoid redundant runs
     strategies = [
-        ("BASELINE", confirm_baseline),
-        ("CONSERVATIVE", confirm_conservative),
+        # ("BASELINE", confirm_baseline),  # SKIPPED - run only in velocity_options_backtest.py
+        # ("CONSERVATIVE", confirm_conservative),  # SKIPPED - run only in velocity_options_backtest.py
         ("ADAPT_ZSCORE", confirm_adaptive_zscore),
         ("ADAPT_VELVAR", confirm_adaptive_velvar),
         ("ADAPT_ACCEL", confirm_adaptive_accel),
@@ -887,6 +913,28 @@ def main():
             print(f"  Avg $/hr:     ${best[1]:.2f}")
             print(f"  Std dev:      ${best[2]:.2f}")
             print(f"  Per-period:   {', '.join(f'${r:.2f}' for r in best[3])}")
+
+    # Save results to CSV
+    if args.csv_output or args.grid_zones:
+        output_path = args.csv_output if args.csv_output else "research/regime_adaptive_results.csv"
+        all_rows = []
+        for period in periods:
+            for r in all_period_results.get(period, []):
+                all_rows.append({
+                    'period': period,
+                    'method': r.name,
+                    'zone': r.zone_config,
+                    'trades': r.total_trades,
+                    'total_pnl': r.total_pnl,
+                    'hourly_rate': r.hourly_rate,
+                    'direction_accuracy': r.direction_accuracy,
+                    'trades_per_hour': r.trades_per_hour,
+                })
+        if all_rows:
+            results_df = pd.DataFrame(all_rows)
+            results_df = results_df.sort_values('hourly_rate', ascending=False)
+            results_df.to_csv(output_path, index=False)
+            print(f"\nResults saved to: {output_path}")
 
 
 if __name__ == "__main__":

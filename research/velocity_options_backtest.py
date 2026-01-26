@@ -324,8 +324,12 @@ def calc_loser_bid(winner_entry: float, spike_mag: float) -> float:
 def simulate_market_with_velocity(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
                                    slug: str, resolution: str,
                                    velocity_func, ewma_state: dict = None,
-                                   zone_config: str = "ALL") -> List[TradeResult]:
-    """Simulate trading with a specific velocity confirmation function."""
+                                   zone_config: str = "ALL",
+                                   enable_cycling: bool = True) -> List[TradeResult]:
+    """Simulate trading with a specific velocity confirmation function.
+
+    FIXED: Proper cycling logic - blocks new entries until hedge fills.
+    """
     mdf = obs_df[obs_df['market_slug'] == slug].copy()
     mdf = mdf.sort_values('timestamp_ms').reset_index(drop=True)
 
@@ -339,8 +343,12 @@ def simulate_market_with_velocity(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
                                (spikes_df['timestamp_ms'] <= market_end)].copy()
 
     trades = []
-    MIN_CYCLE_GAP_MS = 1000
-    last_trade_ts = 0
+
+    # PROPER CYCLING: Track position state, not just time gap
+    in_position = False
+    position_data = None
+    last_hedge_ts = 0  # Track when last hedge filled (not entry)
+    MIN_CYCLE_GAP_MS = 1000  # Gap after hedge fill before next entry
 
     for _, spike_row in market_spikes.iterrows():
         spike_ts = spike_row['timestamp_ms']
@@ -352,7 +360,12 @@ def simulate_market_with_velocity(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
         if zscore < ZSCORE_LO or zscore > ZSCORE_HI:
             continue
 
-        if (spike_ts - last_trade_ts) < MIN_CYCLE_GAP_MS:
+        # PROPER CYCLING: Block if still in position
+        if in_position:
+            continue
+
+        # Enforce gap after hedge fill
+        if (spike_ts - last_hedge_ts) < MIN_CYCLE_GAP_MS:
             continue
 
         # Find nearest observer row
@@ -394,9 +407,13 @@ def simulate_market_with_velocity(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
 
         loser_target = calc_loser_bid(winner_entry, spike_mag)
 
-        # Scan forward for hedge (simplified - just check resolution)
+        # PROPER CYCLING: Enter position
+        in_position = True
+
+        # Scan forward for hedge and track fill timestamp
         hedge_type = "resolution"
         loser_fill = 0.0
+        hedge_fill_ts = market_end  # Default to market end
 
         for j in range(obs_idx + 1, len(mdf)):
             scan_row = mdf.iloc[j]
@@ -409,6 +426,7 @@ def simulate_market_with_velocity(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
             if curr_loser_ask <= loser_target:
                 loser_fill = loser_target
                 hedge_type = "passive"
+                hedge_fill_ts = scan_row['timestamp_ms']
                 break
 
         if hedge_type == "resolution":
@@ -448,7 +466,13 @@ def simulate_market_with_velocity(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
             time_window=time_window,
         ))
 
-        last_trade_ts = spike_ts
+        # PROPER CYCLING: Exit position after hedge simulation
+        in_position = False
+        last_hedge_ts = hedge_fill_ts
+
+        # If cycling disabled, stop after first trade
+        if not enable_cycling:
+            break
 
     return trades
 
@@ -456,7 +480,8 @@ def simulate_market_with_velocity(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
 def run_velocity_backtest(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
                           hours: float, name: str, velocity_func,
                           use_ewma: bool = False,
-                          zone_config: str = "ALL") -> BacktestResult:
+                          zone_config: str = "ALL",
+                          enable_cycling: bool = True) -> BacktestResult:
     """Run backtest with a specific velocity function."""
     all_trades = []
 
@@ -467,7 +492,8 @@ def run_velocity_backtest(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
         ewma_state = {} if use_ewma else None
         trades = simulate_market_with_velocity(spikes_df, obs_df, slug, resolution,
                                                 velocity_func, ewma_state,
-                                                zone_config=zone_config)
+                                                zone_config=zone_config,
+                                                enable_cycling=enable_cycling)
         all_trades.extend(trades)
 
     if not all_trades:
@@ -618,6 +644,8 @@ def main():
                         default="ALL", help="Velocity zone filter")
     parser.add_argument("--grid-zones", action="store_true",
                         help="Run grid search across all zone configs")
+    parser.add_argument("--csv-output", type=str, default=None,
+                        help="Output CSV path for results")
     args = parser.parse_args()
 
     # Determine periods to run
@@ -798,6 +826,29 @@ def main():
             print(f"  vs BASELINE@ALL: {(best.hourly_rate - baseline.hourly_rate):+.2f} $/hr")
         print(f"  Accuracy:  {best.direction_accuracy:.1%}")
         print(f"  Trades:    {best.total_trades} ({best.trades_per_hour:.1f}/hr)")
+
+    # Save results to CSV
+    if args.csv_output or args.grid_zones:
+        output_path = args.csv_output if args.csv_output else "research/velocity_options_results.csv"
+        all_rows = []
+        for period_name, _, _ in periods:
+            for r in all_period_results.get(period_name, []):
+                all_rows.append({
+                    'period': period_name,
+                    'method': r.name,
+                    'zone': r.zone_config,
+                    'trades': r.total_trades,
+                    'total_pnl': r.total_pnl,
+                    'hourly_rate': r.hourly_rate,
+                    'direction_accuracy': r.direction_accuracy,
+                    'trades_per_hour': r.trades_per_hour,
+                    'avg_velocity': r.avg_velocity,
+                })
+        if all_rows:
+            results_df = pd.DataFrame(all_rows)
+            results_df = results_df.sort_values('hourly_rate', ascending=False)
+            results_df.to_csv(output_path, index=False)
+            print(f"\nResults saved to: {output_path}")
 
 
 if __name__ == "__main__":
