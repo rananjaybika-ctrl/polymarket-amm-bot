@@ -1,0 +1,32 @@
+================================================================================
+KALMAN FILTER SIGNAL BACKTEST - WITH ZONE GRID SEARCH
+================================================================================
+
+[OU] Loaded: μ=-3.9845, σ_stat=0.3877
+
+================================================================================
+PERIOD: IS+OOS2 (Jan 16-19, ~82h)
+================================================================================
+Loading data for period: is_oos2...
+  Binance: 7,694,694 rows
+  Observer: 1,246,102 rows
+  Detecting spikes (OU method)...
+    Found 197,581 spikes in 7,694,694 ticks
+  Overlap: 81.71 hours
+  Valid markets: 246
+  Spike events: 197,581
+
+Backtest: 81.71 hours
+
+Running backtests...
+--------------------------------------------------------------------------------
+  BASELINE           | Zone=ALL   | Trades=2273 | $/hr=$   7.15 | Acc=57.2%
+  KALMAN_VEL         | Zone=ALL   | Trades=2477 | $/hr=$   9.33 | Acc=56.4%
+  KALMAN_ACCEL       | Zone=ALL   | Trades=2203 | $/hr=$   6.82 | Acc=57.4%
+  KALMAN_BOTH        | Zone=ALL   | Trades=2428 | $/hr=$   9.83 | Acc=56.5%
+  KALMAN_ADAPTIVE    | Zone=ALL   | Trades=2479 | $/hr=$   9.39 | Acc=56.4%
+  KALMAN_STRICT      | Zone=ALL   | Trades=2447 | $/hr=$   9.25 | Acc=56.4%
+  HYBRID_RAW_KF      | Zone=ALL   | Trades=2468 | $/hr=$   9.17 | Acc=56.4%
+  BASELINE           | Zone=Z2_6  | Trades=2164 | $/hr=$   5.99 | Acc=57.3%
+  KALMAN_VEL         | Zone=Z2_6  | Trades=2384 | $/hr=$   8.10 | Acc=56.2%
+  KALMAN_ACCEL       | Zone=Z2_6  | Trades=2106 | $/hr=$   6.54 | Acc=57.5%

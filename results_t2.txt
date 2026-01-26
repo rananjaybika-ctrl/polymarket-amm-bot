@@ -1,0 +1,85 @@
+================================================================================
+MULTI-SIGNAL COMBINATION BACKTEST - WITH ZONE GRID SEARCH
+================================================================================
+
+[OU] Loaded: μ=-3.9845, σ_stat=0.3877
+
+================================================================================
+PERIOD: IS+OOS2 (Jan 16-19, ~82h)
+================================================================================
+Loading data for period: is_oos2...
+  Binance: 7,694,694 rows
+  Observer: 1,246,102 rows
+  Detecting spikes (OU method)...
+    Found 197,581 spikes in 7,694,694 ticks
+  Overlap: 81.71 hours
+  Valid markets: 246
+  Spike events: 197,581
+
+Backtest: 81.71 hours
+
+Running backtests...
+--------------------------------------------------------------------------------
+  BASELINE                  | Zone=ALL   | Trades=2273 | $/hr=$   7.15 | Acc=57.2%
+  STACK_1of3                | Zone=ALL   | Trades=2351 | $/hr=$   9.37 | Acc=56.9%
+  STACK_2of3                | Zone=ALL   | Trades=1835 | $/hr=$   2.42 | Acc=57.1%
+  STACK_3of3                | Zone=ALL   | Trades=1224 | $/hr=$   1.41 | Acc=58.7%
+  TIERED                    | Zone=ALL   | Trades=1919 | $/hr=$   3.33 | Acc=57.2%
+  WEIGHTED_VelHeavy         | Zone=ALL   | Trades=1670 | $/hr=$  -0.68 | Acc=56.7%
+  WEIGHTED_Equal            | Zone=ALL   | Trades=1678 | $/hr=$  -1.27 | Acc=56.7%
+  WEIGHTED_AccelHeavy       | Zone=ALL   | Trades=1871 | $/hr=$  -0.24 | Acc=55.4%
+  BASELINE                  | Zone=Z2_6  | Trades=2164 | $/hr=$   5.99 | Acc=57.3%
+  STACK_1of3                | Zone=Z2_6  | Trades=2275 | $/hr=$   7.65 | Acc=56.5%
+  STACK_2of3                | Zone=Z2_6  | Trades=1800 | $/hr=$   0.91 | Acc=56.6%
+  STACK_3of3                | Zone=Z2_6  | Trades=1222 | $/hr=$   1.31 | Acc=58.7%
+  TIERED                    | Zone=Z2_6  | Trades=1918 | $/hr=$   3.11 | Acc=57.1%
+  WEIGHTED_VelHeavy         | Zone=Z2_6  | Trades=1670 | $/hr=$  -1.00 | Acc=56.6%
+  WEIGHTED_Equal            | Zone=Z2_6  | Trades=1675 | $/hr=$  -1.20 | Acc=56.7%
+  WEIGHTED_AccelHeavy       | Zone=Z2_6  | Trades=1809 | $/hr=$  -0.67 | Acc=55.4%
+  BASELINE                  | Zone=Z3_6  | Trades=2030 | $/hr=$   4.61 | Acc=57.0%
+  STACK_1of3                | Zone=Z3_6  | Trades=2169 | $/hr=$   6.87 | Acc=56.3%
+  STACK_2of3                | Zone=Z3_6  | Trades=1727 | $/hr=$  -0.61 | Acc=56.6%
+  STACK_3of3                | Zone=Z3_6  | Trades=1216 | $/hr=$   1.17 | Acc=58.6%
+  TIERED                    | Zone=Z3_6  | Trades=1913 | $/hr=$   2.91 | Acc=57.0%
+  WEIGHTED_VelHeavy         | Zone=Z3_6  | Trades=1669 | $/hr=$  -1.17 | Acc=56.5%
+  WEIGHTED_Equal            | Zone=Z3_6  | Trades=1672 | $/hr=$  -1.47 | Acc=56.5%
+  WEIGHTED_AccelHeavy       | Zone=Z3_6  | Trades=1726 | $/hr=$  -0.89 | Acc=55.2%
+  BASELINE                  | Zone=Z4_6  | Trades=1110 | $/hr=$   2.32 | Acc=57.4%
+  STACK_1of3                | Zone=Z4_6  | Trades=1160 | $/hr=$   3.15 | Acc=56.7%
+  STACK_2of3                | Zone=Z4_6  | Trades= 986 | $/hr=$   1.61 | Acc=57.0%
+  STACK_3of3                | Zone=Z4_6  | Trades= 754 | $/hr=$   1.41 | Acc=58.5%
+  TIERED                    | Zone=Z4_6  | Trades=1110 | $/hr=$   2.32 | Acc=57.4%
+  WEIGHTED_VelHeavy         | Zone=Z4_6  | Trades= 987 | $/hr=$   1.49 | Acc=56.9%
+  WEIGHTED_Equal            | Zone=Z4_6  | Trades= 984 | $/hr=$   1.59 | Acc=57.0%
+  WEIGHTED_AccelHeavy       | Zone=Z4_6  | Trades=1003 | $/hr=$   1.40 | Acc=55.9%
+  BASELINE                  | Zone=Z5_6  | Trades= 584 | $/hr=$   1.93 | Acc=57.4%
+  STACK_1of3                | Zone=Z5_6  | Trades= 605 | $/hr=$   2.76 | Acc=56.7%
+  STACK_2of3                | Zone=Z5_6  | Trades= 550 | $/hr=$   1.96 | Acc=57.5%
+  STACK_3of3                | Zone=Z5_6  | Trades= 445 | $/hr=$   0.87 | Acc=58.7%
+  TIERED                    | Zone=Z5_6  | Trades= 584 | $/hr=$   1.93 | Acc=57.4%
+  WEIGHTED_VelHeavy         | Zone=Z5_6  | Trades= 550 | $/hr=$   1.96 | Acc=57.5%
+  WEIGHTED_Equal            | Zone=Z5_6  | Trades= 550 | $/hr=$   1.96 | Acc=57.5%
+  WEIGHTED_AccelHeavy       | Zone=Z5_6  | Trades= 562 | $/hr=$   2.18 | Acc=56.4%
+
+Strategy                    Zone  Trades       $/hr     Acc%
+--------------------------------------------------------------------
+STACK_1of3                   ALL    2351 $    9.37   56.9%
+STACK_1of3                  Z2_6    2275 $    7.65   56.5%
+BASELINE                     ALL    2273 $    7.15   57.2%
+STACK_1of3                  Z3_6    2169 $    6.87   56.3%
+BASELINE                    Z2_6    2164 $    5.99   57.3%
+BASELINE                    Z3_6    2030 $    4.61   57.0%
+TIERED                       ALL    1919 $    3.33   57.2%
+STACK_1of3                  Z4_6    1160 $    3.15   56.7%
+TIERED                      Z2_6    1918 $    3.11   57.1%
+TIERED                      Z3_6    1913 $    2.91   57.0%
+STACK_1of3                  Z5_6     605 $    2.76   56.7%
+STACK_2of3                   ALL    1835 $    2.42   57.1%
+BASELINE                    Z4_6    1110 $    2.32   57.4%
+TIERED                      Z4_6    1110 $    2.32   57.4%
+WEIGHTED_AccelHeavy         Z5_6     562 $    2.18   56.4%
+STACK_2of3                  Z5_6     550 $    1.96   57.5%
+WEIGHTED_VelHeavy           Z5_6     550 $    1.96   57.5%
+WEIGHTED_Equal              Z5_6     550 $    1.96   57.5%
+BASELINE                    Z5_6     584 $    1.93   57.4%
+TIERED                      Z5_6     584 $    1.93   57.4%
