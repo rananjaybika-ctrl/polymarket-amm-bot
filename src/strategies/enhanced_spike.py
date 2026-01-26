@@ -675,21 +675,9 @@ class EnhancedSpikeStrategy:
             )
             return False, 0.0, f"Velocity contradicts DOWN spike (v={velocity_bps:.3f})"
 
-        # NEUTRAL ZONE REJECTION: Require velocity to STRONGLY confirm spike
-        # Backtest skipped |v| < 0.10 trades, so this region was never validated
-        # Match backtest behavior until dynamic threshold is validated
-        MIN_VELOCITY_CONFIRM = 0.10  # Minimum |velocity| for confirmation
-        if spike_dir == "UP" and velocity_bps < MIN_VELOCITY_CONFIRM:
-            logger.debug(
-                f"[ENHANCED] REJECTED: Velocity too weak for UP spike (v={velocity_bps:.3f} < {MIN_VELOCITY_CONFIRM})"
-            )
-            return False, 0.0, f"Velocity too weak for UP spike (v={velocity_bps:.3f})"
-
-        if spike_dir == "DOWN" and velocity_bps > -MIN_VELOCITY_CONFIRM:
-            logger.debug(
-                f"[ENHANCED] REJECTED: Velocity too weak for DOWN spike (v={velocity_bps:.3f} > -{MIN_VELOCITY_CONFIRM})"
-            )
-            return False, 0.0, f"Velocity too weak for DOWN spike (v={velocity_bps:.3f})"
+        # NOTE: Neutral zone (-0.10 < v < +0.10) is ACCEPTED per backtest validation
+        # Backtest shows BASELINE (accept neutral) beats CONSERVATIVE (reject neutral) by +$2.55/hr
+        # See research/velocity_options_backtest.py for validation results
 
         # Compute composite score
         score = self.compute_enhanced_score(
