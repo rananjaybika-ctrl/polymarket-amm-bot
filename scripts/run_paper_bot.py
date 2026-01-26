@@ -780,6 +780,7 @@ class PaperTradingBot:
                 base_size=self.spread_base_size,
                 spike_lookback=self.spread_spike_lookback,
                 time_stop_seconds=self.time_stop_seconds,
+                stop_loss_pct=None,  # Match backtest - use 180s time-stop only, no price-based SL
                 zscore_lo=self.zscore_lo,
                 zscore_hi=self.zscore_hi,
                 zscore_filter_enabled=True,

@@ -43,6 +43,7 @@ from src.config import FeeConfig
 
 if TYPE_CHECKING:
     from src.strategies.ou_volatility import OUAdaptiveThreshold
+    from src.services.volatility_tracker import LiveZScoreTracker
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,12 @@ DEFAULT_MIN_VELOCITY_BPS = 0.50
 # Updated Jan 20, 2026: 12% SL optimal - prevents resolution losses, 19.6% trigger rate
 DEFAULT_STOP_LOSS_PCT = 0.12     # 12% stop-loss (was None)
 
+# Z-score volatility filter (from grid search Jan 22, 2026)
+# Best zone: 0 < z < 1.5 (52% improvement over no filter)
+DEFAULT_ZSCORE_LO = 0.0         # Skip low volatility periods (z < 0)
+DEFAULT_ZSCORE_HI = 1.5         # Skip high volatility periods (z > 1.5)
+DEFAULT_ZSCORE_METHOD = "ewma"  # Best method for $/hr
+
 # Timing (reduced from 120s based on backtest results)
 MIN_TIME_REMAINING = 60
 QUOTE_REFRESH_INTERVAL = 0.5
@@ -228,6 +235,7 @@ class EnhancedSpikeState:
     # Dynamic hedge target tracking
     first_fill_side: Optional[str] = None
     first_fill_price: float = 0.0
+    first_fill_time: Optional[float] = None  # Timestamp of first fill for time-stop
     first_fill_velocity_dir: Optional[str] = None
     locked_hedge_target: Optional[float] = None
     current_velocity_zone: Optional[str] = None
@@ -333,8 +341,16 @@ class EnhancedSpikeStrategy:
         max_share_price: float = DEFAULT_MAX_SHARE_PRICE,
         enable_cycling: bool = DEFAULT_ENABLE_CYCLING,
         stop_loss_pct: Optional[float] = DEFAULT_STOP_LOSS_PCT,
+        # Time-stop: Exit if position held too long without profit
+        time_stop_seconds: float = 180.0,  # 3 minutes default
         # OU adaptive threshold (optional - use for production)
         ou_adaptive_threshold: Optional["OUAdaptiveThreshold"] = None,
+        # Z-score volatility filter (Jan 22, 2026)
+        # Best zone from grid search: 0 < z < 1.5
+        zscore_tracker: Optional["LiveZScoreTracker"] = None,
+        zscore_filter_enabled: bool = True,
+        zscore_lo: float = DEFAULT_ZSCORE_LO,
+        zscore_hi: float = DEFAULT_ZSCORE_HI,
         # LEGACY parameters (aliases for backward compatibility)
         entry_size: Optional[int] = None,
         entry_offset: float = DEFAULT_ENTRY_OFFSET,
@@ -357,6 +373,14 @@ class EnhancedSpikeStrategy:
         # OU adaptive threshold (replaces fixed threshold when set)
         self.ou_adaptive_threshold = ou_adaptive_threshold
 
+        # Z-score volatility filter (Jan 22, 2026)
+        # Filters out trades in suboptimal volatility regimes
+        self.zscore_tracker = zscore_tracker
+        self.zscore_filter_enabled = zscore_filter_enabled
+        self.zscore_lo = zscore_lo
+        self.zscore_hi = zscore_hi
+        self._zscore_skip_count = 0  # Count trades skipped by z-score filter
+
         # Core parameters
         self.base_size = max(MIN_SHARES, base_size)
         self.target_shares = target_shares
@@ -367,6 +391,7 @@ class EnhancedSpikeStrategy:
         self.max_share_price = max_share_price
         self.enable_cycling = enable_cycling
         self.stop_loss_pct = stop_loss_pct
+        self.time_stop_seconds = time_stop_seconds
 
         # LEGACY attributes
         self.entry_offset = entry_offset
@@ -378,10 +403,16 @@ class EnhancedSpikeStrategy:
         self.state.last_velocity_zone = VelocityZone.NEUTRAL
         self._completed_pairs: List[Dict[str, Any]] = []
 
+        zscore_info = ""
+        if zscore_filter_enabled and zscore_tracker:
+            zscore_info = f", zscore_filter=[{zscore_lo}, {zscore_hi}]"
+        elif zscore_filter_enabled:
+            zscore_info = f", zscore_filter=ENABLED (no tracker yet)"
+
         logger.info(
             f"[ENHSPIKE] Initialized: base_size={base_size}, lookback={spike_lookback}, "
             f"threshold={spike_threshold:.2f}%, target_pair=${target_pair_cost:.2f}, "
-            f"stop_loss={stop_loss_pct:.0%}, cycling={enable_cycling}"
+            f"stop_loss={stop_loss_pct:.0%}, cycling={enable_cycling}{zscore_info}"
         )
 
     # =========================================================================
@@ -502,6 +533,26 @@ class EnhancedSpikeStrategy:
         self.state.last_spike_direction = None
         self.state.last_spike_magnitude = 0.0
         self.state.last_spike_time = 0.0
+
+    def set_zscore_tracker(self, tracker: "LiveZScoreTracker") -> None:
+        """Set or update the z-score tracker (for live trading integration)."""
+        self.zscore_tracker = tracker
+        logger.info(
+            f"[ENHSPIKE] Z-score tracker set: method={tracker.method}, "
+            f"bounds=[{self.zscore_lo}, {self.zscore_hi}]"
+        )
+
+    def get_zscore_stats(self) -> dict:
+        """Get z-score filter statistics."""
+        zscore_info = {
+            "enabled": self.zscore_filter_enabled,
+            "bounds": [self.zscore_lo, self.zscore_hi],
+            "skipped_entries": self._zscore_skip_count,
+            "tracker_active": self.zscore_tracker is not None,
+        }
+        if self.zscore_tracker is not None:
+            zscore_info.update(self.zscore_tracker.get_state())
+        return zscore_info
 
     # =========================================================================
     # ENHANCED SIGNAL: Velocity Confirmation Filter (January 17, 2026)
@@ -624,6 +675,22 @@ class EnhancedSpikeStrategy:
             )
             return False, 0.0, f"Velocity contradicts DOWN spike (v={velocity_bps:.3f})"
 
+        # NEUTRAL ZONE REJECTION: Require velocity to STRONGLY confirm spike
+        # Backtest skipped |v| < 0.10 trades, so this region was never validated
+        # Match backtest behavior until dynamic threshold is validated
+        MIN_VELOCITY_CONFIRM = 0.10  # Minimum |velocity| for confirmation
+        if spike_dir == "UP" and velocity_bps < MIN_VELOCITY_CONFIRM:
+            logger.debug(
+                f"[ENHANCED] REJECTED: Velocity too weak for UP spike (v={velocity_bps:.3f} < {MIN_VELOCITY_CONFIRM})"
+            )
+            return False, 0.0, f"Velocity too weak for UP spike (v={velocity_bps:.3f})"
+
+        if spike_dir == "DOWN" and velocity_bps > -MIN_VELOCITY_CONFIRM:
+            logger.debug(
+                f"[ENHANCED] REJECTED: Velocity too weak for DOWN spike (v={velocity_bps:.3f} > -{MIN_VELOCITY_CONFIRM})"
+            )
+            return False, 0.0, f"Velocity too weak for DOWN spike (v={velocity_bps:.3f})"
+
         # Compute composite score
         score = self.compute_enhanced_score(
             spike_magnitude=spike_magnitude,
@@ -732,6 +799,7 @@ class EnhancedSpikeStrategy:
 
         s.first_fill_side = side.upper()
         s.first_fill_price = price
+        s.first_fill_time = time.time()  # Track entry time for time-stop
         s.first_fill_velocity_dir = "UP" if velocity_bps > 0 else "DOWN"
         s.current_velocity_zone = self.get_velocity_zone_name(velocity_bps)
         s.locked_hedge_target = self.calculate_hedge_target(price, velocity_bps)
@@ -962,6 +1030,34 @@ class EnhancedSpikeStrategy:
         spike_magnitude = 0.0
         enhanced_score = 0.0
 
+        # Z-SCORE FILTER: Skip trades in suboptimal volatility regimes
+        # Best zone from grid search (Jan 22, 2026): 0 < z < 1.5
+        zscore_tradeable = True
+        current_zscore = 0.0
+
+        if binance_price is not None and self.zscore_tracker is not None:
+            # Update z-score tracker with current price
+            current_zscore = self.zscore_tracker.update(binance_price)
+
+            # Check if z-score is in tradeable zone (only for new entries)
+            if self.zscore_filter_enabled and s.first_fill_side is None:
+                zscore_tradeable = self.zscore_tracker.should_trade(
+                    z_lo=self.zscore_lo,
+                    z_hi=self.zscore_hi
+                )
+
+                if not zscore_tradeable:
+                    self._zscore_skip_count += 1
+                    # Log every 10th skip to avoid log spam
+                    if self._zscore_skip_count % 10 == 0:
+                        regime = self.zscore_tracker.get_regime()
+                        logger.debug(
+                            f"[ENHSPIKE] Z-score filter: skipped entry (z={current_zscore:.2f}, "
+                            f"regime={regime}, bounds=[{self.zscore_lo}, {self.zscore_hi}], "
+                            f"skips={self._zscore_skip_count})"
+                        )
+                    return []
+
         if binance_price is not None:
             raw_spike_direction, spike_magnitude = self.detect_spike(binance_price)
 
@@ -1030,6 +1126,41 @@ class EnhancedSpikeStrategy:
             )
             return [stop_loss_order]
 
+        # TIME-STOP CHECK (180s default)
+        # Exit if position held too long and not in profit
+        if s.first_fill_side is not None and s.first_fill_time is not None:
+            elapsed = current_time - s.first_fill_time
+            if elapsed >= self.time_stop_seconds:
+                # Determine winner and loser based on entry side
+                if s.first_fill_side == "UP":
+                    winner_bid = up_bid
+                    loser_ask = down_ask
+                    loser_side = "DOWN"
+                else:
+                    winner_bid = down_bid
+                    loser_ask = up_ask
+                    loser_side = "UP"
+
+                # Only trigger time-stop if NOT in profit
+                in_profit = winner_bid >= s.first_fill_price
+                if not in_profit:
+                    logger.warning(
+                        f"[ENHSPIKE] TIME-STOP TRIGGERED: {elapsed:.0f}s elapsed >= {self.time_stop_seconds:.0f}s, "
+                        f"winner bid=${winner_bid:.3f} < entry=${s.first_fill_price:.3f}, hedging at ${loser_ask:.3f}"
+                    )
+                    return [{
+                        'side': loser_side,
+                        'price': loser_ask,  # Take market (ask)
+                        'size': self.base_size,
+                        'is_time_stop': True,
+                        'is_market_order': True,
+                    }]
+                else:
+                    logger.debug(
+                        f"[ENHSPIKE] Time-stop skipped: {elapsed:.0f}s elapsed but in profit "
+                        f"(winner bid=${winner_bid:.3f} >= entry=${s.first_fill_price:.3f})"
+                    )
+
         # Dynamic hedge target tightening
         if s.locked_hedge_target is not None:
             self.maybe_tighten_hedge_target(velocity_bps)
@@ -1079,6 +1210,8 @@ class EnhancedSpikeStrategy:
                 'is_spike_entry': spike_direction is not None,
                 'spike_magnitude': spike_magnitude,
                 'enhanced_score': enhanced_score,  # Composite score from enhanced filter
+                'zscore': current_zscore if self.zscore_tracker else None,
+                'zscore_regime': self.zscore_tracker.get_regime() if self.zscore_tracker else None,
             })
 
             zone_name = self.get_velocity_zone_name(velocity_bps)
@@ -1444,6 +1577,7 @@ class EnhancedSpikeStrategy:
             },
             "enable_cycling": self.enable_cycling,
             "target_shares": self.target_shares,
+            "zscore_filter": self.get_zscore_stats(),
         }
 
     def get_completed_cycles(self) -> List[Dict[str, Any]]:
@@ -1464,6 +1598,7 @@ class EnhancedSpikeStrategy:
 
         self._completed_pairs = []
         self.clear_spike_history()
+        self._zscore_skip_count = 0
         logger.info(f"[ENHSPIKE] Reset for market #{markets} (spike history cleared)")
 
     def reset_for_cycle(self) -> None:
@@ -1472,6 +1607,7 @@ class EnhancedSpikeStrategy:
 
         s.first_fill_side = None
         s.first_fill_price = 0.0
+        s.first_fill_time = None  # Reset time-stop tracking
         s.first_fill_velocity_dir = None
         s.locked_hedge_target = None
         s.current_velocity_zone = None
