@@ -4822,13 +4822,14 @@ class PaperTradingBot:
             price = quote["price"]
             size = quote["size"]
 
-            # Auto-size to meet $1.00 minimum order value
-            MIN_ORDER_VALUE = 1.0
-            if price > 0 and size * price < MIN_ORDER_VALUE:
-                new_size = int(MIN_ORDER_VALUE / price) + 1
-                if new_size > size:
-                    logger.debug(f"[SPREADCAP] Auto-sizing {side}: {size} → {new_size} (min $1)")
-                    size = new_size
+            # Auto-scaling disabled - let Polymarket reject if below $1.00 minimum
+            # (Re-enable when testing with larger sizes like 50 shares)
+            # MIN_ORDER_VALUE = 1.0
+            # if price > 0 and size * price < MIN_ORDER_VALUE:
+            #     new_size = int(MIN_ORDER_VALUE / price) + 1
+            #     if new_size > size:
+            #         logger.debug(f"[SPREADCAP] Auto-sizing {side}: {size} → {new_size} (min $1)")
+            #         size = new_size
 
             best_ask = up_ask if side == "UP" else down_ask
             best_bid = up_bid if side == "UP" else down_bid
@@ -5113,9 +5114,10 @@ class PaperTradingBot:
             price = quote["price"]
             size = quote["size"]
 
-            # Auto-size for $1.00 minimum
-            if price > 0 and size * price < 1.0:
-                size = int(1.0 / price) + 1
+            # Auto-scaling disabled - let Polymarket reject if below $1.00 minimum
+            # (Re-enable when testing with larger sizes like 50 shares)
+            # if price > 0 and size * price < 1.0:
+            #     size = int(1.0 / price) + 1
 
             best_ask = up_ask if side == "UP" else down_ask
 
@@ -5446,9 +5448,10 @@ class PaperTradingBot:
             if size <= 0:
                 continue
 
-            # Auto-size for $1.00 minimum
-            if price > 0 and size * price < 1.0:
-                size = int(1.0 / price) + 1
+            # Auto-scaling disabled - let Polymarket reject if below $1.00 minimum
+            # (Re-enable when testing with larger sizes like 50 shares)
+            # if price > 0 and size * price < 1.0:
+            #     size = int(1.0 / price) + 1
 
             best_ask = up_ask if side == "UP" else down_ask
 
