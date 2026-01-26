@@ -1230,6 +1230,8 @@ class PaperTradingBot:
             contrarian_min_delay_seconds=config.get("min_delay_seconds", 60),
             contrarian_z_threshold=config.get("z_threshold", 0.5),
             contrarian_shares_per_trade=config.get("shares_per_trade", 2500),
+            # Target shares enforcement - use frontend limit
+            accum_target_shares=config.get("shares_per_trade", 50),
             # Output
             csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_contrarian.csv",
             live_display=True,
@@ -1487,7 +1489,11 @@ class PaperTradingBot:
             await asyncio.sleep(0.1)
 
         if self._binance_client.current_price <= 0:
-            logger.warning("Could not get initial Binance price, continuing anyway")
+            if self.trading_mode == "live":
+                logger.error("CRITICAL: Cannot start LIVE trading without Binance price reference")
+                raise RuntimeError("Binance price initialization failed - cannot proceed in LIVE mode")
+            else:
+                logger.warning("Could not get initial Binance price, continuing in paper mode")
         else:
             logger.info(f"Binance connected: BTC=${self._binance_client.current_price:,.2f}")
 
@@ -1502,6 +1508,29 @@ class PaperTradingBot:
             logger.info("[TREND] TrendDetector initialized - velocity-based quote pulling enabled")
 
         logger.info(f"Bot initialized with ${self.initial_balance:.2f} balance")
+
+    def _is_binance_healthy(self, max_stale_seconds: float = 5.0) -> bool:
+        """Check if Binance connection is healthy and data is fresh.
+
+        Returns False if:
+        - BinanceClient not initialized
+        - WebSocket disconnected
+        - Last price update older than max_stale_seconds
+        """
+        if not self._binance_client:
+            return False
+
+        if not self._binance_client.is_connected:
+            return False
+
+        # Check data freshness
+        if not self._binance_client._price_history:
+            return False
+
+        last_update = self._binance_client._price_history[-1].timestamp
+        age_seconds = (datetime.now(timezone.utc) - last_update).total_seconds()
+
+        return age_seconds <= max_stale_seconds
 
     async def _check_existing_positions(self) -> Dict[str, Any]:
         """
@@ -2762,6 +2791,31 @@ class PaperTradingBot:
             if self._orderbook_manager:
                 await self._orderbook_manager.rotate_to_market(market)
 
+            # CONTRARIAN MODE: Initialize window for new market (Path 2)
+            # Must be done HERE before _is_new_market is set to False
+            if self.accum_mode == "contrarian" and self._contrarian_strategy:
+                binance_price = None
+                if self._binance_client and self._binance_client.current_price > 0:
+                    binance_price = self._binance_client.current_price
+
+                if binance_price:
+                    # Calculate pre-window volatility from trend detector
+                    pre_vol = 0.0001  # Default
+                    if self._trend_detector:
+                        trend_signal = self._trend_detector.get_trend_signal()
+                        if trend_signal:
+                            pre_vol = abs(trend_signal.velocity_bps) / 100.0
+
+                    allowed = self._contrarian_strategy.on_window_start(
+                        btc_price=binance_price,
+                        pre_vol=pre_vol,
+                        timestamp=time.time(),
+                    )
+                    logger.info(
+                        f"[CONTRARIAN] Window started: btc=${binance_price:,.2f}, "
+                        f"pre_vol={pre_vol:.6f}, allowed={allowed}"
+                    )
+
             self._is_new_market = False
 
         # ============================================================================
@@ -2877,7 +2931,12 @@ class PaperTradingBot:
         )
 
         # Track if we're in hard stop mode (will only allow rebalancing orders)
-        in_hard_stop = current_imbalance >= hard_max and not spread_capture_hedging
+        # Contrarian mode is intentionally one-sided (bets against BTC direction), so skip hard stop
+        in_hard_stop = (
+            current_imbalance >= hard_max
+            and not spread_capture_hedging
+            and self.accum_mode != "contrarian"  # Contrarian is intentionally one-sided
+        )
         if in_hard_stop:
             # Throttle log to once per 60 seconds to avoid spam
             now = time.time()
@@ -4682,9 +4741,19 @@ class PaperTradingBot:
         # =========================================================================
 
         # Get current Binance price for spike detection (UPGRADED from velocity-only)
+        # SAFETY: Only use fresh data in live mode to avoid stale price decisions
         binance_price = None
         if self._binance_client and self._binance_client.current_price > 0:
-            binance_price = self._binance_client.current_price
+            if self.trading_mode == "live" and not self._is_binance_healthy():
+                # Stale data - don't use for spike detection or volatility updates
+                # Hedging can still proceed using locked_hedge_target
+                if not hasattr(self, '_last_binance_warning') or time.time() - self._last_binance_warning > 30:
+                    is_actively_hedging = strategy.state.phase.value in ("hedge_pending", "entry_filled")
+                    status = "hedging continues" if is_actively_hedging else "blocking new entries"
+                    logger.warning(f"🚨 BINANCE UNHEALTHY - SPREADCAP using None price ({status})")
+                    self._last_binance_warning = time.time()
+            else:
+                binance_price = self._binance_client.current_price
 
             # Update volatility regime and adjust spike threshold dynamically
             if self._volatility_detector and binance_price:
@@ -4837,6 +4906,16 @@ class PaperTradingBot:
             return
 
         strategy = self._aggressive_strategy
+
+        # BINANCE SAFETY GATE: Block NEW entries if Binance unhealthy
+        # BUT allow hedging to continue if we already have a position (first_fill_side is set)
+        is_actively_hedging = strategy.state.first_fill_side is not None
+        if self.trading_mode == "live" and not self._is_binance_healthy() and not is_actively_hedging:
+            if not hasattr(self, '_last_binance_warning') or time.time() - self._last_binance_warning > 30:
+                logger.warning("🚨 BINANCE UNHEALTHY - Blocking new AGGRESSIVE entries (hedging still allowed)")
+                self._last_binance_warning = time.time()
+            return
+
         time_remaining_secs = market.time_remaining()
 
         # Hard stop enforcement
@@ -4862,8 +4941,14 @@ class PaperTradingBot:
                     fill_price = ws_fill.get("price", 0)
 
                     if fill_side and fill_size > 0:
+                        # Track if we had a position before fill (to detect cycle completion)
+                        had_position = strategy.state.first_fill_side is not None
                         strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
                         logger.info(f"[AGGRESSIVE] Fill: {fill_side} {fill_size} @ ${fill_price:.4f}")
+
+                        # CYCLE RESET CANCELLATION: If cycle just completed, cancel pending orders
+                        if had_position and strategy.state.first_fill_side is None:
+                            await self._cancel_pending_after_cycle_reset(market, "WS_FILL")
                 except asyncio.QueueEmpty:
                     break
 
@@ -4912,11 +4997,37 @@ class PaperTradingBot:
                 if attempt < self.max_retries - 1:
                     await asyncio.sleep(0.5)
 
-        if not opportunity or opportunity.up_ask is None or opportunity.down_ask is None:
+        # Extract prices (may be None if opportunity failed)
+        up_ask = opportunity.up_ask if opportunity else None
+        down_ask = opportunity.down_ask if opportunity else None
+
+        # PAPER MODE: Check pending orders for tick-based fills
+        # CRITICAL: Must happen BEFORE early return so fills are checked every tick
+        if self.trading_mode == "paper" and hasattr(self._engine, 'check_pending_fills'):
+            try:
+                current_prices = {"UP": up_ask, "DOWN": down_ask} if up_ask and down_ask else None
+                fills = await self._engine.check_pending_fills(current_prices=current_prices)
+                for fill in fills:
+                    fill_side = fill.get("side", "")
+                    fill_size = int(fill.get("filled_size", 0))
+                    fill_price = fill.get("filled_price", 0)
+                    if fill_side and fill_size > 0:
+                        # Track if we had a position before fill (to detect cycle completion)
+                        had_position = strategy.state.first_fill_side is not None
+                        strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
+                        self._trade_count += 1
+                        self._send_web_update()
+                        logger.info(f"[AGGRESSIVE] Paper fill: {fill_side} {fill_size} @ ${fill_price:.4f}")
+
+                        # CYCLE RESET CANCELLATION: If cycle just completed, cancel pending orders
+                        if had_position and strategy.state.first_fill_side is None:
+                            await self._cancel_pending_after_cycle_reset(market, "PAPER_FILL")
+            except Exception as e:
+                logger.warning(f"[AGGRESSIVE] Error checking fills: {e}")
+
+        if not opportunity or up_ask is None or down_ask is None:
             return
 
-        up_ask = opportunity.up_ask
-        down_ask = opportunity.down_ask
         up_bid = opportunity.up_bid or (up_ask * 0.98)
         down_bid = opportunity.down_bid or (down_ask * 0.98)
 
@@ -4932,9 +5043,15 @@ class PaperTradingBot:
                 velocity_bps = trend_signal.velocity_bps
 
         # Get Binance price for spike detection
+        # SAFETY: Only use fresh data in live mode to avoid stale price decisions
         binance_price = None
         if self._binance_client and self._binance_client.current_price > 0:
-            binance_price = self._binance_client.current_price
+            if self.trading_mode == "live" and not self._is_binance_healthy():
+                # Stale data - don't use for spike detection or z-score updates
+                # Hedging can still proceed using locked_hedge_target from entry
+                pass
+            else:
+                binance_price = self._binance_client.current_price
 
         if in_hard_stop:
             return
@@ -4985,6 +5102,8 @@ class PaperTradingBot:
                     filled_price = result.get("filled_price", price)
 
                     if filled_size > 0:
+                        # Track if we had a position before fill (to detect cycle completion)
+                        had_position = strategy.state.first_fill_side is not None
                         strategy.on_fill(side=side, price=filled_price, size=int(filled_size))
                         self._trade_count += 1
                         self._send_web_update()
@@ -5001,8 +5120,41 @@ class PaperTradingBot:
 
                         logger.info(f"[AGGRESSIVE] Filled: {side} {filled_size} @ ${filled_price:.4f}")
 
+                        # CYCLE RESET CANCELLATION: If cycle just completed, cancel pending orders
+                        if had_position and strategy.state.first_fill_side is None:
+                            await self._cancel_pending_after_cycle_reset(market, "EXEC_FILL")
+
             except Exception as e:
                 logger.error(f"[AGGRESSIVE] Order execution error: {e}")
+
+    async def _cancel_pending_after_cycle_reset(self, market, source: str) -> None:
+        """
+        Cancel all pending orders for a market after a trading cycle completes.
+
+        This prevents stale orders from filling unexpectedly after hedge/stop-loss/time-stop
+        completes and the strategy resets for a new cycle.
+
+        Args:
+            market: The market to cancel orders for
+            source: Where the cancellation was triggered from (for logging)
+        """
+        if self.trading_mode != "live":
+            # Paper mode doesn't need explicit cancellation - pending orders are simulated
+            logger.debug(f"[CYCLE_CANCEL] Paper mode - skipping cancellation ({source})")
+            return
+
+        if not hasattr(self._engine, 'cancel_all_pending'):
+            return
+
+        try:
+            cancelled = await self._engine.cancel_all_pending(market_slug=market.slug)
+            if cancelled > 0:
+                logger.info(
+                    f"[CYCLE_CANCEL] ✓ Cancelled {cancelled} pending order(s) after cycle reset "
+                    f"(source={source}, market={market.slug})"
+                )
+        except Exception as e:
+            logger.warning(f"[CYCLE_CANCEL] Failed to cancel pending orders ({source}): {e}")
 
     async def _run_contrarian_cycle(
         self,
@@ -5064,11 +5216,31 @@ class PaperTradingBot:
                 if attempt < self.max_retries - 1:
                     await asyncio.sleep(0.5)
 
-        if not opportunity or opportunity.up_ask is None or opportunity.down_ask is None:
+        # Extract prices (may be None if opportunity failed)
+        up_ask = opportunity.up_ask if opportunity else None
+        down_ask = opportunity.down_ask if opportunity else None
+
+        # PAPER MODE: Check pending orders for tick-based fills
+        # CRITICAL: Must happen BEFORE early return so fills are checked every tick
+        if self.trading_mode == "paper" and hasattr(self._engine, 'check_pending_fills'):
+            try:
+                current_prices = {"UP": up_ask, "DOWN": down_ask} if up_ask and down_ask else None
+                fills = await self._engine.check_pending_fills(current_prices=current_prices)
+                for fill in fills:
+                    fill_side = fill.get("side", "")
+                    fill_size = int(fill.get("filled_size", 0))
+                    fill_price = fill.get("filled_price", 0)
+                    if fill_side and fill_size > 0:
+                        strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
+                        self._trade_count += 1
+                        self._send_web_update()
+                        logger.info(f"[CONTRARIAN] Paper fill: {fill_side} {fill_size} @ ${fill_price:.4f}")
+            except Exception as e:
+                logger.warning(f"[CONTRARIAN] Error checking fills: {e}")
+
+        if not opportunity or up_ask is None or down_ask is None:
             return
 
-        up_ask = opportunity.up_ask
-        down_ask = opportunity.down_ask
         up_bid = opportunity.up_bid or (up_ask * 0.98)
         down_bid = opportunity.down_bid or (down_ask * 0.98)
 
@@ -5077,25 +5249,21 @@ class PaperTradingBot:
         self._update_live_display()
 
         # Get Binance price for reversal detection
+        # SAFETY: Only use fresh data in live mode to avoid stale price decisions
         binance_price = None
         if self._binance_client and self._binance_client.current_price > 0:
-            binance_price = self._binance_client.current_price
+            if self.trading_mode == "live" and not self._is_binance_healthy():
+                # Log warning about unhealthy connection (throttled)
+                if not hasattr(self, '_last_binance_warning') or time.time() - self._last_binance_warning > 30:
+                    logger.warning("🚨 BINANCE UNHEALTHY - CONTRARIAN using None price (no new entries)")
+                    self._last_binance_warning = time.time()
+                # binance_price stays None, strategy won't generate new entries
+            else:
+                binance_price = self._binance_client.current_price
 
-        # Initialize window on new market
-        if self._is_new_market and binance_price:
-            # Calculate pre-window volatility from trend detector
-            pre_vol = 0.0001  # Default
-            if self._trend_detector:
-                trend_signal = self._trend_detector.get_trend_signal()
-                if trend_signal:
-                    pre_vol = abs(trend_signal.velocity_bps) / 100.0
-
-            strategy.on_window_start(
-                btc_price=binance_price,
-                pre_vol=pre_vol,
-                timestamp=time.time(),
-            )
-            self._is_new_market = False
+        # NOTE: on_window_start() is now called in the shared section of
+        # _run_accumulation_cycle() when _is_new_market is True, before this
+        # function runs. This ensures proper initialization for CONTRARIAN.
 
         # Generate quotes
         current_time = time.time()
@@ -5117,6 +5285,21 @@ class PaperTradingBot:
             side = quote["side"]
             price = quote["price"]
             size = quote["size"]
+
+            # ENFORCE TARGET SHARES: Never exceed frontend limit
+            current_side_qty = current_up if side == "UP" else current_down
+            if current_side_qty >= self.accum_target_shares:
+                logger.info(f"[CONTRARIAN] {side} at target ({current_side_qty:.0f}/{self.accum_target_shares}), skipping")
+                continue
+
+            # Cap size to not exceed target
+            remaining = self.accum_target_shares - current_side_qty
+            if size > remaining:
+                logger.info(f"[CONTRARIAN] Capping {side} size: {size} → {remaining:.0f} (target={self.accum_target_shares})")
+                size = int(remaining)
+
+            if size <= 0:
+                continue
 
             # Auto-size for $1.00 minimum
             if price > 0 and size * price < 1.0:
@@ -5434,6 +5617,18 @@ class PaperTradingBot:
                     if hasattr(self, '_pending_expensive_orders') and market_slug in self._pending_expensive_orders:
                         self._pending_expensive_orders[market_slug]["max_hedge_price"] = max_hedge_price
                         self._pending_expensive_orders[market_slug]["hedge_placed"] = True
+
+                    # CANCELLATION: Cancel any pending entry-side orders since we're now hedging
+                    # The entry already filled - cancel any stale entry orders to prevent double-fill
+                    entry_side = "UP" if cheap_side == "DOWN" else "DOWN"
+                    if hasattr(self._engine, 'cancel_pending_order'):
+                        try:
+                            pending_key = f"{market_slug}_{entry_side}"
+                            cancelled = await self._engine.cancel_pending_order(pending_key)
+                            if cancelled:
+                                logger.info(f"[INSTANT_HEDGE] Cancelled stale {entry_side} entry order")
+                        except Exception as cancel_err:
+                            logger.debug(f"[INSTANT_HEDGE] No {entry_side} order to cancel: {cancel_err}")
                 else:
                     logger.warning(
                         f"[INSTANT_HEDGE] ⚠️ Hedge placement failed: {result.get('action')} "
