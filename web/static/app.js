@@ -1,6 +1,6 @@
 /**
  * Polymarket Trading Bot - Card-Based Dashboard Controller
- * Manages trading modes: Calculus Maker, Grid Maker
+ * Manages trading modes: Aggressive, Contrarian, Volume Weighted
  */
 
 // ============================================
@@ -8,7 +8,7 @@
 // ============================================
 
 const modes = {
-    'calculus-maker': {
+    'aggressive': {
         status: 'stopped',  // stopped | paper | live
         running: false,
         config: {},
@@ -16,7 +16,7 @@ const modes = {
         timeRemaining: 0,
         countdownInterval: null
     },
-    'fair-value-mm': {
+    'contrarian': {
         status: 'stopped',
         running: false,
         config: {},
@@ -24,7 +24,7 @@ const modes = {
         timeRemaining: 0,
         countdownInterval: null
     },
-    'spread-capture': {
+    'volume-weighted': {
         status: 'stopped',
         running: false,
         config: {},
@@ -47,7 +47,7 @@ let reconnectTimeout = null;
  * Called before WebSocket connects to ensure clean slate.
  */
 function clearAllPositionDisplays() {
-    ['calculus-maker', 'fair-value-mm', 'spread-capture'].forEach(mode => {
+    ['aggressive', 'contrarian', 'volume-weighted'].forEach(mode => {
         // Position quantities and prices
         setElementText(`${mode}-up-qty`, '--');
         setElementText(`${mode}-down-qty`, '--');
@@ -94,7 +94,7 @@ function init() {
     setDefaultDatetimes();
 
     // Setup config toggles
-    ['calculus-maker', 'fair-value-mm', 'spread-capture'].forEach(mode => {
+    ['aggressive', 'contrarian', 'volume-weighted'].forEach(mode => {
         const toggleBtn = document.getElementById(`toggle-${mode}`);
         const configContent = document.getElementById(`config-${mode}`);
 
@@ -105,9 +105,9 @@ function init() {
     });
 
     // Setup action buttons
-    setupModeButtons('calculus-maker');
-    setupModeButtons('fair-value-mm');
-    setupModeButtons('spread-capture');
+    setupModeButtons('aggressive');
+    setupModeButtons('contrarian');
+    setupModeButtons('volume-weighted');
 
     // Connect WebSocket
     connectWebSocket();
@@ -126,7 +126,7 @@ function setDefaultDatetimes() {
     const startStr = formatDatetimeLocal(start);
     const endStr = formatDatetimeLocal(end);
 
-    ['calculus-maker', 'fair-value-mm', 'spread-capture'].forEach(mode => {
+    ['aggressive', 'contrarian', 'volume-weighted'].forEach(mode => {
         const startEl = document.getElementById(`${mode}-start`);
         const endEl = document.getElementById(`${mode}-end`);
         if (startEl) startEl.value = startStr;
@@ -216,13 +216,13 @@ function routeMessage(data) {
 
     if (data.type === 'status') {
         // Status update for all modes
-        if (data.calculus_maker) updateModeStatus('calculus-maker', data.calculus_maker);
-        if (data.fair_value_mm) updateModeStatus('fair-value-mm', data.fair_value_mm);
-        if (data.spread_capture) updateModeStatus('spread-capture', data.spread_capture);
+        if (data.aggressive) updateModeStatus('aggressive', data.aggressive);
+        if (data.contrarian) updateModeStatus('contrarian', data.contrarian);
+        if (data.volume_weighted) updateModeStatus('volume-weighted', data.volume_weighted);
     } else if (data.type === 'trading_update') {
         // Route trading update to specific mode's card
-        // Convert underscore to hyphen for frontend mode names (spread_capture -> spread-capture)
-        const strategy = (data.strategy || 'calculus-maker').replace('_', '-');
+        // Convert underscore to hyphen for frontend mode names (volume_weighted -> volume-weighted)
+        const strategy = (data.strategy || 'aggressive').replace('_', '-');
         console.log('[WS] Routing trading_update to:', strategy, 'Position:', data.position);
         updateLiveData(strategy, data);
     }
@@ -233,9 +233,9 @@ async function fetchStatus() {
         const res = await fetch('/api/status');
         const data = await res.json();
 
-        if (data.calculus_maker) updateModeStatus('calculus-maker', data.calculus_maker);
-        if (data.fair_value_mm) updateModeStatus('fair-value-mm', data.fair_value_mm);
-        if (data.spread_capture) updateModeStatus('spread-capture', data.spread_capture);
+        if (data.aggressive) updateModeStatus('aggressive', data.aggressive);
+        if (data.contrarian) updateModeStatus('contrarian', data.contrarian);
+        if (data.volume_weighted) updateModeStatus('volume-weighted', data.volume_weighted);
     } catch (error) {
         console.error('Failed to fetch status:', error);
     }
@@ -331,25 +331,26 @@ function formatConfigTooltip(modeName, status) {
         lines.push('---');
     }
 
-    if (modeName === 'calculus-maker') {
-        lines.push(`Max Shares: ${config.max_shares || '--'}`);
-        lines.push(`Min Shares: ${config.min_shares || '--'}`);
-        lines.push(`m_min: ${config.m_min || '--'}`);
-        lines.push(`m_max: ${config.m_max || '--'}`);
-        lines.push(`Lambda: ${config.lambda_decay || '--'}`);
-        lines.push(`Max Pair: ${config.max_pair_cost || '--'}`);
-    } else if (modeName === 'fair-value-mm') {
-        lines.push(`Edge: ${config.fv_edge || '--'}`);
-        lines.push(`Sensitivity Early: ${config.fv_sensitivity_early || '--'}`);
-        lines.push(`Sensitivity Late: ${config.fv_sensitivity_late || '--'}`);
-        lines.push(`Reprice: ${config.fv_reprice_threshold || '--'}`);
-        lines.push(`Max Shares: ${config.max_shares || '--'}`);
-    } else if (modeName === 'spread-capture') {
-        lines.push(`Entry Size: ${config.entry_size || '--'}`);
+    if (modeName === 'aggressive') {
+        lines.push(`Base Size: ${config.base_size || '--'}`);
+        lines.push(`Lookback: ${config.lookback_ms || '--'}ms`);
+        lines.push(`Time Stop: ${config.time_stop_seconds || '--'}s`);
+        lines.push(`Z-Lo: ${config.z_lo || '--'}`);
+        lines.push(`Z-Hi: ${config.z_hi || '--'}`);
+        lines.push(`Cycling: ${config.use_cycling ? 'Yes' : 'No'}`);
+    } else if (modeName === 'contrarian') {
+        lines.push(`Shares: ${config.shares_per_trade || '--'}`);
+        lines.push(`Pullback: ${config.pullback_threshold || '--'}`);
+        lines.push(`Retracement: ${config.retracement_min || '--'}`);
+        lines.push(`Entry Min: $${config.entry_price_min || '--'}`);
+        lines.push(`Delay: ${config.min_delay_seconds || '--'}s`);
+        lines.push(`Z Thresh: ${config.z_threshold || '--'}`);
+    } else if (modeName === 'volume-weighted') {
         lines.push(`Target: ${config.target_shares || '--'}`);
-        lines.push(`Min Profit: ${config.min_profit || '--'}`);
-        lines.push(`Max Price: ${config.max_share_price || '--'}`);
-        lines.push(`Hard Max: ${config.emergency_imbalance_threshold || '--'}`);
+        lines.push(`Cheap: $${config.vw_cheap_threshold || '--'}`);
+        lines.push(`Imbal %: ${config.vw_imbalance_pct || '--'}`);
+        lines.push(`Hedge Trig: ${config.vw_hedge_trigger_pct || '--'}`);
+        lines.push(`Max Hedge: $${config.vw_max_hedge_price || '--'}`);
     }
 
     lines.push(`Balance: $${config.starting_balance || '--'}`);
@@ -412,7 +413,7 @@ function updateLiveData(modeName, data) {
     setElementText(`${modeName}-down-qty`, Math.round(downQty));
     setElementText(`${modeName}-down-avg`, downAvg > 0 ? `$${downAvg.toFixed(3)}` : '--');
 
-    // Position costs (qty × avg price)
+    // Position costs (qty x avg price)
     const upCost = pos.up_cost || (upQty * upAvg);
     const downCost = pos.down_cost || (downQty * downAvg);
     setElementText(`${modeName}-up-cost`, upCost > 0 ? `$${upCost.toFixed(2)}` : '--');
@@ -458,26 +459,24 @@ function updateLiveData(modeName, data) {
         }
     }
 
-    // Session P&L (realized from resolved markets)
+    // Session P&L (from auto-merged cycles, or resolved markets as fallback)
     const realizedEl = document.getElementById(`${modeName}-realized-pnl`);
     if (realizedEl) {
+        // Prefer session_pnl (actual merged cycle profit) over realized_pnl (resolved markets)
+        const sessionPnl = metrics.session_pnl || 0;
         const realizedPnl = metrics.realized_pnl || 0;
-        const sign = realizedPnl >= 0 ? '+' : '';
-        realizedEl.textContent = `${sign}$${realizedPnl.toFixed(2)}`;
+        const displayPnl = sessionPnl !== 0 ? sessionPnl : realizedPnl;
+        const mergeCount = metrics.session_merge_count || 0;
+
+        const sign = displayPnl >= 0 ? '+' : '';
+        if (mergeCount > 0) {
+            realizedEl.textContent = `${sign}$${displayPnl.toFixed(2)} (${mergeCount} cycles)`;
+        } else {
+            realizedEl.textContent = `${sign}$${displayPnl.toFixed(2)}`;
+        }
         realizedEl.classList.remove('profit', 'loss');
-        realizedEl.classList.add(realizedPnl >= 0 ? 'profit' : 'loss');
+        realizedEl.classList.add(displayPnl >= 0 ? 'profit' : 'loss');
     }
-
-    // Merged Pair Profit (from cycling mode)
-    const mergedEl = document.getElementById(`${modeName}-merged-profit`);
-    if (mergedEl) {
-        const mergedProfit = metrics.merged_pair_profit || 0;
-        const mergedSign = mergedProfit >= 0 ? '+' : '';
-        mergedEl.textContent = `${mergedSign}$${mergedProfit.toFixed(2)}`;
-        mergedEl.classList.remove('profit', 'loss');
-        mergedEl.classList.add(mergedProfit >= 0 ? 'profit' : 'loss');
-    }
-
 }
 
 function setElementText(id, value) {
@@ -540,69 +539,55 @@ function stopCountdown(modeName) {
 // CONFIG COLLECTION
 // ============================================
 
-function getCalculusMakerConfig() {
+function getAggressiveConfig() {
     return {
-        mode: document.querySelector('input[name="calculus_maker_mode"]:checked').value,
+        mode: document.querySelector('input[name="aggressive_mode"]:checked').value,
         market: 'btc-15m',
-        start_datetime: document.getElementById('calculus-maker-start').value,
-        end_datetime: document.getElementById('calculus-maker-end').value,
-        starting_balance: parseFloat(document.getElementById('calculus-maker-balance-input').value),
-        // Calculus MAKER specific parameters
-        max_shares: parseInt(document.getElementById('calculus-maker-target').value),
-        min_shares: parseInt(document.getElementById('calculus-maker-min-shares').value),
-        m_min: parseFloat(document.getElementById('calculus-maker-m-min').value),
-        m_max: parseFloat(document.getElementById('calculus-maker-m-max').value),
-        lambda_decay: parseFloat(document.getElementById('calculus-maker-lambda').value),
-        max_pair_cost: parseFloat(document.getElementById('calculus-maker-max-pair').value),
-        max_imbalance_pct: parseFloat(document.getElementById('calculus-maker-imbalance').value),
-        hard_max_imbalance: parseInt(document.getElementById('calculus-maker-hard-max').value) || 10,
-        max_share_price: 0.98,
-        max_daily_loss: parseFloat(document.getElementById('calculus-maker-max-loss').value) || 0
+        start_datetime: document.getElementById('aggressive-start').value,
+        end_datetime: document.getElementById('aggressive-end').value,
+        starting_balance: parseFloat(document.getElementById('aggressive-balance-input').value),
+        // AGGRESSIVE specific parameters
+        lookback_ms: parseInt(document.getElementById('aggressive-lookback').value),
+        time_stop_seconds: parseFloat(document.getElementById('aggressive-time-stop').value),
+        z_lo: parseFloat(document.getElementById('aggressive-z-lo').value),
+        z_hi: parseFloat(document.getElementById('aggressive-z-hi').value),
+        base_size: parseInt(document.getElementById('aggressive-base-size').value),
+        use_cycling: document.getElementById('aggressive-cycling').checked,
+        max_daily_loss: parseFloat(document.getElementById('aggressive-max-loss').value) || 0
     };
 }
 
-function getFairValueMMConfig() {
+function getContrarianConfig() {
     return {
-        mode: document.querySelector('input[name="fair_value_mm_mode"]:checked').value,
+        mode: document.querySelector('input[name="contrarian_mode"]:checked').value,
         market: 'btc-15m',
-        start_datetime: document.getElementById('fair-value-mm-start').value,
-        end_datetime: document.getElementById('fair-value-mm-end').value,
-        starting_balance: parseFloat(document.getElementById('fair-value-mm-balance-input').value),
-        // Fair Value MM specific parameters
-        fv_edge: parseFloat(document.getElementById('fair-value-mm-edge').value),
-        fv_sensitivity_early: parseFloat(document.getElementById('fair-value-mm-sens-early').value),
-        fv_sensitivity_late: parseFloat(document.getElementById('fair-value-mm-sens-late').value),
-        fv_reprice_threshold: parseFloat(document.getElementById('fair-value-mm-reprice').value),
-        // Reuse calculus maker parameters
-        max_shares: parseInt(document.getElementById('fair-value-mm-max-shares').value),
-        min_shares: parseInt(document.getElementById('fair-value-mm-min-shares').value),
-        m_min: parseFloat(document.getElementById('fair-value-mm-m-min').value),
-        m_max: parseFloat(document.getElementById('fair-value-mm-m-max').value),
-        lambda_decay: parseFloat(document.getElementById('fair-value-mm-lambda').value),
-        max_pair_cost: parseFloat(document.getElementById('fair-value-mm-max-pair').value),
-        max_imbalance_pct: parseFloat(document.getElementById('fair-value-mm-imbalance').value),
-        max_share_price: 0.98,
-        max_daily_loss: parseFloat(document.getElementById('fair-value-mm-max-loss').value) || 0
+        start_datetime: document.getElementById('contrarian-start').value,
+        end_datetime: document.getElementById('contrarian-end').value,
+        starting_balance: parseFloat(document.getElementById('contrarian-balance-input').value),
+        // CONTRARIAN specific parameters
+        pullback_threshold: parseFloat(document.getElementById('contrarian-pullback').value),
+        retracement_min: parseFloat(document.getElementById('contrarian-retracement').value),
+        entry_price_min: parseFloat(document.getElementById('contrarian-entry-min').value),
+        min_delay_seconds: parseInt(document.getElementById('contrarian-delay').value),
+        z_threshold: parseFloat(document.getElementById('contrarian-z-thresh').value),
+        shares_per_trade: parseInt(document.getElementById('contrarian-shares').value)
     };
 }
 
-function getSpreadCaptureConfig() {
+function getVolumeWeightedConfig() {
     return {
-        mode: document.querySelector('input[name="spread_capture_mode"]:checked').value,
-        start_datetime: document.getElementById('spread-capture-start').value,
-        end_datetime: document.getElementById('spread-capture-end').value,
-        starting_balance: parseFloat(document.getElementById('spread-capture-balance-input').value),
-        // Base size = entry_size for backward compatibility
-        base_size: parseInt(document.getElementById('spread-capture-entry-size').value),
-        target_shares: parseInt(document.getElementById('spread-capture-target').value),
-        min_profit: parseFloat(document.getElementById('spread-capture-min-profit').value),
-        max_share_price: parseFloat(document.getElementById('spread-capture-max-price').value),
-        hard_max_imbalance: parseInt(document.getElementById('spread-capture-max-imbalance').value),
-        max_daily_loss: parseFloat(document.getElementById('spread-capture-max-loss').value) || 0,
-        // NEW: Continuous velocity mode parameters
-        grid_levels: parseInt(document.getElementById('spread-capture-grid-levels').value) || 3,
-        max_imbalance_pct: parseFloat(document.getElementById('spread-capture-imbalance-pct').value) || 0.10,
-        enable_cycling: document.getElementById('spread-capture-enable-cycling').checked
+        mode: document.querySelector('input[name="volume_weighted_mode"]:checked').value,
+        market: 'btc-15m',
+        start_datetime: document.getElementById('volume-weighted-start').value,
+        end_datetime: document.getElementById('volume-weighted-end').value,
+        starting_balance: parseFloat(document.getElementById('volume-weighted-balance-input').value),
+        // VW specific parameters
+        vw_imbalance_pct: parseFloat(document.getElementById('volume-weighted-imbalance').value),
+        vw_cheap_threshold: parseFloat(document.getElementById('volume-weighted-cheap').value),
+        vw_hedge_trigger_pct: parseFloat(document.getElementById('volume-weighted-hedge-trigger').value),
+        vw_max_hedge_price: parseFloat(document.getElementById('volume-weighted-max-hedge').value),
+        target_shares: parseInt(document.getElementById('volume-weighted-target').value),
+        max_daily_loss: parseFloat(document.getElementById('volume-weighted-max-loss').value) || 0
     };
 }
 
@@ -617,15 +602,15 @@ async function handleStart(modeName) {
     let config;
     let endpoint;
 
-    if (modeName === 'calculus-maker') {
-        config = getCalculusMakerConfig();
-        endpoint = '/api/start/calculus_maker';
-    } else if (modeName === 'fair-value-mm') {
-        config = getFairValueMMConfig();
-        endpoint = '/api/start/fair_value_mm';
-    } else if (modeName === 'spread-capture') {
-        config = getSpreadCaptureConfig();
-        endpoint = '/api/start/spread_capture';
+    if (modeName === 'aggressive') {
+        config = getAggressiveConfig();
+        endpoint = '/api/start/aggressive';
+    } else if (modeName === 'contrarian') {
+        config = getContrarianConfig();
+        endpoint = '/api/start/contrarian';
+    } else if (modeName === 'volume-weighted') {
+        config = getVolumeWeightedConfig();
+        endpoint = '/api/start/volume_weighted';
     }
 
     // Validation
@@ -639,7 +624,7 @@ async function handleStart(modeName) {
 
     // Confirm live trading
     if (config.mode === 'live') {
-        if (!confirm(`⚠️ LIVE TRADING - Real money at risk!\n\nProceed with ${modeName.toUpperCase()}?`)) {
+        if (!confirm(`LIVE TRADING - Real money at risk!\n\nProceed with ${modeName.toUpperCase()}?`)) {
             return;
         }
     }
@@ -682,11 +667,9 @@ async function handleStop(modeName) {
         stopBtn.disabled = true;
         stopBtn.textContent = 'STOPPING...';
 
-        // Map mode name to strategy for API (must match backend strategy keys)
+        // Map mode name to strategy for API (hyphen to underscore)
         let strategy = modeName;
-        if (modeName === 'calculus-maker') strategy = 'calculus_maker';
-        else if (modeName === 'fair-value-mm') strategy = 'fair_value_mm';
-        else if (modeName === 'spread-capture') strategy = 'spread_capture';
+        if (modeName === 'volume-weighted') strategy = 'volume_weighted';
         await fetch(`/api/stop/${strategy}`, { method: 'POST' });
     } catch (error) {
         showError(modeName, 'Failed to stop: ' + error.message);
@@ -712,11 +695,9 @@ async function handleNuke(modeName) {
         stopBtn.disabled = true;
         nukeBtn.textContent = 'NUKING...';
 
-        // Map mode name to strategy for API (must match backend strategy keys)
+        // Map mode name to strategy for API (hyphen to underscore)
         let strategy = modeName;
-        if (modeName === 'calculus-maker') strategy = 'calculus_maker';
-        else if (modeName === 'fair-value-mm') strategy = 'fair_value_mm';
-        else if (modeName === 'spread-capture') strategy = 'spread_capture';
+        if (modeName === 'volume-weighted') strategy = 'volume_weighted';
         const res = await fetch(`/api/emergency-stop/${strategy}`, { method: 'POST' });
         const data = await res.json();
 

@@ -831,6 +831,8 @@ class PaperTradingBot:
         self._last_discord_update: Optional[datetime] = None
         self._trade_count = 0
         self._total_pairs = 0
+        self._session_merged_pnl = 0.0  # Cumulative PnL from auto-merged cycles
+        self._session_merge_count = 0   # Number of successful merges
 
         # Stats
         self._opportunities_checked = 0
@@ -1933,10 +1935,17 @@ class PaperTradingBot:
         return None
 
     def _get_spread_capture_profit(self) -> float:
-        """Get cumulative profit from merged pairs (spread_capture cycling mode)."""
+        """Get cumulative profit from merged pairs (cycling mode)."""
+        # Check both spread_capture and aggressive strategies
         if self._spread_capture_strategy:
             return self._spread_capture_strategy.state.total_profit
+        if self._aggressive_strategy:
+            return self._aggressive_strategy.state.total_profit
         return 0.0
+
+    def _get_session_merged_pnl(self) -> float:
+        """Get session PnL from auto-merged cycles (actual on-chain merges)."""
+        return getattr(self, '_session_merged_pnl', 0.0)
 
     def _build_web_state(self) -> dict:
         """Build trading state as JSON for web UI."""
@@ -1984,6 +1993,8 @@ class PaperTradingBot:
             "target_shares": self.accum_target_shares,
             "realized_pnl": self._engine.get_realized_pnl() if self._engine else 0,
             "merged_pair_profit": self._get_spread_capture_profit(),  # Profit from cycling mode
+            "session_pnl": self._session_merged_pnl,  # Cumulative PnL from auto-merged cycles
+            "session_merge_count": self._session_merge_count,  # Number of merged cycles
         }
 
         if position:
@@ -4943,12 +4954,24 @@ class PaperTradingBot:
                     if fill_side and fill_size > 0:
                         # Track if we had a position before fill (to detect cycle completion)
                         had_position = strategy.state.first_fill_side is not None
+                        completed_pairs_before = len(strategy._completed_pairs)
+
                         strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
                         logger.info(f"[AGGRESSIVE] Fill: {fill_side} {fill_size} @ ${fill_price:.4f}")
 
-                        # CYCLE RESET CANCELLATION: If cycle just completed, cancel pending orders
+                        # CYCLE COMPLETION: If cycle just completed, cancel orders and merge
                         if had_position and strategy.state.first_fill_side is None:
                             await self._cancel_pending_after_cycle_reset(market, "WS_FILL")
+
+                            # Auto-merge if a new cycle was recorded
+                            if len(strategy._completed_pairs) > completed_pairs_before:
+                                last_cycle = strategy._completed_pairs[-1]
+                                await self._auto_merge_after_cycle(
+                                    market=market,
+                                    pairs_to_merge=last_cycle["pairs"],
+                                    pair_cost=last_cycle["pair_cost"],
+                                    source="WS_FILL"
+                                )
                 except asyncio.QueueEmpty:
                     break
 
@@ -5014,14 +5037,26 @@ class PaperTradingBot:
                     if fill_side and fill_size > 0:
                         # Track if we had a position before fill (to detect cycle completion)
                         had_position = strategy.state.first_fill_side is not None
+                        completed_pairs_before = len(strategy._completed_pairs)
+
                         strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
                         self._trade_count += 1
                         self._send_web_update()
                         logger.info(f"[AGGRESSIVE] Paper fill: {fill_side} {fill_size} @ ${fill_price:.4f}")
 
-                        # CYCLE RESET CANCELLATION: If cycle just completed, cancel pending orders
+                        # CYCLE COMPLETION: If cycle just completed, cancel orders and merge
                         if had_position and strategy.state.first_fill_side is None:
                             await self._cancel_pending_after_cycle_reset(market, "PAPER_FILL")
+
+                            # Auto-merge if a new cycle was recorded
+                            if len(strategy._completed_pairs) > completed_pairs_before:
+                                last_cycle = strategy._completed_pairs[-1]
+                                await self._auto_merge_after_cycle(
+                                    market=market,
+                                    pairs_to_merge=last_cycle["pairs"],
+                                    pair_cost=last_cycle["pair_cost"],
+                                    source="PAPER_FILL"
+                                )
             except Exception as e:
                 logger.warning(f"[AGGRESSIVE] Error checking fills: {e}")
 
@@ -5104,6 +5139,8 @@ class PaperTradingBot:
                     if filled_size > 0:
                         # Track if we had a position before fill (to detect cycle completion)
                         had_position = strategy.state.first_fill_side is not None
+                        completed_pairs_before = len(strategy._completed_pairs)
+
                         strategy.on_fill(side=side, price=filled_price, size=int(filled_size))
                         self._trade_count += 1
                         self._send_web_update()
@@ -5120,9 +5157,19 @@ class PaperTradingBot:
 
                         logger.info(f"[AGGRESSIVE] Filled: {side} {filled_size} @ ${filled_price:.4f}")
 
-                        # CYCLE RESET CANCELLATION: If cycle just completed, cancel pending orders
+                        # CYCLE COMPLETION: If cycle just completed, cancel orders and merge
                         if had_position and strategy.state.first_fill_side is None:
                             await self._cancel_pending_after_cycle_reset(market, "EXEC_FILL")
+
+                            # Auto-merge if a new cycle was recorded
+                            if len(strategy._completed_pairs) > completed_pairs_before:
+                                last_cycle = strategy._completed_pairs[-1]
+                                await self._auto_merge_after_cycle(
+                                    market=market,
+                                    pairs_to_merge=last_cycle["pairs"],
+                                    pair_cost=last_cycle["pair_cost"],
+                                    source="EXEC_FILL"
+                                )
 
             except Exception as e:
                 logger.error(f"[AGGRESSIVE] Order execution error: {e}")
@@ -5155,6 +5202,104 @@ class PaperTradingBot:
                 )
         except Exception as e:
             logger.warning(f"[CYCLE_CANCEL] Failed to cancel pending orders ({source}): {e}")
+
+    async def _auto_merge_after_cycle(
+        self,
+        market,
+        pairs_to_merge: int,
+        pair_cost: float,
+        source: str
+    ) -> bool:
+        """
+        Automatically merge UP+DOWN pairs after a cycle completes.
+
+        Converts matched pairs back to USDC, freeing capital for the next cycle.
+        Works for both winning (pair_cost < $1) and losing (pair_cost > $1) cycles.
+
+        Args:
+            market: The market with positions to merge
+            pairs_to_merge: Number of pairs to merge
+            pair_cost: Average cost per pair (UP + DOWN avg prices)
+            source: Where the merge was triggered from (for logging)
+
+        Returns:
+            True if merge succeeded
+        """
+        if pairs_to_merge <= 0:
+            return False
+
+        # Calculate PnL: $1.00 per pair merged, minus what we paid
+        pnl_per_pair = 1.00 - pair_cost
+        total_pnl = pnl_per_pair * pairs_to_merge
+        pnl_sign = "+" if total_pnl >= 0 else ""
+
+        logger.info(
+            f"[AUTO_MERGE] Merging {pairs_to_merge} pairs @ ${pair_cost:.4f}/pair "
+            f"-> {pnl_sign}${total_pnl:.4f} PnL ({source})"
+        )
+
+        if self.trading_mode != "live":
+            # Paper mode: just track the PnL, no on-chain merge needed
+            self._session_merged_pnl += total_pnl
+            self._session_merge_count += 1
+            self._total_pairs += pairs_to_merge
+            logger.info(
+                f"[AUTO_MERGE] 📝 Paper mode - recorded {pnl_sign}${total_pnl:.4f} "
+                f"(session total: ${self._session_merged_pnl:.4f})"
+            )
+            self._send_web_update()
+            return True
+
+        # Live mode: execute on-chain merge via Builder Relayer
+        if not market or not market.condition_id:
+            logger.warning("[AUTO_MERGE] No condition_id available, skipping merge")
+            return False
+
+        try:
+            # Import merge function from scripts
+            from scripts.merge_positions import merge_via_builder_relayer
+
+            private_key = self._config.wallet_private_key if self._config else None
+            if not private_key:
+                logger.warning("[AUTO_MERGE] No private key configured, skipping merge")
+                return False
+
+            # Execute merge
+            tx_hash = merge_via_builder_relayer(
+                condition_id=market.condition_id,
+                amount=pairs_to_merge,
+                private_key=private_key
+            )
+
+            if tx_hash:
+                self._session_merged_pnl += total_pnl
+                self._session_merge_count += 1
+                self._total_pairs += pairs_to_merge
+
+                logger.info(
+                    f"[AUTO_MERGE] ✅ Merged {pairs_to_merge} pairs! "
+                    f"PnL: {pnl_sign}${total_pnl:.4f} | TX: {tx_hash[:20]}..."
+                )
+                logger.info(f"[AUTO_MERGE] Session total: ${self._session_merged_pnl:.4f}")
+
+                # Sync position after merge to reflect new state
+                if hasattr(self._engine, 'sync_position'):
+                    await asyncio.sleep(2)  # Wait for chain to update
+                    await self._engine.sync_position(market, force=True)
+
+                self._send_web_update()
+                return True
+            else:
+                logger.warning("[AUTO_MERGE] Merge returned no tx_hash")
+                return False
+
+        except Exception as e:
+            logger.error(f"[AUTO_MERGE] Failed to merge: {e}")
+            # Still track the theoretical PnL for session stats
+            self._session_merged_pnl += total_pnl
+            self._session_merge_count += 1
+            self._total_pairs += pairs_to_merge
+            return False
 
     async def _run_contrarian_cycle(
         self,
