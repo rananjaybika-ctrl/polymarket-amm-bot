@@ -512,7 +512,7 @@ class PaperTradingBot:
         # AGGRESSIVE (Path 1) specific parameters
         zscore_lo: float = 0.0,               # Z-score lower bound for entry
         zscore_hi: float = 1.5,               # Z-score upper bound for entry
-        time_stop_seconds: float = 180.0,     # Time-stop exit (3 minutes)
+        time_stop_seconds: float = 120.0,     # Time-stop exit (2 minutes) - optimized Jan 27
         # CONTRARIAN (Path 2) specific parameters
         contrarian_pullback_threshold: float = 0.0001,  # 0.01% pullback from peak
         contrarian_retracement_min: float = 0.30,       # Must retrace 30% of move
@@ -773,23 +773,28 @@ class PaperTradingBot:
 
         # AGGRESSIVE Strategy (Path 1): Spike detection with velocity confirmation
         # Uses EnhancedSpikeStrategy with Z-score filter and time-stop
+        # TIME120s_SKIP config (Jan 27, 2026): 120s time-stop + skip entries >= $0.90
         self._aggressive_strategy: Optional["EnhancedSpikeStrategy"] = None
         if self.accum_mode == "aggressive":
             from src.strategies.enhanced_spike import EnhancedSpikeStrategy
             self._aggressive_strategy = EnhancedSpikeStrategy(
                 base_size=self.spread_base_size,
                 spike_lookback=self.spread_spike_lookback,
-                time_stop_seconds=self.time_stop_seconds,
-                stop_loss_pct=None,  # Match backtest - use 180s time-stop only, no price-based SL
+                time_stop_seconds=self.time_stop_seconds,  # 120.0 (optimized from 180.0)
+                stop_loss_pct=None,  # No price-based SL - use time-stop only
                 zscore_lo=self.zscore_lo,
                 zscore_hi=self.zscore_hi,
                 zscore_filter_enabled=True,
                 enable_cycling=self.spread_enable_cycling,
+                # TIME120s_SKIP parameters
+                skip_high_entry=True,           # Skip entries >= $0.90 (unhedgeable)
+                high_entry_threshold=0.90,      # Turkey problem cutoff
+                min_time_remaining=180.0,       # time_stop + 60s buffer (prevents resolution exits)
             )
             logger.info(
                 f"[AGGRESSIVE] Initialized: base_size={self.spread_base_size}, "
                 f"spike_lookback={self.spread_spike_lookback}, time_stop={self.time_stop_seconds}s, "
-                f"z_bounds=[{self.zscore_lo}, {self.zscore_hi}]"
+                f"z_bounds=[{self.zscore_lo}, {self.zscore_hi}], skip_high_entry=True (>=$0.90)"
             )
 
         # CONTRARIAN Strategy (Path 2): Bet against BTC direction at reversal
@@ -1176,8 +1181,8 @@ class PaperTradingBot:
             # Z-score bounds for entry filtering
             zscore_lo=config.get("z_lo", 0.0),
             zscore_hi=config.get("z_hi", 1.5),
-            # Time-stop for exit
-            time_stop_seconds=config.get("time_stop_seconds", 180.0),
+            # Time-stop for exit (optimized from 180.0 to 120.0, Jan 27)
+            time_stop_seconds=config.get("time_stop_seconds", 120.0),
             # Spike detection lookback
             spread_spike_lookback=config.get("lookback_ms", 1200) // 100,  # Convert ms to ticks
             # Max daily loss protection

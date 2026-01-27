@@ -1,6 +1,6 @@
 # Next Steps - Polymarket Strategy Development
 
-**Updated**: 2026-01-24
+**Updated**: 2026-01-27
 
 ---
 
@@ -22,14 +22,19 @@
 - **OOS4**: 24.2 hours (Jan 23-24) — VALIDATED
 - **Combined OOS3+OOS4**: ~50.6 hours multi-regime data
 
-### Active Strategies (Post-Restructure Jan 24)
+### Active Strategies (Post-Optimization Jan 27)
 
-| Strategy | Path | Status | OOS4 Performance |
-|----------|------|--------|-------------------|
-| **AGGRESSIVE** | Path 1 | PRIMARY | $16.72/hr @50sh, 72.4% dir acc, 145 trades |
-| **CONTRARIAN** | Path 2 | VALIDATED | $618/hr @2500sh ($12.36/hr @50sh equiv), 42% WR, 50 trades |
-| ~~BALANCED+EWMA~~ | - | DEPRECATED | $11.17/hr @50sh (regressed from $26.38/hr OOS3, regime-dependent) |
+| Strategy | Path | Status | Performance |
+|----------|------|--------|-------------|
+| **AGGRESSIVE** | Path 1 | **TIME120s_SKIP DEPLOYED** | ~$9.00/hr @50sh (157.4h cross-validated) |
+| **CONTRARIAN** | Path 2 | VALIDATED | $618/hr @2500sh ($12.36/hr @50sh equiv), 42% WR |
+| ~~BALANCED+EWMA~~ | - | DEPRECATED | $11.17/hr @50sh (regressed from $26.38/hr OOS3) |
 | ~~Path 2 partial hedge~~ | - | DELETED | Code and data removed Jan 24 |
+
+**TIME120s_SKIP Optimization (Jan 27, 2026):**
+- `time_stop_seconds`: 180 → **120** (+24% hourly rate)
+- `min_time_remaining`: 60 → **180** (time_stop + 60s buffer)
+- `skip_high_entry`: **true** (skip entries >= $0.90, unhedgeable)
 
 ---
 
@@ -72,13 +77,15 @@ Simpler execution than AGGRESSIVE (no hedge leg), but needs:
 
 ---
 
-## Strategy Definitions (Jan 24 Restructure)
+## Strategy Definitions (Jan 27 TIME120s_SKIP)
 
 ### Path 1: AGGRESSIVE (Spike Detection + Full Hedge)
 - OU threshold, EWMA z-score, 1200ms lookback
-- Cycling ON, 0 < z < 1.5, 180s time-stop
+- Cycling ON, 0 < z < 1.5, **120s time-stop** (optimized from 180s)
+- **min_time_remaining=180s** (time_stop + 60s buffer)
+- **skip_high_entry=true** (skip entries >= $0.90)
 - Full hedge on loser side
-- OOS4: $16.72/hr @50sh, 72.4% direction accuracy, 145 trades
+- Cross-validated: ~$9.00/hr @50sh across 157.4 hours, 456 markets
 
 ### Path 2: CONTRARIAN (Bet Against BTC Direction)
 - $0.30 entry price, 2500 shares per trade

@@ -1,6 +1,6 @@
 # MASTER PLAN: Production Trading Strategies
 
-**Status:** LIVE READY (January 26, 2026)
+**Status:** LIVE READY - TIME120s_SKIP Deployed (January 27, 2026)
 **Strategies:** AGGRESSIVE (Path 1) + CONTRARIAN (Path 2)
 
 ---
@@ -8,7 +8,7 @@
 ## Executive Summary
 
 Two independent, validated trading strategies for Polymarket BTC 15-minute binary markets:
-- **AGGRESSIVE**: Spike detection + full hedge, ~$16.72/hr @50sh
+- **AGGRESSIVE**: Spike detection + full hedge, ~$9.00/hr @50sh (TIME120s_SKIP config)
 - **CONTRARIAN**: Bet against BTC direction, ~$618/hr @2500sh
 
 Both strategies are uncorrelated (different signals, different market conditions) and can run simultaneously.
@@ -19,23 +19,25 @@ Both strategies are uncorrelated (different signals, different market conditions
 
 | Strategy | $/hr | Position Size | WR/Dir Acc | Status |
 |----------|------|---------------|------------|--------|
-| **AGGRESSIVE** | $16.72 | 50 shares | 72.4% dir | PRODUCTION READY |
+| **AGGRESSIVE** | ~$9.00 | 50 shares | ~70% dir | DEPLOYED (TIME120s_SKIP) |
 | **CONTRARIAN** | $618 | 2,500 shares | 43.4% WR | PRODUCTION READY |
 
 ---
 
 ## Strategy Quick Reference
 
-### AGGRESSIVE (Path 1)
-Spike detection + full hedge + time-stop
+### AGGRESSIVE (Path 1) - TIME120s_SKIP
+Spike detection + full hedge + time-stop + skip rule
 
 | Parameter | Value |
 |-----------|-------|
 | Threshold | OU (adaptive sigmoid) |
 | Z-Score | EWMA (no drift) |
 | Lookback | 1200ms (72 ticks) |
-| Stop | **180s TIME** |
+| Stop | **120s TIME** |
+| Min Time | 180s (time_stop + 60s) |
 | Z-Zone | 0 < z < 1.5 |
+| Skip | entries >= $0.90 |
 | Cycling | ON |
 
 **Full spec:** [strategies/AGGRESSIVE.md](strategies/AGGRESSIVE.md)

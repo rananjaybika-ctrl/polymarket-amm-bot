@@ -143,6 +143,7 @@ DEFAULT_TARGET_SHARES = 50       # Updated from optimizer: 50 > 30 > 15
 DEFAULT_MIN_PROFIT = 0.005
 DEFAULT_MAX_SHARE_PRICE = 0.95
 DEFAULT_ENABLE_CYCLING = True
+DEFAULT_HIGH_ENTRY_THRESHOLD = 0.90  # Skip entries >= this (unhedgeable)
 
 # Zone filtering (LEGACY - spike threshold is the new filter)
 DEFAULT_MIN_VELOCITY_BPS = 0.50
@@ -351,6 +352,11 @@ class EnhancedSpikeStrategy:
         zscore_filter_enabled: bool = True,
         zscore_lo: float = DEFAULT_ZSCORE_LO,
         zscore_hi: float = DEFAULT_ZSCORE_HI,
+        # TIME120s_SKIP parameters (Jan 27, 2026 optimization)
+        # Skip entries >= $0.90 (unhedgeable due to Polymarket $1 minimum)
+        skip_high_entry: bool = False,
+        high_entry_threshold: float = DEFAULT_HIGH_ENTRY_THRESHOLD,
+        min_time_remaining: float = 60.0,  # Configurable (was hardcoded MIN_TIME_REMAINING)
         # LEGACY parameters (aliases for backward compatibility)
         entry_size: Optional[int] = None,
         entry_offset: float = DEFAULT_ENTRY_OFFSET,
@@ -393,6 +399,11 @@ class EnhancedSpikeStrategy:
         self.stop_loss_pct = stop_loss_pct
         self.time_stop_seconds = time_stop_seconds
 
+        # TIME120s_SKIP parameters
+        self.skip_high_entry = skip_high_entry
+        self.high_entry_threshold = high_entry_threshold
+        self.min_time_remaining = min_time_remaining
+
         # LEGACY attributes
         self.entry_offset = entry_offset
         self.hedge_offset = hedge_offset
@@ -409,10 +420,13 @@ class EnhancedSpikeStrategy:
         elif zscore_filter_enabled:
             zscore_info = f", zscore_filter=ENABLED (no tracker yet)"
 
+        stop_info = f"{stop_loss_pct:.0%}" if stop_loss_pct else "None"
+        skip_info = f", skip_high_entry={skip_high_entry} (>=${high_entry_threshold:.2f})" if skip_high_entry else ""
         logger.info(
             f"[ENHSPIKE] Initialized: base_size={base_size}, lookback={spike_lookback}, "
             f"threshold={spike_threshold:.2f}%, target_pair=${target_pair_cost:.2f}, "
-            f"stop_loss={stop_loss_pct:.0%}, cycling={enable_cycling}{zscore_info}"
+            f"stop_loss={stop_info}, time_stop={time_stop_seconds}s, min_time={min_time_remaining}s, "
+            f"cycling={enable_cycling}{zscore_info}{skip_info}"
         )
 
     # =========================================================================
@@ -1009,8 +1023,8 @@ class EnhancedSpikeStrategy:
         s = self.state
 
         # Don't place new orders if market ending soon
-        if time_remaining < MIN_TIME_REMAINING:
-            logger.debug(f"[ENHSPIKE] Skipping: {time_remaining:.0f}s remaining")
+        if time_remaining < self.min_time_remaining:
+            logger.debug(f"[ENHSPIKE] Skipping: {time_remaining:.0f}s remaining < {self.min_time_remaining:.0f}s min")
             return []
 
         # SPIKE DETECTION MODE (preferred when binance_price provided)
@@ -1175,6 +1189,15 @@ class EnhancedSpikeStrategy:
             else:
                 winner_ask = down_ask
                 winner_bid = down_bid
+
+            # SKIP HIGH-ENTRY: Block entries >= $0.90 (cannot hedge - Polymarket $1 min)
+            # Only blocks NEW entries (PHASE 1), never hedging (PHASE 2)
+            if self.skip_high_entry and winner_ask >= self.high_entry_threshold:
+                logger.debug(
+                    f"[ENHSPIKE] SKIP: {winner_side} ask=${winner_ask:.3f} >= "
+                    f"${self.high_entry_threshold:.2f} (unhedgeable)"
+                )
+                return []
 
             # Use aggressive entry (at or near ask) when spike detected
             if spike_direction is not None:
@@ -1484,7 +1507,7 @@ class EnhancedSpikeStrategy:
         if s.phase == EnhancedSpikePhase.EMERGENCY_DEFERRED:
             s.phase = EnhancedSpikePhase.IDLE
 
-        if time_remaining < MIN_TIME_REMAINING:
+        if time_remaining < self.min_time_remaining:
             return None
 
         if s.phase == EnhancedSpikePhase.IDLE:

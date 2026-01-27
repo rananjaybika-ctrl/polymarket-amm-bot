@@ -1,12 +1,12 @@
 """
-Master Trading Configurations - VALIDATED Jan 22, 2026
+Master Trading Configurations - UPDATED Jan 27, 2026
 
-These configs are validated against 81.71 hours of data across 254 markets.
+These configs are validated against 157.4 hours of data across 456 markets.
 Stop-out effects ARE factored into PnL calculations.
 
 IMPORTANT: Time-based stops work DIFFERENTLY than price-based stops:
-- AGGRESSIVE: 180s time-stop is BETTER (+33% PnL)
-- BALANCED/CONSERVATIVE: 15% price-stop is BETTER
+- AGGRESSIVE: 120s time-stop + skip rule (TIME120s_SKIP config)
+- BALANCED/CONSERVATIVE: 15% price-stop is BETTER (DEPRECATED)
 
 Usage:
     from research.TRADING_CONFIGS import AGGRESSIVE, BALANCED, CONSERVATIVE
@@ -45,6 +45,11 @@ class TradingConfig:
     z_lo: Optional[float]  # None = no lower bound
     z_hi: Optional[float]  # None = no upper bound
 
+    # TIME120s_SKIP parameters (Jan 27, 2026)
+    skip_high_entry: bool = False  # Skip entries >= high_entry_threshold
+    high_entry_threshold: float = 0.90  # Turkey problem cutoff
+    min_time_remaining: float = 60.0  # Minimum seconds before market end
+
     # Expected performance (at 5 shares, scale x10 for 50 shares)
     expected_pnl: float
     expected_hourly_rate: float
@@ -69,8 +74,8 @@ class TradingConfig:
 # VALIDATED CONFIGURATIONS (Jan 24, 2026)
 # =============================================================================
 
-# OOS4 VALIDATED (Jan 24, 2026): $16.72/hr @50sh, 72.4% dir acc, 145 trades
-# Consistent across IS ($7.76/hr), OOS3 ($17.59/hr), OOS4 ($16.72/hr)
+# TIME120s_SKIP VALIDATED (Jan 27, 2026): ~$9.00/hr avg across 157.4h cross-validation
+# +24% hourly rate vs TIME180s, skip rule eliminates turkey problem losses
 AGGRESSIVE = TradingConfig(
     name="AGGRESSIVE",
 
@@ -80,10 +85,10 @@ AGGRESSIVE = TradingConfig(
     lookback_ticks=72,
     lookback_ms=1200,
 
-    # STOP SETTINGS - USE 180s TIME-STOP (NOT price-stop!)
-    # Time-stop gives +33% PnL improvement over 15% price-stop
+    # STOP SETTINGS - USE 120s TIME-STOP (optimized from 180s)
+    # TIME120s runs 28% more cycles than TIME300s
     stop_loss_pct=None,         # NO price-based stop
-    time_stop_seconds=180.0,    # Exit after 180s if not filled AND not in profit
+    time_stop_seconds=120.0,    # Exit after 120s if not filled AND not in profit
 
     # Cycling ON for more trades
     use_cycling=True,
@@ -92,13 +97,18 @@ AGGRESSIVE = TradingConfig(
     z_lo=0.0,
     z_hi=1.5,
 
-    # Expected performance (at 5 shares)
-    expected_pnl=40.35,          # OOS4: $16.72/hr * 24.2h / 10 scale for 5sh
-    expected_hourly_rate=1.672,  # at 5 shares, OOS4
-    expected_win_rate=72.4,
-    expected_trades=145,         # OOS4
-    premature_stop_pct=27.6,     # time-stop exits
-    premature_pnl_lost=-3.50,
+    # TIME120s_SKIP parameters
+    skip_high_entry=True,        # Skip entries >= $0.90 (unhedgeable)
+    high_entry_threshold=0.90,   # Turkey problem cutoff
+    min_time_remaining=180.0,    # time_stop + 60s buffer (prevents resolution exits)
+
+    # Expected performance (at 50 shares, TIME120s_SKIP cross-validation)
+    expected_pnl=90.00,          # ~$9.00/hr * 10h example
+    expected_hourly_rate=9.00,   # at 50 shares, cross-validated
+    expected_win_rate=70.0,
+    expected_trades=150,         # estimate
+    premature_stop_pct=25.0,     # time-stop exits
+    premature_pnl_lost=-2.50,
 )
 
 
