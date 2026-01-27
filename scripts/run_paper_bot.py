@@ -786,15 +786,16 @@ class PaperTradingBot:
                 zscore_hi=self.zscore_hi,
                 zscore_filter_enabled=True,
                 enable_cycling=self.spread_enable_cycling,
-                # TIME120s_SKIP parameters
-                skip_high_entry=True,           # Skip entries >= $0.90 (unhedgeable)
-                high_entry_threshold=0.90,      # Turkey problem cutoff
+                # TIME120s_SKIP parameters - TESTING CONFIG (10sh, skip >= $0.80)
+                # Production: base_size=50, high_entry_threshold=0.90
+                skip_high_entry=True,           # Skip entries >= $0.80 (unhedgeable at 10sh)
+                high_entry_threshold=0.80,      # Testing threshold (min hedge = $0.10 at 10sh)
                 min_time_remaining=180.0,       # time_stop + 60s buffer (prevents resolution exits)
             )
             logger.info(
                 f"[AGGRESSIVE] Initialized: base_size={self.spread_base_size}, "
                 f"spike_lookback={self.spread_spike_lookback}, time_stop={self.time_stop_seconds}s, "
-                f"z_bounds=[{self.zscore_lo}, {self.zscore_hi}], skip_high_entry=True (>=$0.90)"
+                f"z_bounds=[{self.zscore_lo}, {self.zscore_hi}], skip_high_entry=True (>=$0.80) [TESTING]"
             )
 
         # CONTRARIAN Strategy (Path 2): Bet against BTC direction at reversal
@@ -1175,8 +1176,9 @@ class PaperTradingBot:
             initial_balance=config.get("starting_balance", 500.0),
             # Set accum_mode to aggressive (uses EnhancedSpikeStrategy)
             accum_mode="aggressive",
-            # AGGRESSIVE specific parameters
-            spread_base_size=config.get("base_size", 50),
+            # AGGRESSIVE specific parameters - TESTING CONFIG
+            # Production: base_size=50, Testing: base_size=10
+            spread_base_size=config.get("base_size", 10),  # TESTING: 10 shares
             spread_enable_cycling=config.get("use_cycling", True),
             # Z-score bounds for entry filtering
             zscore_lo=config.get("z_lo", 0.0),
