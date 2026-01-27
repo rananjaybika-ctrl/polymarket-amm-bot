@@ -1,127 +1,96 @@
-# Next Steps - Polymarket Strategy Development
+# What's Next - Polymarket AGGRESSIVE Strategy
 
-**Updated**: 2026-01-27
+**Updated**: 2026-01-27 (Post Testing Config Deploy)
 
 ---
 
-## Current State
+## Current Status
 
-### Active on AWS (54.170.244.221)
+### DEPLOYED: Testing Configuration (10 shares)
 
-| Process | Duration | Ends |
-|---------|----------|------|
-| `run_data_collection.py --hours 46` | Jan 23 08:16 UTC - Jan 25 06:16 UTC | **Jan 25 12:00 PM IST** |
+| Parameter | Production | Testing (LIVE) |
+|-----------|------------|----------------|
+| `base_size` | 50 | **10** |
+| `high_entry_threshold` | 0.90 | **0.80** |
+| `time_stop_seconds` | 120 | 120 |
+| `min_time_remaining` | 180 | 180 |
+
+**Dashboard:** http://54.170.244.221:8000
 
 **SSH:** `ssh -i ~/Downloads/polymarket-key.pem ubuntu@54.170.244.221`
 
-**DO NOT INTERRUPT** — AWS data collection ends Jan 25. Let it finish.
+### Expected Performance (Testing @ 10sh)
 
-### Data Available
-- **Training+OOS2**: 81.71 hours (Jan 16-19), 254 markets, 7.7M BTC rows
-- **OOS3**: 26.37 hours (Jan 22-23), 90 markets — VALIDATED
-- **OOS4**: 24.2 hours (Jan 23-24) — VALIDATED
-- **Combined OOS3+OOS4**: ~50.6 hours multi-regime data
-
-### Active Strategies (Post-Optimization Jan 27)
-
-| Strategy | Path | Status | Performance |
-|----------|------|--------|-------------|
-| **AGGRESSIVE** | Path 1 | **TIME120s_SKIP DEPLOYED** | ~$9.00/hr @50sh (157.4h cross-validated) |
-| **CONTRARIAN** | Path 2 | VALIDATED | $618/hr @2500sh ($12.36/hr @50sh equiv), 42% WR |
-| ~~BALANCED+EWMA~~ | - | DEPRECATED | $11.17/hr @50sh (regressed from $26.38/hr OOS3) |
-| ~~Path 2 partial hedge~~ | - | DELETED | Code and data removed Jan 24 |
-
-**TIME120s_SKIP Optimization (Jan 27, 2026):**
-- `time_stop_seconds`: 180 → **120** (+24% hourly rate)
-- `min_time_remaining`: 60 → **180** (time_stop + 60s buffer)
-- `skip_high_entry`: **true** (skip entries >= $0.90, unhedgeable)
+| Metric | Backtest |
+|--------|----------|
+| $/hr | ~$2.32 |
+| Unhedgeable trades | 0 |
+| Min hedge price | $0.10 |
 
 ---
 
-## Jan 25 Priorities (After AWS Data Collection Ends)
+## Immediate Next Steps
 
-### Priority 1: Combined OOS3+OOS4 Final Validation
-
-~50.6 hours of multi-regime data. Tighter confidence intervals.
-
+### 1. Start Live Testing
 ```bash
-# Already combined in:
-# research/observer/grid_obs_oos3_oos4_combined.csv
-# research/observer/btc_prices_oos3_oos4_combined.csv
-
-python research/validate_oos4_all_paths.py  # Update data paths to combined
+# On AWS - restart bot with new config
+ssh -i ~/Downloads/polymarket-key.pem ubuntu@54.170.244.221 'sudo systemctl restart polymarket-bot'
 ```
 
-**Expected**: ~290 AGGRESSIVE trades, ~100 CONTRARIAN trades.
+### 2. Monitor First Few Trades
+- Check fills are executing correctly
+- Verify hedge orders are placing
+- Watch for any skip messages at >= $0.80
 
-### Priority 2: Go-Live Preparation (AGGRESSIVE)
-
-Direction accuracy (72.4%) consistent across 3 OOS periods. Profitable in all.
-
-**Remaining concerns:**
-1. Execution latency (passive fill assumption — verify on real orderbook)
-2. Position sizing (start with $100-200 bankroll, 5-10 shares per trade)
-3. Order placement timing (1200ms lookback = need sub-second reaction)
-
-**Steps:**
-1. Set up paper trading with real orderbook data
-2. Measure actual fill rates vs backtest assumptions
-3. Start with minimum size (5 shares) to validate execution
-
-### Priority 3: CONTRARIAN Execution Design
-
-Simpler execution than AGGRESSIVE (no hedge leg), but needs:
-1. Entry price verification ($0.30 actually fillable?)
-2. Latency budget (60s+ delay means less time pressure)
-3. Position sizing ($0.30 × 2500 = $750 per trade, need bankroll plan)
+### 3. After Validation (1-2 hours of clean trades)
+- [ ] Revert to production config (50sh, skip >= $0.90)
+- [ ] Scale up gradually
 
 ---
 
-## Strategy Definitions (Jan 27 TIME120s_SKIP)
+## Production Config (After Testing Validation)
 
-### Path 1: AGGRESSIVE (Spike Detection + Full Hedge)
+```python
+# scripts/run_paper_bot.py - revert these lines:
+spread_base_size=config.get("base_size", 50),  # Change 10 -> 50
+high_entry_threshold=0.90,                      # Change 0.80 -> 0.90
+```
+
+---
+
+## Reference Documents
+
+| Document | Purpose |
+|----------|---------|
+| `research/STRATEGY_OPTIMIZATION_PLAN.md` | Full optimization analysis (TIME120s_SKIP) |
+| `research/strategies/AGGRESSIVE.md` | Strategy specification |
+| `research/TRADING_CONFIGS.py` | Python config definitions |
+| `research/MASTER_PLAN.md` | Overview of both strategies |
+
+---
+
+## Strategy Summary
+
+**AGGRESSIVE (Path 1)** - Spike detection + full hedge
 - OU threshold, EWMA z-score, 1200ms lookback
-- Cycling ON, 0 < z < 1.5, **120s time-stop** (optimized from 180s)
-- **min_time_remaining=180s** (time_stop + 60s buffer)
-- **skip_high_entry=true** (skip entries >= $0.90)
-- Full hedge on loser side
-- Cross-validated: ~$9.00/hr @50sh across 157.4 hours, 456 markets
+- 120s time-stop, min_time=180s
+- Skip entries >= threshold (testing: $0.80, production: $0.90)
+- ~$9.00/hr @50sh cross-validated (157.4h, 456 markets)
 
-### Path 2: CONTRARIAN (Bet Against BTC Direction)
-- $0.30 entry price, 2500 shares per trade
-- Adaptive EWMA vol gate (k=0.5, halflife=50)
-- Z-score >= 0.5, delay >= 60s
-- Hold to resolution (no stops)
-- OOS4: $618/hr @2500sh, 42% WR (breakeven = 30%)
+**CONTRARIAN (Path 2)** - Mean reversion (NOT YET DEPLOYED)
+- $0.30 entry, hold to resolution
+- $618/hr @2500sh, 42% WR
+- Requires larger bankroll ($750/trade)
 
 ---
 
-## Performance Summary (All Periods)
+## Outstanding Items
 
-| Period | Hours | AGGRESSIVE $/hr @50sh | AGGRESSIVE Dir% | CONTRARIAN $/hr |
-|--------|-------|----------------------|-----------------|-----------------|
-| IS (Jan 16-19) | 81.7 | $7.76 | 68.9% | N/A |
-| OOS3 (Jan 22-23) | 26.4 | $17.59 | 70.2% | N/A |
-| OOS4 (Jan 23-24) | 24.2 | $16.72 | 72.4% | $618/hr @2500sh |
-
----
-
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `research/validate_oos4_all_paths.py` | OOS4 validation (AGGRESSIVE + CONTRARIAN) |
-| `research/volatility_filter_analysis.py` | Core backtest with z-score filtering |
-| `research/MASTER_PLAN_TWO_PATHS.md` | Strategy definitions (Path 1 + Path 2) |
-| `research/TRADING_CONFIGS.py` | Config definitions (Python) |
-| `research/CONTRARIAN_STRATEGY.md` | Contrarian strategy research |
-| `research/HANDOVER_JAN24_RESTRUCTURE.md` | Jan 24 restructure handover |
+- [ ] Validate testing config live (10sh, skip >= $0.80)
+- [ ] Scale to production config (50sh, skip >= $0.90)
+- [ ] Implement hybrid maker/taker entry (saves ~$1/trade)
+- [ ] Deploy CONTRARIAN strategy
 
 ---
 
-## Decision Points
-
-1. **AGGRESSIVE go-live**: After combined OOS3+OOS4 confirms edge, start paper trading
-2. **CONTRARIAN sizing**: At 2500sh, need $750/trade. Start smaller (500sh = $150/trade)?
-3. **Concurrent strategies**: Can run both simultaneously (different markets, different signals)
-4. **AWS data**: Use remaining collection for OOS5 validation if needed
+*Testing config deployed: Jan 27, 2026*
