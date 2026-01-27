@@ -755,6 +755,50 @@ config = BacktestConfig(
 - **Markets:** 254 valid markets with resolutions
 
 ### Next Steps
-1. ⏳ Wait for OOS3 data from AWS (collecting until 1PM IST Jan 23)
-2. 🔄 Consider running #11-30 configs for additional SL-Correct% analysis
-3. ✅ Validate chosen approach on OOS3 before live trading
+1. ~~Wait for OOS3 data from AWS~~ **DONE - Jan 23**
+2. Consider running #11-30 configs for additional SL-Correct% analysis
+3. ~~Validate chosen approach on OOS3 before live trading~~ **DONE - See below**
+
+---
+
+## OOS3 VALIDATION UPDATE (January 23, 2026)
+
+### OOS3 Dataset: 26.37 hours, 90 markets (Jan 22-23, NOT used in grid search)
+
+### Key Grid Search Finding OVERTURNED by OOS3
+
+**In-sample conclusion:** "OU threshold beats EWMA" and "OU z-score is competitive"
+
+**OOS3 reality:** OU z-score parameters DRIFTED with BTC price level shift. EWMA adapted automatically.
+
+| Z-Score Method | In-Sample Avg $/hr | OOS3 Performance | Verdict |
+|----------------|--------------------|--------------------|---------|
+| **EWMA** | $0.317 | $17.59/hr (AGGRESSIVE), $26.38/hr (BALANCED+EWMA) | **EWMA ADAPTS** |
+| OU | $0.307 | $2.34/hr @50sh (BALANCED+OU) | **DRIFTED - UNRELIABLE** |
+
+### Grid Search Top Config Re-Tested on OOS3 (After Cycling Bug Fix)
+
+| Rank | Config | IS $/hr | OOS3 $/hr | Delta |
+|------|--------|---------|-----------|-------|
+| 1 | ou/ewma/1200ms/time-stop/cycling/0<z<1.5 | **$7.76** | **$17.59** (AGGRESSIVE) | **+127%** |
+| NEW | ou/ewma/1400ms/15%/ON/-0.5<z<1.5 | $3.06 | $26.38 (BALANCED+EWMA) | SUSPECT |
+| 10 | ou/ou/1400ms/15%/ON/-0.5<z<1.5 | $6.07 | $2.34 (BALANCED w/ OU) | -61% |
+| 9 | ou/ou/1400ms/15%/OFF/0<z<1.5 | - | $2.49 (CONSERVATIVE) | RETIRED |
+
+**NOTE:** BALANCED+EWMA was previously reported as "BEST" at $26.76/hr with 219 trades.
+After fixing cycling bugs (exit_ts=None allowing concurrent positions), corrected to 202
+trades, $26.38/hr. More critically, in-sample performance is only $3.06/hr with 49% WR —
+the 8.6x OOS3 improvement suggests regime-specific conditions, not a robust edge.
+
+### Implications for Grid Search Methodology
+1. **Static OU params are fragile** - grid search on 81.71hr overfit to that price regime
+2. **EWMA z-score is production-essential** - adapts to regime shifts automatically
+3. **AGGRESSIVE (time-stop) is the most consistent** - good on both IS and OOS3
+4. **BALANCED+EWMA needs more OOS data** — dominant on OOS3 but weak on IS
+5. **Cycling ON remains beneficial** but cycling bugs inflated earlier trade counts
+
+### Updated Recommendation
+- **PRIMARY: AGGRESSIVE** (consistent IS/OOS3, 68-70% WR, time-stop)
+- **INVESTIGATE: BALANCED+EWMA** (OOS3 dominant but IS-weak, run side-by-side)
+- **Use EWMA z-scores in production** (not OU)
+- **OU threshold method still valid** (spike detection, not regime filtering)

@@ -1,0 +1,71 @@
+================================================================================
+VELOCITY OPTIONS BACKTEST - WITH ZONE GRID SEARCH
+================================================================================
+
+[OU] Loaded: μ=-3.9845, σ_stat=0.3877
+
+================================================================================
+PERIOD: IS+OOS2 (Jan 16-19)
+================================================================================
+Loading data...
+  Binance: 7,694,694 rows (btc_prices_combined.csv)
+  Binance TOTAL: 7,694,694 rows
+  Detecting spikes (OU method)...
+    Found 197,581 spikes in 7,694,694 ticks
+  Observer: 1,285,995 rows
+  Overlap: 81.71 hours
+  Valid markets: 246
+  Spike events: 197,581
+
+Backtest: 81.71 hours
+
+Running backtests...
+--------------------------------------------------------------------------------
+  BASELINE        | Zone=ALL   | Trades=2273 | $/hr=$   7.15 | Acc=57.2%
+  CONSERVATIVE    | Zone=ALL   | Trades=2030 | $/hr=$   4.61 | Acc=57.0%
+  DYNAMIC         | Zone=ALL   | Trades=2059 | $/hr=$   4.43 | Acc=56.9%
+  EWMA+DYNAMIC    | Zone=ALL   | Trades=2011 | $/hr=$   4.49 | Acc=57.4%
+  BASELINE        | Zone=Z2_6  | Trades=2164 | $/hr=$   5.99 | Acc=57.3%
+  CONSERVATIVE    | Zone=Z2_6  | Trades=2030 | $/hr=$   4.61 | Acc=57.0%
+  DYNAMIC         | Zone=Z2_6  | Trades=2059 | $/hr=$   4.43 | Acc=56.9%
+  EWMA+DYNAMIC    | Zone=Z2_6  | Trades=1991 | $/hr=$   3.67 | Acc=57.2%
+  BASELINE        | Zone=Z3_6  | Trades=2030 | $/hr=$   4.61 | Acc=57.0%
+  CONSERVATIVE    | Zone=Z3_6  | Trades=2030 | $/hr=$   4.61 | Acc=57.0%
+  DYNAMIC         | Zone=Z3_6  | Trades=2025 | $/hr=$   4.36 | Acc=56.9%
+  EWMA+DYNAMIC    | Zone=Z3_6  | Trades=1938 | $/hr=$   1.56 | Acc=57.0%
+  BASELINE        | Zone=Z4_6  | Trades=1110 | $/hr=$   2.32 | Acc=57.4%
+  CONSERVATIVE    | Zone=Z4_6  | Trades=1110 | $/hr=$   2.32 | Acc=57.4%
+  DYNAMIC         | Zone=Z4_6  | Trades=1110 | $/hr=$   2.32 | Acc=57.4%
+  EWMA+DYNAMIC    | Zone=Z4_6  | Trades=1100 | $/hr=$   2.87 | Acc=57.6%
+  BASELINE        | Zone=Z5_6  | Trades= 584 | $/hr=$   1.93 | Acc=57.4%
+  CONSERVATIVE    | Zone=Z5_6  | Trades= 584 | $/hr=$   1.93 | Acc=57.4%
+  DYNAMIC         | Zone=Z5_6  | Trades= 584 | $/hr=$   1.93 | Acc=57.4%
+  EWMA+DYNAMIC    | Zone=Z5_6  | Trades= 582 | $/hr=$   1.74 | Acc=57.6%
+
+Method            Zone  Trades       $/hr     Acc%   Trd/hr
+--------------------------------------------------------------
+BASELINE           ALL    2273 $    7.15   57.2%    27.8
+BASELINE          Z2_6    2164 $    5.99   57.3%    26.5
+CONSERVATIVE       ALL    2030 $    4.61   57.0%    24.8
+CONSERVATIVE      Z2_6    2030 $    4.61   57.0%    24.8
+BASELINE          Z3_6    2030 $    4.61   57.0%    24.8
+CONSERVATIVE      Z3_6    2030 $    4.61   57.0%    24.8
+EWMA+DYNAMIC       ALL    2011 $    4.49   57.4%    24.6
+DYNAMIC            ALL    2059 $    4.43   56.9%    25.2
+DYNAMIC           Z2_6    2059 $    4.43   56.9%    25.2
+DYNAMIC           Z3_6    2025 $    4.36   56.9%    24.8
+EWMA+DYNAMIC      Z2_6    1991 $    3.67   57.2%    24.4
+EWMA+DYNAMIC      Z4_6    1100 $    2.87   57.6%    13.5
+BASELINE          Z4_6    1110 $    2.32   57.4%    13.6
+CONSERVATIVE      Z4_6    1110 $    2.32   57.4%    13.6
+DYNAMIC           Z4_6    1110 $    2.32   57.4%    13.6
+
+================================================================================
+RECOMMENDATION
+================================================================================
+
+Best option: BASELINE @ ALL
+  $/hr:      $7.15
+  vs BASELINE@ALL: +0.00 $/hr
+  Accuracy:  57.2%
+  Trades:    2273 (27.8/hr)

@@ -193,8 +193,21 @@ STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+# =============================================================================
+# LEGACY CONFIG CLASSES - Deprecated, use AggressiveBotConfig/ContrarianBotConfig
+# Kept for backward compatibility with existing web UI integrations
+# =============================================================================
+
+
 class AccumulationBotConfig(BaseModel):
-    """Configuration for Accumulation strategy from web UI."""
+    """
+    DEPRECATED: Configuration for Accumulation strategy from web UI.
+
+    This config class is deprecated. Use AggressiveBotConfig for Path 1 (spike detection)
+    or ContrarianBotConfig for Path 2 (reversal detection) instead.
+
+    Kept for backward compatibility only.
+    """
     mode: str  # "paper" or "live"
     market: str  # "btc-15m"
     start_datetime: str  # ISO format (local time from browser)
@@ -280,9 +293,17 @@ class VolumeWeightedBotConfig(BaseModel):
     max_daily_loss: float = 0.0           # Stop trading if loss exceeds (0=disabled)
 
 
-# Legacy config for backward compatibility
+# Legacy config for backward compatibility - DEPRECATED
 class BotConfig(BaseModel):
-    """Configuration from web UI (legacy - use AccumulationBotConfig)."""
+    """
+    DEPRECATED: Legacy configuration from web UI.
+
+    This config class is deprecated. Use AggressiveBotConfig for Path 1 (spike detection)
+    or ContrarianBotConfig for Path 2 (reversal detection) instead.
+
+    The /api/start and /api/validate endpoints using this config are deprecated.
+    Use /api/start/aggressive or /api/start/contrarian instead.
+    """
     mode: str
     market: str
     trading_mode: str = "accumulation"
@@ -551,6 +572,92 @@ async def get_strategy_health(strategy_name: str):
     }
 
 
+# Track server start time for uptime calculation
+_server_start_time: Optional[datetime] = None
+
+
+@app.on_event("startup")
+async def set_start_time():
+    """Record server start time for uptime calculation."""
+    global _server_start_time
+    _server_start_time = datetime.now(timezone.utc)
+
+
+@app.get("/api/metrics")
+async def get_metrics():
+    """
+    Get comprehensive metrics for monitoring.
+
+    Returns:
+        JSON with strategy metrics, uptime, and error counts.
+    """
+    # Calculate uptime
+    uptime_seconds = 0.0
+    if _server_start_time:
+        uptime_seconds = (datetime.now(timezone.utc) - _server_start_time).total_seconds()
+
+    # Collect strategy metrics
+    strategy_metrics = {}
+    errors_last_hour = 0
+
+    for name, strategy_state in strategies.items():
+        metrics = {
+            "running": strategy_state.status.get("running", False),
+            "balance": strategy_state.status.get("balance"),
+            "start_time": strategy_state.status.get("start_time"),
+            "error": strategy_state.status.get("error"),
+        }
+
+        # Get additional metrics from strategy instance if available
+        if strategy_state.instance:
+            instance = strategy_state.instance
+            if hasattr(instance, 'get_metrics'):
+                try:
+                    metrics.update(instance.get_metrics())
+                except Exception:
+                    pass
+            # Try to get strategy-specific stats
+            if hasattr(instance, '_trade_count'):
+                metrics["trade_count"] = instance._trade_count
+            if hasattr(instance, '_total_pairs'):
+                metrics["total_pairs"] = instance._total_pairs
+            if hasattr(instance, 'cumulative_pnl'):
+                metrics["cumulative_pnl"] = instance.cumulative_pnl
+
+        # Count errors from health monitor
+        if health_monitor:
+            health = health_monitor.get_health(name)
+            if health:
+                metrics["health_status"] = health.status.value
+                metrics["health_trade_count"] = health.trade_count
+                metrics["health_error_count"] = health.error_count
+                errors_last_hour += health.error_count
+
+        strategy_metrics[name] = metrics
+
+    # Build response
+    return {
+        "uptime_seconds": round(uptime_seconds, 1),
+        "uptime_formatted": _format_uptime(uptime_seconds),
+        "errors_last_hour": errors_last_hour,
+        "strategies": strategy_metrics,
+        "kill_switch_active": is_kill_switch_active(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _format_uptime(seconds: float) -> str:
+    """Format uptime as human-readable string."""
+    hours, remainder = divmod(int(seconds), 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m {secs}s"
+    elif minutes > 0:
+        return f"{minutes}m {secs}s"
+    else:
+        return f"{secs}s"
+
+
 @app.get("/")
 async def root(username: str = Depends(verify_credentials)):
     """Serve the main HTML page. Requires authentication."""
@@ -596,7 +703,14 @@ async def clear_kill_switch_endpoint(username: str = Depends(verify_credentials)
 
 @app.post("/api/validate")
 async def validate_config(config: BotConfig):
-    """Validate configuration without starting the bot."""
+    """
+    DEPRECATED: Validate legacy configuration without starting the bot.
+
+    Use the new strategy-specific endpoints instead:
+    - POST /api/start/aggressive (Path 1 - spike detection)
+    - POST /api/start/contrarian (Path 2 - reversal detection)
+    """
+    logger.warning("[DEPRECATED] /api/validate endpoint is deprecated")
     errors = []
 
     # Validate datetime format
@@ -676,8 +790,18 @@ async def validate_config(config: BotConfig):
 
 @app.post("/api/start")
 async def start_bot(config: BotConfig, username: str = Depends(verify_credentials)):
-    """Start the trading bot with given configuration. Requires authentication."""
+    """
+    DEPRECATED: Start the legacy trading bot with given configuration.
+
+    Use the new strategy-specific endpoints instead:
+    - POST /api/start/aggressive (Path 1 - spike detection)
+    - POST /api/start/contrarian (Path 2 - reversal detection)
+    - POST /api/start/volume_weighted (Gabagool-style grid maker)
+
+    Requires authentication.
+    """
     global bot_task, bot_status
+    logger.warning("[DEPRECATED] /api/start endpoint is deprecated - use /api/start/aggressive or /api/start/contrarian")
 
     # Don't start if already running
     if bot_status["running"]:

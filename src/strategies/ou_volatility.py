@@ -57,7 +57,7 @@ DEFAULT_BASE_THRESHOLD = 0.02        # Current production value (0.02%)
 DEFAULT_K_LOW = 0.5                  # 50% of base in calm markets
 DEFAULT_K_HIGH = 1.75                # 175% of base in volatile markets
 DEFAULT_SIGMOID_STEEPNESS = 1.5      # Gradual transition
-DEFAULT_MIN_THRESHOLD = 0.005        # Floor for extremely calm markets
+DEFAULT_MIN_THRESHOLD = 0.015        # Floor - raised from 0.005 to filter noise (backtested Jan 20)
 DEFAULT_MAX_THRESHOLD = 0.10         # Ceiling for extreme volatility
 
 # MLE estimation constraints
@@ -206,7 +206,7 @@ class OUParameterEstimator:
 
         return np.array(volatilities)
 
-    def fit(self, log_volatilities: np.ndarray, dt_seconds: float = 1/60) -> OUParameters:
+    def fit(self, log_volatilities: np.ndarray, dt_seconds: float = 1/60, use_empirical_sigma: bool = True) -> OUParameters:
         """
         Fit OU parameters from pre-computed log-volatilities using MLE.
 
@@ -249,8 +249,16 @@ class OUParameterEstimator:
         xi_squared = var_x * 2 * theta / (1 - rho ** 2)
         xi = math.sqrt(max(xi_squared, 1e-12))
 
-        # Stationary standard deviation: σ_stat = sqrt(ξ² / 2θ)
-        sigma_stat = math.sqrt(xi_squared / (2 * theta))
+        # Stationary standard deviation
+        if use_empirical_sigma:
+            # Use empirical std directly - more robust when autocorrelation is high
+            sigma_stat = math.sqrt(var_x)
+            logger.info(f"[OU] Using empirical σ_stat: {sigma_stat:.4f}")
+        else:
+            # OU-derived: σ_stat = sqrt(ξ² / 2θ) = sqrt(Var(X) / (1 - ρ²))
+            # This can be inflated when ρ is close to 1
+            sigma_stat = math.sqrt(xi_squared / (2 * theta))
+            logger.info(f"[OU] Using OU-derived σ_stat: {sigma_stat:.4f}")
 
         # Half-life: t_{1/2} = ln(2) / θ
         half_life_sec = math.log(2) / theta
@@ -279,6 +287,7 @@ class OUParameterEstimator:
         returns_pct: List[float],
         dt_seconds: float = 1/60,
         ewma_window: int = 60,
+        use_empirical_sigma: bool = True,
     ) -> OUParameters:
         """
         Fit OU parameters from price returns.
@@ -290,6 +299,7 @@ class OUParameterEstimator:
             returns_pct: List of percentage returns
             dt_seconds: Time step between observations (1/60 for 60Hz)
             ewma_window: Window for rolling volatility EWMA
+            use_empirical_sigma: Use empirical std of log-vol instead of OU-derived (more robust)
 
         Returns:
             Fitted OUParameters
@@ -316,13 +326,14 @@ class OUParameterEstimator:
         # Skip warm-up period
         log_vol = log_vol[ewma_window:]
 
-        return self.fit(log_vol, dt_seconds=dt_seconds)
+        return self.fit(log_vol, dt_seconds=dt_seconds, use_empirical_sigma=use_empirical_sigma)
 
     def fit_from_prices(
         self,
         prices: List[float],
         dt_seconds: float = 1/60,
         ewma_window: int = 60,
+        use_empirical_sigma: bool = True,
     ) -> OUParameters:
         """
         Fit OU parameters from price series.
@@ -333,6 +344,7 @@ class OUParameterEstimator:
             prices: List of prices
             dt_seconds: Time step between observations
             ewma_window: Window for rolling volatility EWMA
+            use_empirical_sigma: Use empirical std of log-vol instead of OU-derived
 
         Returns:
             Fitted OUParameters
@@ -342,7 +354,7 @@ class OUParameterEstimator:
         # Compute percentage returns
         returns_pct = np.diff(prices) / prices[:-1] * 100
 
-        return self.fit_from_returns(returns_pct, dt_seconds, ewma_window)
+        return self.fit_from_returns(returns_pct, dt_seconds, ewma_window, use_empirical_sigma)
 
 
 # =============================================================================

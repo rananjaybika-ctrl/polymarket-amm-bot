@@ -54,14 +54,19 @@ Committed as `c6362ac` with tag `adaptive-config`.
 ## Next Steps for Tomorrow
 
 ### 1. Run 3 Configs on OOS3 Data
-**Blocker:** Observer crashed Jan 20+. Need to check AWS status.
+**Status:** ✅ **READY** - Observer IS running and collecting OOS3 data!
 
+**Data Being Collected (as of Jan 22, 18:00 UTC):**
+- Observer file: `grid_obs_20260122.csv` (collecting)
+- Binance file: `btc_prices_20260122_132934.csv` (~170MB, 4M+ prices)
+- Collection running: 4.41 hours, 77,112 samples, 102 cycles
+
+**To Download OOS3 Data:**
 ```bash
-# Check AWS observer
-ssh ec2-user@18.119.104.229 "ls -la ~/polymarket-amm-bot/research/observer/*.csv | tail -5"
+# From local machine
+scp -i ~/.ssh/poly_ireland.pem ubuntu@54.170.244.221:~/polymarket-amm-bot/research/observer/grid_obs_20260122.csv research/observer/
+scp -i ~/.ssh/poly_ireland.pem ubuntu@54.170.244.221:~/polymarket-amm-bot/research/binance_hf/btc_prices_20260122_*.csv research/binance_hf/
 ```
-
-If observer is running, new OOS3 data should be collecting.
 
 ### 2. Test Partial Hedges
 
@@ -115,32 +120,28 @@ With 75% direction accuracy (CONSERVATIVE):
 - Expected value = 0.75 * 0.50 - 0.25 * 0.50 = +$0.25 per share
 ```
 
-### 4. Check AWS Observer/Logger
+### 4. AWS Observer/Logger Status
 
-**Status:** SSH BLOCKED - Host responds to ping but port 22 times out.
+**Status:** ✅ **RUNNING** - Data collection active!
 
-**Issue:** AWS instance at 18.119.104.229 is reachable (ping works, ~315ms latency) but SSH connection fails. Possible causes:
-- Security group blocking port 22
-- SSH service stopped
-- Instance needs restart
+**AWS Instance:** `54.170.244.221` (Ireland region)
+- SSH: `ssh -i ~/.ssh/poly_ireland.pem ubuntu@54.170.244.221`
+- User: `ubuntu` (not ec2-user)
 
-**To Fix:**
-1. Check AWS Console for security group rules
-2. Ensure port 22 is open for your IP
-3. May need to restart instance from AWS Console
+**Collection Stats (Jan 22, 2026):**
+| Metric | Value |
+|--------|-------|
+| Runtime | 4.41 hours |
+| Samples | 77,112 |
+| Cycles | 102 |
+| BTC Prices | 4,019,944 (253.2/sec) |
+| Current Files | `grid_obs_20260122.csv`, `btc_prices_20260122_132934.csv` |
 
-**Once SSH works, check:**
+**Minor Issue:** `No module named 'pandas'` error for resolution retry (non-critical, main collection working)
+
+**To Check Status:**
 ```bash
-ssh ec2-user@18.119.104.229
-ps aux | grep -E 'observer|logger'
-ls -la ~/polymarket-amm-bot/research/observer/*.csv | tail -5
-tail -50 ~/polymarket-amm-bot/logs/observer.log
-```
-
-**If observer crashed, restart:**
-```bash
-cd ~/polymarket-amm-bot
-nohup python scripts/observer.py > logs/observer.log 2>&1 &
+ssh -i ~/.ssh/poly_ireland.pem ubuntu@54.170.244.221 "ps aux | grep data_collection"
 ```
 
 ---
@@ -193,10 +194,11 @@ Partial hedge would extend this further by leaving some exposure to resolution.
 
 ## Tomorrow's Priority Order
 
-1. **Check AWS** - Is observer collecting OOS3 data?
-2. **Run OOS3 validation** - Test 3 configs on new data (if available)
-3. **Partial hedge backtest** - Use `enhanced_momentum_backtest.py`
-4. **Winner prediction analysis** - What features predict winning trades?
+1. ~~**Check AWS**~~ ✅ Observer IS collecting OOS3 data!
+2. **Download OOS3 data** - Get `grid_obs_20260122.csv` + Binance file from AWS
+3. **Run OOS3 validation** - Test 3 configs on new data
+4. **Partial hedge backtest** - Use `enhanced_momentum_backtest.py`
+5. **Winner prediction analysis** - What features predict winning trades?
 
 ---
 

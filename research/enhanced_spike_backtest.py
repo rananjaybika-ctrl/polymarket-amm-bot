@@ -62,7 +62,7 @@ OU_BASE_THRESHOLD = 0.02
 OU_K_LOW = 0.5
 OU_K_HIGH = 1.75
 OU_SIGMOID_STEEPNESS = 1.5
-OU_MIN_THRESHOLD = 0.005
+OU_MIN_THRESHOLD = 0.015  # Raised from 0.005 to filter noise
 OU_MAX_THRESHOLD = 0.10
 
 # Global OU parameters (loaded at runtime if threshold_method="ou")
@@ -376,7 +376,7 @@ def calc_loser_bid(winner_entry: float, spike_mag: float, regime: str = "MEDIUM"
 # DATA LOADING
 # =============================================================================
 
-def load_data():
+def load_data(start_ts: int = None, end_ts: int = None):
     print("Loading data...")
 
     # Load ALL Binance files
@@ -389,6 +389,14 @@ def load_data():
     btc_df = pd.concat(btc_dfs, ignore_index=True)
     btc_df = btc_df.drop_duplicates(subset=['timestamp_ms']).sort_values('timestamp_ms')
     print(f"  Binance TOTAL: {len(btc_df):,} rows")
+
+    # Apply timestamp filters if specified
+    if start_ts is not None:
+        btc_df = btc_df[btc_df['timestamp_ms'] >= start_ts]
+        print(f"  Filtered to start_ts >= {start_ts}: {len(btc_df):,} rows")
+    if end_ts is not None:
+        btc_df = btc_df[btc_df['timestamp_ms'] <= end_ts]
+        print(f"  Filtered to end_ts <= {end_ts}: {len(btc_df):,} rows")
 
     # Detect spikes
     btc_spikes = detect_spikes_vectorized(btc_df)
@@ -772,6 +780,10 @@ def parse_args():
                         help="Spike threshold method: fixed (base), regime (ATR-based), ou (OU adaptive)")
     parser.add_argument("--ou-params", type=str, default="research/ou_params.json",
                         help="Path to OU parameters JSON file (for --threshold-method=ou)")
+    parser.add_argument("--start-ts", type=int, default=None,
+                        help="Filter data to start at this timestamp (ms). Use 1768705387229 for OOS2 start.")
+    parser.add_argument("--end-ts", type=int, default=None,
+                        help="Filter data to end at this timestamp (ms). Use 1768705387229 for training end.")
 
     args = parser.parse_args()
 
@@ -829,14 +841,14 @@ def main():
         print(f"  OU Params:        μ={_ou_params.mu:.4f}, σ_stat={_ou_params.sigma_stat:.4f}")
     print()
 
-    spikes_df, obs_df, hours, valid_slugs = load_data()
+    spikes_df, obs_df, hours, valid_slugs = load_data(start_ts=args.start_ts, end_ts=args.end_ts)
 
     print(f"\nBacktest: {hours:.2f} hours, {len(valid_slugs)} markets")
     print()
 
     results = []
-    # OPTIMAL: Enhanced spike only (with composite score + velocity confirmation)
-    signal_types = ["enhanced"]
+    # Test both spike (raw) and enhanced (velocity+score filtered)
+    signal_types = ["spike", "enhanced"]
 
     print("Running backtests...")
     print("-" * 80)

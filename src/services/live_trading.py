@@ -569,6 +569,9 @@ class LiveTradingEngine:
         order_type_label = "FOK" if self._use_fok else "GTC"
         logger.info(f"[LIVE] Placing {order_type_label} order: {size} {side_upper} @ ${price:.4f} on {market.slug}")
 
+        # Track latency from signal to fill
+        order_start_time = time.time()
+
         try:
             # Place real order with configured order type
             result = await self.client.place_order(
@@ -611,9 +614,10 @@ class LiveTradingEngine:
                 # Sync balance after trade
                 await self.sync_balance()
 
+                fill_latency_ms = (time.time() - order_start_time) * 1000
                 logger.info(
                     f"[LIVE] Order filled: {filled_size} {side_upper} @ ${filled_price:.4f} "
-                    f"(order_id={order_id[:16]}...)"
+                    f"in {fill_latency_ms:.0f}ms (order_id={order_id[:16]}...)"
                 )
 
                 return {
@@ -623,6 +627,7 @@ class LiveTradingEngine:
                     "cost": cost,
                     "trade_id": trade_id,
                     "order_id": order_id,
+                    "fill_latency_ms": fill_latency_ms,
                 }
             elif status == "LIVE" and not self._use_fok:
                 # GTC order is live (sitting in orderbook) - wait for fill
@@ -672,15 +677,16 @@ class LiveTradingEngine:
                     self._notify_fill(side_upper, filled_size, filled_price, market.slug)
                     await self.sync_balance()
 
+                    fill_latency_ms = (time.time() - order_start_time) * 1000
                     if filled_size < size:
                         logger.info(
                             f"[LIVE] PARTIAL FILL: {filled_size}/{size} {side_upper} @ ${filled_price:.4f} "
-                            f"(order_id={order_id[:16]}...)"
+                            f"in {fill_latency_ms:.0f}ms (order_id={order_id[:16]}...)"
                         )
                     else:
                         logger.info(
                             f"[LIVE] Order filled: {filled_size} {side_upper} @ ${filled_price:.4f} "
-                            f"(order_id={order_id[:16]}...)"
+                            f"in {fill_latency_ms:.0f}ms (order_id={order_id[:16]}...)"
                         )
 
                     return {
@@ -691,6 +697,7 @@ class LiveTradingEngine:
                         "trade_id": trade_id,
                         "order_id": order_id,
                         "partial": filled_size < size,
+                        "fill_latency_ms": fill_latency_ms,
                     }
                 else:
                     # No fill after timeout - try fallback pricing if enabled

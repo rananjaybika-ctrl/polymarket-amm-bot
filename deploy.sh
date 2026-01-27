@@ -33,6 +33,10 @@ rsync -avz --delete \
     --exclude '*.pyc' \
     --exclude 'logs/*.log' \
     --exclude 'state/*.json' \
+    --exclude 'research/observer/grid_obs_*.csv' \
+    --exclude 'research/observer/btc_prices_*.csv' \
+    --exclude 'research/observer/*.csv' \
+    --exclude 'research/binance_hf/*.csv' \
     -e "ssh -i $AWS_KEY" \
     "$LOCAL_PATH" "$REMOTE_PATH"
 

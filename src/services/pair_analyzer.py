@@ -490,12 +490,17 @@ class PairAnalyzer:
         self, market: BTCMarket
     ) -> tuple[Orderbook, Orderbook]:
         """
-        Fetch orderbooks with WebSocket primary, REST fallback.
+        Fetch orderbooks with WebSocket primary, REST verification.
 
-        Priority:
-        1. WebSocket cache (if manager connected and data fresh)
-        2. REST /book endpoint
-        3. REST /markets endpoint (if /book returns garbage)
+        Strategy:
+        1. Try WebSocket cache (fastest)
+        2. If WS data exists, verify against REST prices
+        3. If variance > 5%, use REST (WS is stale/wrong)
+        4. If variance <= 5%, trust WebSocket (even for extreme prices)
+        5. If WS unavailable, use REST directly
+
+        This prevents false fallbacks when prices are legitimately
+        extreme (e.g., $0.01/$0.99 near market resolution).
 
         Args:
             market: BTCMarket to fetch orderbooks for
@@ -503,32 +508,68 @@ class PairAnalyzer:
         Returns:
             Tuple of (up_orderbook, down_orderbook)
         """
-        up_orderbook = None
-        down_orderbook = None
+        VARIANCE_THRESHOLD = 0.05  # 5% variance threshold
+
+        ws_up_orderbook = None
+        ws_down_orderbook = None
+        use_websocket = False
 
         # Try WebSocket cache first (fastest path)
         if self._orderbook_manager and self._orderbook_manager.connected:
-            up_orderbook, down_orderbook = await self._orderbook_manager.get_orderbooks(
+            ws_up_orderbook, ws_down_orderbook = await self._orderbook_manager.get_orderbooks(
                 market.up_token_id,
                 market.down_token_id,
             )
-            if up_orderbook and down_orderbook:
-                # Validate not garbage
-                if not up_orderbook.is_garbage() and not down_orderbook.is_garbage():
-                    return up_orderbook, down_orderbook
-                logger.warning("WebSocket orderbook is garbage, falling back to REST")
-                up_orderbook = None
-                down_orderbook = None
 
-        # Fallback to REST: Fetch both orderbooks in parallel
+            # Check if WS data is truly garbage (empty/None)
+            if ws_up_orderbook and ws_down_orderbook:
+                ws_garbage = ws_up_orderbook.is_garbage() or ws_down_orderbook.is_garbage()
+
+                if not ws_garbage:
+                    # WS has data - verify against REST before deciding
+                    use_websocket = True
+                else:
+                    logger.debug("WebSocket orderbook is empty/None, using REST")
+
+        # Fetch REST prices for verification (or as primary if no WS)
         up_response, down_response = await asyncio.gather(
             self.client.get_orderbook(market.up_token_id),
             self.client.get_orderbook(market.down_token_id),
         )
 
-        # Convert to our Orderbook model
-        up_orderbook = Orderbook.from_clob_response(up_response)
-        down_orderbook = Orderbook.from_clob_response(down_response)
+        rest_up_orderbook = Orderbook.from_clob_response(up_response)
+        rest_down_orderbook = Orderbook.from_clob_response(down_response)
+
+        # If WS data exists, compare variance with REST
+        if use_websocket and ws_up_orderbook and ws_down_orderbook:
+            ws_up_ask = ws_up_orderbook.best_ask or 0
+            ws_down_ask = ws_down_orderbook.best_ask or 0
+            rest_up_ask = rest_up_orderbook.best_ask or 0
+            rest_down_ask = rest_down_orderbook.best_ask or 0
+
+            # Calculate variance (avoid division by zero)
+            up_variance = abs(ws_up_ask - rest_up_ask) / max(rest_up_ask, 0.01)
+            down_variance = abs(ws_down_ask - rest_down_ask) / max(rest_down_ask, 0.01)
+            max_variance = max(up_variance, down_variance)
+
+            if max_variance <= VARIANCE_THRESHOLD:
+                # Variance is acceptable - trust WebSocket (faster)
+                logger.debug(
+                    f"WS verified: UP=${ws_up_ask:.3f} vs REST=${rest_up_ask:.3f} "
+                    f"(var={up_variance:.1%}), using WebSocket"
+                )
+                return ws_up_orderbook, ws_down_orderbook
+            else:
+                # High variance - WebSocket is stale, use REST
+                logger.warning(
+                    f"WS/REST variance too high ({max_variance:.1%} > {VARIANCE_THRESHOLD:.0%}): "
+                    f"WS UP=${ws_up_ask:.3f}/DOWN=${ws_down_ask:.3f}, "
+                    f"REST UP=${rest_up_ask:.3f}/DOWN=${rest_down_ask:.3f}. Using REST."
+                )
+
+        # Use REST orderbooks
+        up_orderbook = rest_up_orderbook
+        down_orderbook = rest_down_orderbook
 
         # Check for garbage data from /book endpoint
         if up_orderbook.is_garbage() or down_orderbook.is_garbage():

@@ -132,26 +132,33 @@ def compute_returns(df: pd.DataFrame, price_col: str = 'price') -> np.ndarray:
     return returns
 
 
-def resample_to_1s(df: pd.DataFrame) -> pd.DataFrame:
+def resample_data(df: pd.DataFrame, interval_seconds: int = 1) -> pd.DataFrame:
     """
-    Resample high-frequency data to 1-second intervals.
+    Resample high-frequency data to specified time intervals.
 
-    Takes the last price in each 1-second bucket.
+    Takes the last price in each bucket.
 
     Args:
         df: DataFrame with timestamp_ms and price columns
+        interval_seconds: Resampling interval in seconds
 
     Returns:
         Resampled DataFrame
     """
     df = df.copy()
-    df['timestamp_s'] = df['timestamp_ms'] // 1000
-    resampled = df.groupby('timestamp_s').agg({
+    interval_ms = interval_seconds * 1000
+    df['bucket'] = df['timestamp_ms'] // interval_ms
+    resampled = df.groupby('bucket').agg({
         'timestamp_ms': 'last',
         'price': 'last'
     }).reset_index(drop=True)
-    logger.info(f"Resampled from {len(df):,} to {len(resampled):,} rows (1s intervals)")
+    logger.info(f"Resampled from {len(df):,} to {len(resampled):,} rows ({interval_seconds}s intervals)")
     return resampled
+
+
+# Alias for backward compatibility
+def resample_to_1s(df: pd.DataFrame) -> pd.DataFrame:
+    return resample_data(df, interval_seconds=1)
 
 
 # =============================================================================
@@ -162,6 +169,7 @@ def calibrate_ou_params(
     training_df: pd.DataFrame,
     ewma_window: int = 60,
     output_file: str = "research/ou_params.json",
+    resample_interval_s: int = 1,
 ) -> OUParameters:
     """
     Calibrate OU parameters from training data.
@@ -170,6 +178,7 @@ def calibrate_ou_params(
         training_df: Training data DataFrame
         ewma_window: Window for rolling volatility EWMA
         output_file: Path to save parameters
+        resample_interval_s: Resample to this interval (seconds) before estimation
 
     Returns:
         Calibrated OUParameters
@@ -177,6 +186,13 @@ def calibrate_ou_params(
     logger.info("=" * 60)
     logger.info("CALIBRATING OU PARAMETERS")
     logger.info("=" * 60)
+
+    # Resample to avoid numerical instability
+    # High-frequency data (9ms) causes tiny returns → unstable estimation
+    # Longer intervals (60s) reduce autocorrelation, stabilizing σ_stat
+    if resample_interval_s > 0:
+        logger.info(f"Resampling to {resample_interval_s}s intervals...")
+        training_df = resample_data(training_df, interval_seconds=resample_interval_s)
 
     # Compute returns
     returns = compute_returns(training_df)
@@ -189,7 +205,7 @@ def calibrate_ou_params(
     logger.info(f"Filtered {n_filtered} extreme returns (>{max_return}%)")
     returns_filtered = returns[valid_mask]
 
-    # Estimate sample rate
+    # Estimate sample rate (should now be ~1s)
     ts_diff = np.diff(training_df['timestamp_ms'].values)
     median_dt_ms = np.median(ts_diff)
     sample_rate_hz = 1000 / median_dt_ms
@@ -237,6 +253,7 @@ def validate_on_oos2(
     params: OUParameters,
     oos2_df: pd.DataFrame,
     ewma_window: int = 60,
+    resample_interval_s: int = 1,
 ) -> Dict:
     """
     Validate OU parameters on OOS2 data.
@@ -248,6 +265,7 @@ def validate_on_oos2(
         params: Calibrated OU parameters
         oos2_df: OOS2 DataFrame
         ewma_window: EWMA window
+        resample_interval_s: Resample to this interval (seconds)
 
     Returns:
         Validation statistics
@@ -259,6 +277,11 @@ def validate_on_oos2(
     if len(oos2_df) < 1000:
         logger.warning(f"OOS2 data too small ({len(oos2_df)} rows), skipping validation")
         return {}
+
+    # Resample to match calibration frequency
+    if resample_interval_s > 0:
+        logger.info(f"Resampling OOS2 to {resample_interval_s}s intervals...")
+        oos2_df = resample_data(oos2_df, interval_seconds=resample_interval_s)
 
     # Compute rolling volatility
     returns = compute_returns(oos2_df)
@@ -355,6 +378,7 @@ def compare_training_vs_oos2(
     training_df: pd.DataFrame,
     oos2_df: pd.DataFrame,
     ewma_window: int = 60,
+    resample_interval_s: int = 1,
 ) -> None:
     """
     Compare volatility characteristics between training and OOS2.
@@ -364,10 +388,17 @@ def compare_training_vs_oos2(
         training_df: Training DataFrame
         oos2_df: OOS2 DataFrame
         ewma_window: EWMA window
+        resample_interval_s: Resample to this interval (seconds)
     """
     logger.info("=" * 60)
     logger.info("TRAINING vs OOS2 COMPARISON")
     logger.info("=" * 60)
+
+    # Resample both datasets to match calibration frequency
+    if resample_interval_s > 0:
+        logger.info(f"Resampling both datasets to {resample_interval_s}s intervals...")
+        training_df = resample_data(training_df, interval_seconds=resample_interval_s)
+        oos2_df = resample_data(oos2_df, interval_seconds=resample_interval_s)
 
     def compute_stats(df: pd.DataFrame, label: str) -> Dict:
         """Compute volatility stats for a dataset."""
@@ -432,6 +463,8 @@ def main():
                        help="Run synthetic parameter recovery test")
     parser.add_argument("--all", action="store_true",
                        help="Run all: calibrate, validate, and compare")
+    parser.add_argument("--resample-interval", type=int, default=60,
+                       help="Resample interval in seconds (default: 60). Longer intervals stabilize OU parameters.")
 
     args = parser.parse_args()
 
@@ -449,15 +482,16 @@ def main():
         training_df=training_df,
         ewma_window=args.ewma_window,
         output_file=args.output,
+        resample_interval_s=args.resample_interval,
     )
 
     # Validate if requested
     if args.validate or args.all:
-        validate_on_oos2(params, oos2_df, args.ewma_window)
+        validate_on_oos2(params, oos2_df, args.ewma_window, resample_interval_s=args.resample_interval)
 
     # Compare if requested
     if args.compare or args.all:
-        compare_training_vs_oos2(params, training_df, oos2_df, args.ewma_window)
+        compare_training_vs_oos2(params, training_df, oos2_df, args.ewma_window, resample_interval_s=args.resample_interval)
 
     logger.info("\n" + "=" * 60)
     logger.info("CALIBRATION COMPLETE")

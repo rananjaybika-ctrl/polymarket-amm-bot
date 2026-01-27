@@ -435,7 +435,45 @@ class SpreadCaptureObserver:
 
     def _signal_handler(self, signum, frame):
         print("\n\nShutdown signal received...")
+        self.stop()
+
+    def stop(self):
+        """Gracefully stop the observer."""
+        if not self.running:
+            return  # Already stopped
+
         self.running = False
+        logger.info("Observer stopping...")
+
+        # Cancel background tasks
+        if hasattr(self, '_ws_task') and self._ws_task and not self._ws_task.done():
+            self._ws_task.cancel()
+        if hasattr(self, '_resolution_retry_task') and self._resolution_retry_task and not self._resolution_retry_task.done():
+            self._resolution_retry_task.cancel()
+
+        # Close WebSocket connections
+        if self.poly_ws:
+            try:
+                asyncio.create_task(self.poly_ws.disconnect())
+            except RuntimeError:
+                pass  # No event loop running
+
+        if self.binance:
+            try:
+                asyncio.create_task(self.binance.disconnect())
+            except RuntimeError:
+                pass  # No event loop running
+
+        # Flush and close CSV file
+        if self.csv_file:
+            try:
+                self.csv_file.flush()
+                self.csv_file.close()
+                self.csv_file = None
+            except Exception:
+                pass
+
+        logger.info("Observer stopped")
 
     def _on_book_update(self, update: BookUpdate):
         """Handle Polymarket orderbook update."""
@@ -461,6 +499,70 @@ class SpreadCaptureObserver:
         if up_bid <= 0 or down_bid <= 0 or up_ask <= 0 or down_ask <= 0:
             return True
         return False
+
+    def _extract_depth(self, book: Optional[BookUpdate], levels: int = 5) -> dict:
+        """
+        Extract top N levels of depth from BookUpdate.
+
+        Args:
+            book: BookUpdate object with bids/asks lists
+            levels: Number of levels to extract (default 5)
+
+        Returns:
+            dict with keys: bids, bid_sizes, asks, ask_sizes, imbalance
+        """
+        result = {
+            'bids': [],
+            'bid_sizes': [],
+            'asks': [],
+            'ask_sizes': [],
+            'imbalance': 0.0,
+        }
+
+        if not book:
+            # Return zeros if no book data
+            result['bids'] = [0.0] * levels
+            result['bid_sizes'] = [0.0] * levels
+            result['asks'] = [0.0] * levels
+            result['ask_sizes'] = [0.0] * levels
+            return result
+
+        # Bids (already sorted highest first in BookUpdate.from_message)
+        for i in range(levels):
+            try:
+                if i < len(book.bids):
+                    result['bids'].append(book.bids[i].price)
+                    result['bid_sizes'].append(book.bids[i].size)
+                else:
+                    result['bids'].append(0.0)
+                    result['bid_sizes'].append(0.0)
+            except (AttributeError, IndexError) as e:
+                logger.warning(f"Invalid bid data at level {i}: {e}")
+                result['bids'].append(0.0)
+                result['bid_sizes'].append(0.0)
+
+        # Asks (already sorted lowest first in BookUpdate.from_message)
+        for i in range(levels):
+            try:
+                if i < len(book.asks):
+                    result['asks'].append(book.asks[i].price)
+                    result['ask_sizes'].append(book.asks[i].size)
+                else:
+                    result['asks'].append(0.0)
+                    result['ask_sizes'].append(0.0)
+            except (AttributeError, IndexError) as e:
+                logger.warning(f"Invalid ask data at level {i}: {e}")
+                result['asks'].append(0.0)
+                result['ask_sizes'].append(0.0)
+
+        # Compute imbalance: (bid_depth - ask_depth) / (bid_depth + ask_depth)
+        # Positive imbalance = more bids = buying pressure = price likely to rise
+        bid_depth = sum(result['bid_sizes'])
+        ask_depth = sum(result['ask_sizes'])
+        total = bid_depth + ask_depth
+        result['imbalance'] = (bid_depth - ask_depth) / total if total > 0 else 0.0
+
+        return result
 
     async def _fetch_clob_prices(self) -> Optional[Tuple[float, float, float, float]]:
         """Fetch prices from CLOB REST endpoint as fallback."""
@@ -523,8 +625,13 @@ class SpreadCaptureObserver:
         filename = f"{self.output_dir}/grid_obs_{date_str}.csv"
 
         file_exists = os.path.exists(filename)
-        self.csv_file = open(filename, 'a', newline='')
-        self.csv_writer = csv.writer(self.csv_file)
+        try:
+            self.csv_file = open(filename, 'a', newline='')
+            self.csv_writer = csv.writer(self.csv_file)
+        except Exception as e:
+            logger.error(f"Failed to open CSV file {filename}: {e}")
+            print(f"[ERROR] Failed to open CSV file: {e}", flush=True)
+            return
 
         if not file_exists:
             headers = [
@@ -550,6 +657,17 @@ class SpreadCaptureObserver:
                 # Higher-order derivatives (for enhanced momentum strategy)
                 'acceleration_bps2', 'jerk_bps3', 'accel_aligned',
                 'signal_quality', 'momentum_5s',
+                # Orderbook depth columns (5 levels per side, per token = 40 columns)
+                'up_bid_1', 'up_bid_2', 'up_bid_3', 'up_bid_4', 'up_bid_5',
+                'up_bid_size_1', 'up_bid_size_2', 'up_bid_size_3', 'up_bid_size_4', 'up_bid_size_5',
+                'up_ask_1', 'up_ask_2', 'up_ask_3', 'up_ask_4', 'up_ask_5',
+                'up_ask_size_1', 'up_ask_size_2', 'up_ask_size_3', 'up_ask_size_4', 'up_ask_size_5',
+                'down_bid_1', 'down_bid_2', 'down_bid_3', 'down_bid_4', 'down_bid_5',
+                'down_bid_size_1', 'down_bid_size_2', 'down_bid_size_3', 'down_bid_size_4', 'down_bid_size_5',
+                'down_ask_1', 'down_ask_2', 'down_ask_3', 'down_ask_4', 'down_ask_5',
+                'down_ask_size_1', 'down_ask_size_2', 'down_ask_size_3', 'down_ask_size_4', 'down_ask_size_5',
+                # Computed imbalance metrics
+                'up_imbalance', 'down_imbalance',
             ]
             self.csv_writer.writerow(headers)
             self.csv_file.flush()
@@ -561,6 +679,7 @@ class SpreadCaptureObserver:
         if not self.csv_writer:
             return
         if not self.binance or self.binance.current_price <= 0:
+            logger.warning(f"Skipping sample: Binance price is {self.binance.current_price if self.binance else 'None'}")
             return
 
         # Get validated orderbook (with garbage detection and REST fallback)
@@ -694,7 +813,7 @@ class SpreadCaptureObserver:
         expected_drop = 0.0
         if spike_detected:
             # Use velocity zone as proxy for regime (v2 formula)
-            zone_name = get_velocity_zone(velocity)
+            zone_name = get_velocity_zone(velocity_bps)
             regime = "HIGH" if zone_name in ["strong", "extreme"] else "MEDIUM" if zone_name == "moderate" else "LOW"
             regime_bonus = DROP_REGIME_BONUS.get(regime, 0.01)
             expected_drop = DROP_MULTIPLIER * spike_magnitude + DROP_INTERCEPT + regime_bonus
@@ -817,12 +936,44 @@ class SpreadCaptureObserver:
             round(momentum_5s, 4),
         ])
 
-        self.csv_writer.writerow(row)
-        self.sample_count += 1
+        # ORDERBOOK DEPTH DATA (5 levels per side, per token)
+        # Extract depth for UP token
+        up_depth = self._extract_depth(self.up_book, levels=5)
+        # Extract depth for DOWN token
+        down_depth = self._extract_depth(self.down_book, levels=5)
 
-        # Flush periodically
-        if self.sample_count % 50 == 0:
-            self.csv_file.flush()
+        # Append UP depth: bids (5), bid_sizes (5), asks (5), ask_sizes (5)
+        row.extend([round(p, 4) for p in up_depth['bids']])
+        row.extend([round(s, 2) for s in up_depth['bid_sizes']])
+        row.extend([round(p, 4) for p in up_depth['asks']])
+        row.extend([round(s, 2) for s in up_depth['ask_sizes']])
+
+        # Append DOWN depth: bids (5), bid_sizes (5), asks (5), ask_sizes (5)
+        row.extend([round(p, 4) for p in down_depth['bids']])
+        row.extend([round(s, 2) for s in down_depth['bid_sizes']])
+        row.extend([round(p, 4) for p in down_depth['asks']])
+        row.extend([round(s, 2) for s in down_depth['ask_sizes']])
+
+        # Append imbalance metrics
+        row.extend([
+            round(up_depth['imbalance'], 4),
+            round(down_depth['imbalance'], 4),
+        ])
+
+        try:
+            self.csv_writer.writerow(row)
+            self.sample_count += 1
+        except Exception as e:
+            logger.error(f"Failed to write CSV row: {e}")
+            print(f"[ERROR] CSV write failed: {e}", flush=True)
+            return
+
+        # Flush more frequently for crash safety (every 10 samples instead of 50)
+        if self.sample_count % 10 == 0:
+            try:
+                self.csv_file.flush()
+            except Exception as e:
+                logger.error(f"Failed to flush CSV: {e}")
 
     def _log_resolution(self, slug: str, resolution: str) -> None:
         """
@@ -1101,7 +1252,18 @@ class SpreadCaptureObserver:
         # UPGRADED: Use @bookTicker stream for faster detection (50-100ms vs 200ms)
         print("Connecting to Binance WebSocket (@bookTicker for faster detection)...")
         self.binance = BinanceClient(window_seconds=60, use_book_ticker=True)
-        await self.binance.connect()
+        try:
+            await self.binance.connect()
+        except Exception as e:
+            logger.error(f"Failed to connect to Binance WebSocket: {e}")
+            print(f"[ERROR] Binance WebSocket connection failed: {e}", flush=True)
+            print("Retrying in 5 seconds...", flush=True)
+            await asyncio.sleep(5)
+            try:
+                await self.binance.connect()
+            except Exception as e2:
+                print(f"[FATAL] Binance connection failed twice: {e2}", flush=True)
+                return
 
         # Wait for first price
         for _ in range(50):
@@ -1114,7 +1276,18 @@ class SpreadCaptureObserver:
         print("Connecting to Polymarket WebSocket...")
         self.poly_ws = WebSocketClient(auto_reconnect=True)
         self.poly_ws.on_book_update(self._on_book_update)
-        await self.poly_ws.connect()
+        try:
+            await self.poly_ws.connect()
+        except Exception as e:
+            logger.error(f"Failed to connect to Polymarket WebSocket: {e}")
+            print(f"[ERROR] Polymarket WebSocket connection failed: {e}", flush=True)
+            print("Retrying in 5 seconds...", flush=True)
+            await asyncio.sleep(5)
+            try:
+                await self.poly_ws.connect()
+            except Exception as e2:
+                print(f"[FATAL] Polymarket connection failed twice: {e2}", flush=True)
+                return
 
         # Start WebSocket event loop in background
         self._ws_task = asyncio.create_task(self.poly_ws.run())

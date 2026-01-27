@@ -266,3 +266,50 @@ Expected improvement: **+18% to +45%** over time stops
 - `/research/vol_filter_grid_results_all_combined.csv` - 1440 rows (full grid search results)
 
 Analysis performed: January 2026
+
+---
+
+## OOS3 VALIDATION UPDATE (January 23, 2026)
+
+### Time-Stop vs Price-Stop on Fresh Data (After Cycling Bug Fix)
+
+| Config | Stop Type | OOS3 $/hr @50sh | OOS3 WR% | IS $/hr @50sh | IS WR% |
+|--------|-----------|-----------------|-----------|---------------|--------|
+| **AGGRESSIVE** | **180s TIME** | **$17.59** | **70.2%** | **$7.76** | **68.9%** |
+| BALANCED (EWMA) | 15% PRICE | $26.38 | 57.9% | $3.06 | 49.0% |
+| BALANCED (OU) | 15% PRICE | $2.34 | 36.7% | $6.07 | 69.6% |
+| CONSERVATIVE | 15% PRICE | $2.49 | 53.3% | - | - |
+
+**Key insight:** AGGRESSIVE (time-stop) is the only config that performs consistently
+across both in-sample and OOS3. BALANCED+EWMA dominates OOS3 but is mediocre on IS.
+
+### OOS3 Stop Analysis Detail (Corrected)
+
+**AGGRESSIVE (180s time-stop):**
+- 24 time-stops out of 84 trades (28.6%)
+- 8 premature stops (33.3%)
+- PnL lost to premature stops: -$6.95 @5sh
+- Consistent 70.2% WR across in-sample (68.9%) and OOS3
+
+**BALANCED+EWMA (15% price-stop):**
+- 66 price-stops out of 202 trades (32.7%) — corrected from 79/219 pre-fix
+- On in-sample: 69 stops out of 147 trades (46.9%) — nearly half stopped out
+- 49% WR on in-sample suggests price-stop eats edge in normal regimes
+- OOS3 had 2x spike rate per hour, which may explain improved OOS3 performance
+
+### Key OOS3 Finding for Stop Type
+
+The in-sample rule "OU z-score → PRICE STOP, EWMA z-score → TIME STOP" is **partially overturned**:
+
+| Z-Score + Stop | In-Sample Rule | OOS3 Result |
+|----------------|----------------|-------------|
+| EWMA + TIME | Recommended | $14.11/hr (good) |
+| EWMA + PRICE | Not recommended | **$26.76/hr (BEST)** |
+| OU + PRICE | Recommended | $1.44-3.15/hr (poor - OU drifted) |
+
+**Updated rule:** With EWMA z-scores, BOTH stop types work, but **15% price-stop is actually better** on OOS3 (more trades survive to passive fill). The original time-stop advantage was partly an artifact of OU z-score's poor signal quality requiring more "breathing room."
+
+### Recommendation
+- EWMA z-score + 15% price-stop: Best OOS3 combination
+- EWMA z-score + 180s time-stop: Still viable, higher WR but fewer trades
+- OU z-score + any stop: Avoid in production (parameter drift risk)

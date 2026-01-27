@@ -735,3 +735,77 @@ After fixing calibration, if OU-adaptive thresholds show:
 - OOS2: >$0/hr (improvement from -$0.49)
 
 → Proceed with production integration. Otherwise, investigate regime-based thresholds as fallback.
+
+---
+
+## Session Update - January 20, 2026
+
+### OU Calibration Fix
+
+**Problem:** Initial calibration at 1s intervals produced σ_stat=3.17 (too large), causing z-scores to be compressed and not distinguishing volatility regimes.
+
+**Solution:** Changed to use **empirical standard deviation** of log-volatility instead of OU-derived formula (which inflates when autocorrelation is high).
+
+**Fixed Parameters (60s resampling, empirical σ):**
+```json
+{
+  "mu": -3.9845,
+  "theta": 0.000125,
+  "xi": 0.0502,
+  "sigma_stat": 0.3877,
+  "half_life_sec": 5527.4
+}
+```
+
+**Validation:** OOS2 mean z-score = 1.26 (correctly identified as HIGH volatility), 59.9% in HIGH regime.
+
+### OU Parameter Sweep Results
+
+Tested spike counts with different parameters:
+
+| Config | Base | Steepness | Min | Spikes | Change |
+|--------|------|-----------|-----|--------|--------|
+| baseline | 0.020 | 1.5 | 0.005 | 403,515 | - |
+| base=0.025 | 0.025 | 1.5 | 0.005 | 243,147 | -40% |
+| base=0.03 | 0.030 | 1.5 | 0.005 | 151,492 | -62% |
+| steep=2.5 | 0.020 | 2.5 | 0.005 | 403,586 | ~0% |
+| steep=3.0 | 0.020 | 3.0 | 0.005 | 403,587 | ~0% |
+| **min=0.015** | 0.020 | 1.5 | 0.015 | 151,623 | -62% |
+
+**Key Finding:** Steepness has no effect on spike count. Raising min_threshold to 0.015 reduces noise by 62%.
+
+### Backtest Results Comparison
+
+| Method | Spikes | Best Config | $/hr | vs Regime |
+|--------|--------|-------------|------|-----------|
+| Regime (ATR) | 48,598 | spike+NoSL+Cyc=ON | $2.20/hr | baseline |
+| OU baseline | 403,515 | spike+SL7%+Cyc=OFF | $1.84/hr | -16% |
+| **OU min=0.015** | 151,623 | spike+NoSL+Cyc=ON | **$5.05/hr** | **+130%** |
+
+### OU Configuration - PRODUCTION READY
+
+**Optimal OU Settings:**
+- `OU_BASE_THRESHOLD = 0.02`
+- `OU_MIN_THRESHOLD = 0.015` ← Key change
+- `OU_K_LOW = 0.5`, `OU_K_HIGH = 1.75`
+- `OU_SIGMOID_STEEPNESS = 1.5`
+
+**Best Trading Config:**
+- Signal: spike (no velocity filtering)
+- Stop Loss: None
+- Cycling: ON
+- Result: **$5.05/hr** (2,248 trades, 56.5% accuracy)
+
+### Files Updated
+
+| File | Change |
+|------|--------|
+| `src/strategies/ou_volatility.py` | Added `use_empirical_sigma` parameter (default True), updated `DEFAULT_MIN_THRESHOLD` to 0.015 |
+| `research/ou_calibration.py` | Added `resample_data()` function with configurable interval, added `--resample-interval` CLI arg |
+| `research/enhanced_spike_backtest.py` | Updated `OU_MIN_THRESHOLD` to 0.015 |
+
+### Next Steps
+
+1. **Production Integration:** Pass OU-calibrated adaptive threshold to `EnhancedSpikeStrategy`
+2. **Run optimizer** with `--threshold-method=ou` to find optimal lookback/regime params
+3. **Monitor z-scores** in production to validate regime detection

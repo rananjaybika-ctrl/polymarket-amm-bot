@@ -215,21 +215,23 @@ class Orderbook:
         """
         Detect invalid/stale orderbook data from CLOB API.
 
-        The /book endpoint sometimes returns garbage data ($0.01/$0.99)
-        instead of real market prices. This detects that pattern.
+        Only flags truly invalid data:
+        - No bids or asks (empty orderbook)
+        - None values preventing trading
+
+        NOTE: Extreme prices ($0.01/$0.99) are NOT garbage - they're
+        legitimate near market resolution or after big BTC moves.
 
         Returns:
-            True if orderbook data appears invalid/stale
+            True if orderbook data is invalid (empty/None)
         """
-        # No orders = likely garbage or market not active
+        # No orders = can't trade
         if not self.bids or not self.asks:
             return True
 
-        # Extreme spread pattern: $0.01 bid / $0.99 ask
-        # Real markets have spreads around 1-5%, not 97%
-        if self.best_bid is not None and self.best_ask is not None:
-            if self.best_bid <= 0.02 and self.best_ask >= 0.98:
-                return True
+        # Check for None values in best prices
+        if self.best_bid is None or self.best_ask is None:
+            return True
 
         return False
 
