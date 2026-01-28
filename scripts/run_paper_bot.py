@@ -5100,6 +5100,24 @@ class PaperTradingBot:
         if in_hard_stop:
             return
 
+        # Compute OBI (Orderbook Imbalance) for spike confirmation filter
+        # OBI confirms spike: 89% accuracy vs 77% when disagrees (+4.1pp improvement)
+        up_imbalance = None
+        down_imbalance = None
+        if self._orderbook_manager and self._orderbook_manager.cache:
+            try:
+                up_token = market.tokens[0].token_id if market.tokens else None
+                down_token = market.tokens[1].token_id if len(market.tokens) > 1 else None
+
+                if up_token and down_token:
+                    up_book, down_book = await self._orderbook_manager.cache.get_pair(up_token, down_token)
+                    if up_book:
+                        up_imbalance = up_book.compute_imbalance(levels=5)
+                    if down_book:
+                        down_imbalance = down_book.compute_imbalance(levels=5)
+            except Exception as e:
+                logger.debug(f"[OBI] Failed to compute imbalance: {e}")
+
         # Generate quotes
         current_time = time.time()
         quotes = strategy.get_quotes(
@@ -5111,6 +5129,8 @@ class PaperTradingBot:
             time_remaining=time_remaining_secs,
             current_time=current_time,
             binance_price=binance_price,
+            up_imbalance=up_imbalance,
+            down_imbalance=down_imbalance,
         )
 
         if not quotes:

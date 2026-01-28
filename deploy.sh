@@ -1,6 +1,9 @@
 #!/bin/bash
 # One-command deploy to AWS Ireland
 # Usage: ./deploy.sh "commit message"
+#
+# NOTE: AWS uses python3 (not python). Always use python3 in SSH commands:
+#   ssh ... 'python3 scripts/observer.py --hours 15'
 
 set -e
 
@@ -52,3 +55,9 @@ echo "  ssh -i $AWS_KEY ubuntu@$AWS_IP 'sudo systemctl restart polymarket-bot'"
 echo ""
 echo "To check status:"
 echo "  ssh -i $AWS_KEY ubuntu@$AWS_IP 'sudo systemctl status polymarket-bot'"
+echo ""
+echo "To start observer (data collection):"
+echo "  ssh -i $AWS_KEY ubuntu@$AWS_IP 'cd ~/polymarket-amm-bot && nohup python3 scripts/observer.py --hours 15 > logs/observer.log 2>&1 &'"
+echo ""
+echo "To check observer:"
+echo "  ssh -i $AWS_KEY ubuntu@$AWS_IP 'ps aux | grep observer; tail -20 ~/polymarket-amm-bot/logs/observer.log'"

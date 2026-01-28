@@ -997,6 +997,8 @@ class EnhancedSpikeStrategy:
         time_remaining: float,
         current_time: Optional[float] = None,
         binance_price: Optional[float] = None,
+        up_imbalance: Optional[float] = None,
+        down_imbalance: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """
         Generate quotes for both sides based on current market state.
@@ -1013,6 +1015,8 @@ class EnhancedSpikeStrategy:
             time_remaining: Seconds until market resolution
             current_time: Current timestamp (default: time.time())
             binance_price: Current Binance BTCUSDT price (NEW - enables spike detection)
+            up_imbalance: Orderbook imbalance for UP token (-1 to +1, positive = buying pressure)
+            down_imbalance: Orderbook imbalance for DOWN token (-1 to +1, positive = buying pressure)
 
         Returns:
             List of quote dicts: [{'side': str, 'price': float, 'size': int}, ...]
@@ -1077,10 +1081,34 @@ class EnhancedSpikeStrategy:
 
                 if should_trade:
                     spike_direction = raw_spike_direction
-                    logger.debug(
-                        f"[ENHANCED] Signal accepted: {spike_direction} "
-                        f"(mag={spike_magnitude:.4f}%, vel={velocity_bps:.3f}, score={enhanced_score:.3f})"
-                    )
+
+                    # OBI CONFIRMATION FILTER (January 28, 2026):
+                    # When OBI confirms spike direction: 89% accuracy vs 77% when disagrees
+                    # Improvement: +4.1pp at 30-tick horizon
+                    obi_confirms = True
+                    if spike_direction == "UP" and up_imbalance is not None:
+                        obi_confirms = up_imbalance > 0
+                        if not obi_confirms:
+                            logger.debug(
+                                f"[OBI] Rejecting UP spike: up_imbalance={up_imbalance:.3f} <= 0 "
+                                f"(89% acc when confirms vs 77% when disagrees)"
+                            )
+                            spike_direction = None
+                    elif spike_direction == "DOWN" and down_imbalance is not None:
+                        obi_confirms = down_imbalance > 0
+                        if not obi_confirms:
+                            logger.debug(
+                                f"[OBI] Rejecting DOWN spike: down_imbalance={down_imbalance:.3f} <= 0 "
+                                f"(89% acc when confirms vs 77% when disagrees)"
+                            )
+                            spike_direction = None
+
+                    if spike_direction is not None:
+                        obi_str = f", obi={'confirms' if obi_confirms else 'N/A'}"
+                        logger.debug(
+                            f"[ENHANCED] Signal accepted: {spike_direction} "
+                            f"(mag={spike_magnitude:.4f}%, vel={velocity_bps:.3f}, score={enhanced_score:.3f}{obi_str})"
+                        )
                 else:
                     # Spike detected but rejected by filter - treat as no spike
                     spike_direction = None

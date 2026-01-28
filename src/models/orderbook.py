@@ -138,6 +138,31 @@ class Orderbook:
             return None
         return (self.best_bid + self.best_ask) / 2
 
+    def compute_imbalance(self, levels: int = 5) -> float:
+        """
+        Compute orderbook imbalance from top N levels.
+
+        Imbalance = (bid_depth - ask_depth) / (bid_depth + ask_depth)
+        Range: -1 (all asks) to +1 (all bids)
+
+        Positive imbalance = more buying pressure = price likely to rise
+        Negative imbalance = more selling pressure = price likely to fall
+
+        Args:
+            levels: Number of price levels to include (default 5)
+
+        Returns:
+            Imbalance value between -1 and 1, or 0 if no depth
+        """
+        bid_depth = sum(o.size for o in self.bids[:levels])
+        ask_depth = sum(o.size for o in self.asks[:levels])
+        total = bid_depth + ask_depth
+
+        if total == 0:
+            return 0.0
+
+        return (bid_depth - ask_depth) / total
+
     def depth_at_price(self, price: float, side: str = "ask") -> float:
         """
         Get total size available at or better than a price.
