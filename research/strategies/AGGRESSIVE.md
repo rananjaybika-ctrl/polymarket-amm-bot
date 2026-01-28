@@ -1,7 +1,7 @@
 # AGGRESSIVE Strategy (Path 1)
 
-**Status:** VALIDATED - TIME120s_SKIP Config Deployed
-**Last Updated:** January 27, 2026
+**Status:** VALIDATED - TIME120s_SKIP + OBI Filter
+**Last Updated:** January 28, 2026
 
 ---
 
@@ -11,7 +11,7 @@
 
 ---
 
-## Configuration (Canonical) - TIME120s_SKIP
+## Configuration (Canonical) - TIME120s_SKIP + OBI
 
 ```python
 AGGRESSIVE = TradingConfig(
@@ -28,7 +28,12 @@ AGGRESSIVE = TradingConfig(
     z_hi=1.5,                       # Z-zone upper bound (skip z > 1.5)
     skip_high_entry=True,           # Skip entries >= $0.90 (unhedgeable)
     high_entry_threshold=0.90,      # Turkey problem cutoff
+    use_obi_filter=True,            # NEW: Skip if OBI disagrees with spike (Jan 28)
 )
+
+# TESTING CONFIG (10 shares):
+# high_entry_threshold=0.80 (lower because 10sh * $0.10 = $1.00 min order)
+# base_size=10
 ```
 
 ### Parameter Summary
@@ -44,6 +49,7 @@ AGGRESSIVE = TradingConfig(
 | Z-Zone | 0 < z < 1.5 | Skip very low and high volatility |
 | Skip High Entry | **>= $0.90** | Cannot hedge (Polymarket $1 min) |
 | Hedge | 100% full | Hedge on loser side |
+| **OBI Filter** | **ON** | +4.1pp accuracy when orderbook confirms spike (Jan 28) |
 
 ---
 
@@ -85,8 +91,9 @@ AGGRESSIVE = TradingConfig(
 ### Entry Logic
 1. Detect BTC price spike using OU threshold (adaptive sigmoid)
 2. Check z-score is in range (0 < z < 1.5)
-3. Enter winner side at best ask (aggressive entry)
-4. Place hedge order on loser side at calculated bid
+3. **Check OBI confirms spike direction** (Jan 28: +4.1pp accuracy)
+4. Enter winner side at best ask (aggressive entry)
+5. Place hedge order on loser side at calculated bid
 
 ### Exit Logic
 1. **Passive fill**: Hedge bid gets hit -> exit with profit
@@ -142,6 +149,64 @@ if skip_high_entry and winner_ask >= 0.90:
 3. **Time-stop** lets winning trades ride while cutting losers
 4. **Z-zone filter** (0 < z < 1.5) avoids extreme volatility noise
 5. **Full hedge** limits downside to spread cost
+6. **OBI confirmation** (Jan 28): +4.1pp accuracy when orderbook confirms spike
+
+---
+
+## OBI (Orderbook Imbalance) Filter
+
+**Added:** January 28, 2026
+**Analysis:** `research/analyze_obi_alpha.py`
+**Data:** 11.5 hours depth data (Jan 28, 239 spikes)
+
+### What is OBI?
+
+```
+OBI = (bid_depth - ask_depth) / (bid_depth + ask_depth)
+```
+
+- **Positive OBI** = more bids = buying pressure = price likely to rise
+- **Negative OBI** = more asks = selling pressure = price likely to fall
+
+### How OBI Improves AGGRESSIVE
+
+OBI answers: "Do other traders agree with our spike signal?"
+
+| Filter | 30-tick Accuracy | Count | Interpretation |
+|--------|------------------|-------|----------------|
+| All spikes | 84.9% | 239 | Baseline |
+| **OBI confirms** | **89.0%** | 155 | +4.1pp improvement |
+| OBI disagrees | 77.4% | 84 | Worse than baseline |
+
+### Implementation
+
+```python
+# In EnhancedSpikeStrategy.get_quotes():
+if spike_direction == "UP" and up_imbalance is not None:
+    if up_imbalance <= 0:
+        spike_direction = None  # OBI disagrees, skip entry
+elif spike_direction == "DOWN" and down_imbalance is not None:
+    if down_imbalance <= 0:
+        spike_direction = None  # OBI disagrees, skip entry
+```
+
+### Trade-off
+
+| Metric | Without OBI | With OBI |
+|--------|-------------|----------|
+| Accuracy | 84.9% | 89.0% |
+| Trade count | 100% | ~65% |
+| Net effect | More trades, lower accuracy | Fewer trades, higher accuracy |
+
+### OBI Alone is Useless
+
+OBI as standalone signal has **negative edge** (-5.6pp at 100 ticks). Same pattern as velocity: useless alone, powerful as spike confirmation filter.
+
+| Signal Type | Edge |
+|-------------|------|
+| OBI alone | -5.6pp (worse than random) |
+| Spike alone | +34.9pp |
+| **Spike + OBI confirms** | **+39.0pp** |
 
 ---
 
@@ -202,8 +267,10 @@ if elapsed_seconds >= 120.0:  # Optimized from 180s
 | `research/validate_oos4_all_paths.py` | OOS validation script |
 | `research/volatility_filter_analysis.py` | Core backtest engine |
 | `research/TRADING_CONFIGS.py` | Config definitions (Python) |
+| `research/analyze_obi_alpha.py` | OBI analysis script (Jan 28) |
 | `src/services/volatility_tracker.py` | LiveZScoreTracker |
-| `src/strategies/enhanced_spike.py` | Live trading strategy |
+| `src/strategies/enhanced_spike.py` | Live trading strategy (includes OBI filter) |
+| `src/models/orderbook.py` | Orderbook with compute_imbalance() |
 
 ---
 
