@@ -82,14 +82,15 @@ EWMA_SLOW_SPAN = 300  # ~5 seconds
 # =============================================================================
 
 class StrategyMode(Enum):
-    """Strategy mode determines quoting behavior."""
+    """Strategy mode determines quoting behavior.
+
+    Phase 2 Note: Velocity modes removed - velocity signal has only 2.5%
+    autocorrelation at 15s (basically useless). DIRECTIONAL_EWMA removed
+    as it was identical to ASYMMETRIC_EWMA.
+    """
     PURE_SPREAD = "pure_spread"           # Quote both sides, merge pairs
-    VELOCITY_FILTERED = "velocity_filtered"  # Quote both when |vel| low
-    ASYMMETRIC_VELOCITY = "asymmetric_velocity"  # Quote winning side (velocity)
-    ASYMMETRIC_EWMA = "asymmetric_ewma"     # Quote winning side (z-score)
-    DIRECTIONAL_VELOCITY = "directional_velocity"  # Carry inventory (velocity)
-    DIRECTIONAL_EWMA = "directional_ewma"   # Carry inventory (z-score)
-    COMBINED_EWMA_VELOCITY = "combined_ewma_velocity"  # Both signals must agree (Phase 2)
+    VELOCITY_FILTERED = "velocity_filtered"  # Quote both when |vel| low (legacy)
+    ASYMMETRIC_EWMA = "asymmetric_ewma"     # Quote winning side (z-score) - PRIMARY
 
 
 class OrderPullReason(Enum):
@@ -106,7 +107,14 @@ class OrderPullReason(Enum):
 
 @dataclass
 class ASConfig:
-    """Configuration for AS strategy backtest."""
+    """Configuration for AS strategy backtest.
+
+    Phase 2 additions:
+    - Polarization filter: Only trade polarized markets (<X or >1-X)
+    - Time window filter: Only enter when time_remaining in [min, max]
+    - Extended EWMA spans: Up to 5400 (90s)
+    - Dynamic spread: Signal-strength-based spread adjustment
+    """
     # Core AS parameters
     gamma: float = 0.1          # Risk aversion (higher = more conservative)
     k: float = 1.0              # Signal skew multiplier
@@ -115,21 +123,40 @@ class ASConfig:
     max_inventory: int = 50     # Max inventory per side
 
     # Strategy mode
-    mode: StrategyMode = StrategyMode.DIRECTIONAL_VELOCITY
+    mode: StrategyMode = StrategyMode.ASYMMETRIC_EWMA
 
-    # Signal thresholds
+    # Signal thresholds (legacy velocity kept for backwards compat)
     min_velocity: float = 0.10      # Min |velocity| for directional signal
     velocity_filter_threshold: float = 0.20  # Max |velocity| for pure spread
-    z_threshold: float = 1.0        # Z-score threshold for asymmetric/directional
+    z_threshold: float = 1.0        # Z-score threshold for asymmetric
 
-    # EWMA parameters (Phase 2)
-    ewma_slow_span: int = 300       # EWMA slow span (ticks at 60Hz, 300=5s)
+    # EWMA parameters (Phase 2 - extended spans)
+    ewma_slow_span: int = 300       # EWMA slow span (ticks at 60Hz)
+                                    # Options: 300 (5s), 600 (10s), 900 (15s),
+                                    # 1800 (30s), 3600 (60s), 5400 (90s)
 
     # Order management
     spread_widening_k: float = 0.0  # Spread widening factor for |velocity|
     max_order_age_ms: int = 5000    # Pull if unfilled after this time
     max_adverse_move: float = 0.03  # Pull if price moved against us by this %
-    disable_pulling: bool = False   # Disable order pulling entirely (Phase 2)
+    disable_pulling: bool = False   # Disable order pulling entirely
+
+    # Phase 2: Polarization filter (CRITICAL - 87% accuracy discovery)
+    # Only trade if market price < threshold or > (1-threshold)
+    # E.g., threshold=0.25 means only trade when price < 0.25 or > 0.75
+    polarization_threshold: float = 0.30
+    enable_polarization_filter: bool = False  # Default off for backwards compat
+
+    # Phase 2: Time window filter (80% accuracy at 400-500s)
+    # Only enter if time_remaining in [min_secs, max_secs]
+    # 0 = disabled
+    entry_window_min_secs: int = 0    # Min time remaining to enter (0=disabled)
+    entry_window_max_secs: int = 900  # Max time remaining to enter (0=disabled)
+
+    # Phase 2: Dynamic spread based on signal strength
+    enable_dynamic_spread: bool = False
+    # When enabled: weak signal (|z| < z_threshold) -> spread * 1.5
+    #               strong signal (|z| > 2*z_threshold) -> spread * 0.75
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -145,6 +172,11 @@ class ASConfig:
             'max_order_age_ms': self.max_order_age_ms,
             'max_adverse_move': self.max_adverse_move,
             'disable_pulling': self.disable_pulling,
+            'polarization_threshold': self.polarization_threshold,
+            'enable_polarization_filter': self.enable_polarization_filter,
+            'entry_window_min_secs': self.entry_window_min_secs,
+            'entry_window_max_secs': self.entry_window_max_secs,
+            'enable_dynamic_spread': self.enable_dynamic_spread,
         }
 
 
@@ -433,6 +465,9 @@ def should_quote_sides(
     Returns: (quote_up_bid, quote_down_bid)
     - quote_up_bid: Should we place a bid for UP? (buying UP)
     - quote_down_bid: Should we place a bid for DOWN? (buying DOWN)
+
+    Phase 2 Note: Velocity modes removed (2.5% autocorrelation = useless).
+    Primary mode is ASYMMETRIC_EWMA with z-score threshold.
     """
     mode = config.mode
 
@@ -443,57 +478,20 @@ def should_quote_sides(
             return (False, False)
         return (True, True)
 
-    # Profile 2: Velocity-Filtered Spread - only when low velocity
+    # Profile 2: Velocity-Filtered Spread - only when low velocity (legacy)
     if mode == StrategyMode.VELOCITY_FILTERED:
         if abs(velocity_bps) <= config.velocity_filter_threshold:
             return (True, True)
         return (False, False)
 
-    # Profile 3: Asymmetric Velocity - only quote predicted winner
-    if mode == StrategyMode.ASYMMETRIC_VELOCITY:
-        if velocity_bps >= config.min_velocity:
-            return (True, False)  # Velocity up -> quote UP bid only
-        elif velocity_bps <= -config.min_velocity:
-            return (False, True)  # Velocity down -> quote DOWN bid only
-        return (False, False)  # No clear signal
-
-    # Profile 4: Asymmetric EWMA - only quote predicted winner by z-score
+    # Profile 4/12/13/14: Asymmetric EWMA - PRIMARY MODE
+    # Only quote predicted winner by z-score
     if mode == StrategyMode.ASYMMETRIC_EWMA:
         if zscore >= config.z_threshold:
             return (True, False)  # Price above mean -> UP winning
         elif zscore <= -config.z_threshold:
             return (False, True)  # Price below mean -> DOWN winning
         return (False, False)
-
-    # Profile 5: Directional Velocity - build inventory in predicted direction
-    if mode == StrategyMode.DIRECTIONAL_VELOCITY:
-        if velocity_bps >= config.min_velocity:
-            return (True, False)  # Buy UP
-        elif velocity_bps <= -config.min_velocity:
-            return (False, True)  # Buy DOWN
-        return (False, False)
-
-    # Profile 6: Directional EWMA
-    if mode == StrategyMode.DIRECTIONAL_EWMA:
-        if zscore >= config.z_threshold:
-            return (True, False)
-        elif zscore <= -config.z_threshold:
-            return (False, True)
-        return (False, False)
-
-    # Profile 8 (Phase 2): Combined EWMA + Velocity - both signals must agree
-    if mode == StrategyMode.COMBINED_EWMA_VELOCITY:
-        ewma_up = zscore >= config.z_threshold
-        vel_up = velocity_bps >= config.min_velocity
-        if ewma_up and vel_up:
-            return (True, False)  # Both agree UP
-
-        ewma_down = zscore <= -config.z_threshold
-        vel_down = velocity_bps <= -config.min_velocity
-        if ewma_down and vel_down:
-            return (False, True)  # Both agree DOWN
-
-        return (False, False)  # No agreement
 
     return (False, False)
 
@@ -510,6 +508,8 @@ def compute_as_quotes(
     Compute AS bid prices for UP and DOWN.
 
     Returns (up_bid, down_bid).
+
+    Phase 2: Added dynamic spread based on signal strength.
     """
     # Normalize time to [0, 1] where 1 = 15 minutes
     T = max(time_remaining / 900.0, 0.01)
@@ -520,21 +520,29 @@ def compute_as_quotes(
     # Inventory adjustment to reservation price
     inv_adjustment = inventory * config.gamma * (sigma ** 2) * T
 
-    # Signal skew
-    if config.mode in [StrategyMode.DIRECTIONAL_EWMA, StrategyMode.ASYMMETRIC_EWMA]:
-        signal_skew = config.k * zscore * 0.01 * T
-    else:
-        signal_skew = config.k * (velocity_bps / 10000.0) * T
+    # Signal skew (EWMA-based only now)
+    signal_skew = config.k * zscore * 0.01 * T
 
     # Reservation price for UP
     reservation = up_mid - inv_adjustment + signal_skew
     reservation = max(0.02, min(0.98, reservation))
 
-    # Dynamic spread
+    # Spread calculation
     base = config.base_spread
+
+    # Phase 2: Dynamic spread based on signal strength
+    if config.enable_dynamic_spread:
+        signal_strength = abs(zscore) / config.z_threshold if config.z_threshold > 0 else 1.0
+        if signal_strength < 1.0:
+            # Weak signal = wider spread (more protection)
+            base = base * 1.5
+        elif signal_strength > 2.0:
+            # Strong signal = tighter spread (more aggressive)
+            base = base * 0.75
+
     # Spread widens with time pressure
     time_factor = 1 + 0.5 * (1 - T)
-    # Spread widens with velocity (protection)
+    # Spread widens with velocity (protection, legacy)
     vel_factor = 1 + config.spread_widening_k * abs(velocity_bps) / 100
     spread = base * time_factor * vel_factor
 
@@ -556,8 +564,10 @@ def should_pull_order(
     Check if a pending order should be pulled.
 
     Returns (should_pull, reason).
+
+    Phase 2: Simplified - velocity mode checks removed.
     """
-    # Phase 2: Disable pulling entirely if configured
+    # Disable pulling entirely if configured
     if config.disable_pulling:
         return (False, None)
 
@@ -566,21 +576,14 @@ def should_pull_order(
     if age_ms > config.max_order_age_ms:
         return (True, OrderPullReason.TIME_EXPIRED)
 
-    # Condition 2: Velocity direction change (for velocity-based modes)
-    if config.mode in [StrategyMode.ASYMMETRIC_VELOCITY, StrategyMode.DIRECTIONAL_VELOCITY]:
-        if order.velocity_at_place != 0:
-            if np.sign(current_velocity) != np.sign(order.velocity_at_place):
-                if abs(current_velocity) > config.min_velocity:
-                    return (True, OrderPullReason.VELOCITY_FLIP)
-
-    # Condition 3: Z-score direction change (for EWMA-based modes)
-    if config.mode in [StrategyMode.ASYMMETRIC_EWMA, StrategyMode.DIRECTIONAL_EWMA]:
+    # Condition 2: Z-score direction change (for EWMA-based modes)
+    if config.mode == StrategyMode.ASYMMETRIC_EWMA:
         if order.zscore_at_place != 0:
             if np.sign(current_zscore) != np.sign(order.zscore_at_place):
                 if abs(current_zscore) > config.z_threshold:
                     return (True, OrderPullReason.ZSCORE_FLIP)
 
-    # Condition 4: Price moved against us
+    # Condition 3: Price moved against us
     if order.side == 'UP':
         # If UP price dropped significantly, our bid is now too high
         price_move = (current_mid - order.price) / order.price if order.price > 0 else 0
@@ -756,6 +759,8 @@ def simulate_market(
 ) -> MarketResult:
     """
     Simulate AS market making on a single market.
+
+    Phase 2: Added polarization filter and time-window filter.
     """
     slug = mdf['market_slug'].iloc[0]
     mdf = mdf.sort_values('timestamp_ms').reset_index(drop=True)
@@ -796,6 +801,10 @@ def simulate_market(
 
     obs_idx = 0
 
+    # Phase 2: Track filter bypasses for debugging
+    skipped_time_window = 0
+    skipped_polarization = 0
+
     for btc_idx in range(len(btc_ts_arr)):
         btc_ts = btc_ts_arr[btc_idx]
         velocity_bps = btc_vel_arr[btc_idx]
@@ -818,7 +827,32 @@ def simulate_market(
         up_mid = (up_bid_market + up_ask_market) / 2
         down_mid = 1 - up_mid
 
-        # Check for fills on pending orders
+        # =====================================================================
+        # Phase 2: Entry Filters (only apply to NEW order placement, not fills)
+        # =====================================================================
+        # These flags determine if we can place NEW orders this tick
+        can_place_new_orders = True
+
+        # Phase 2: Time-window filter
+        # Only place new orders if time_remaining in [min, max]
+        if config.entry_window_min_secs > 0 or config.entry_window_max_secs < 900:
+            if time_rem < config.entry_window_min_secs:
+                can_place_new_orders = False
+                skipped_time_window += 1
+            elif config.entry_window_max_secs > 0 and time_rem > config.entry_window_max_secs:
+                can_place_new_orders = False
+                skipped_time_window += 1
+
+        # Phase 2: Polarization filter
+        # Only place new orders if market is polarized (< threshold or > 1-threshold)
+        if config.enable_polarization_filter:
+            pol_thresh = config.polarization_threshold
+            if pol_thresh < up_mid < (1 - pol_thresh):
+                # Market is in mid-range, skip new orders
+                can_place_new_orders = False
+                skipped_polarization += 1
+
+        # Check for fills on pending orders (ALWAYS process, regardless of filters)
         if pending_up is not None:
             # Check if should pull
             should_pull, reason = should_pull_order(
@@ -915,24 +949,29 @@ def simulate_market(
             up_mid, velocity_bps, zscore, time_rem, inventory.net_inventory, config
         )
 
-        # Place new orders if we should quote and don't have pending
-        if quote_up and pending_up is None and inventory.up_shares < config.max_inventory:
-            pending_up = PendingOrder(
-                timestamp_ms=btc_ts,
-                side='UP',
-                price=our_up_bid,
-                velocity_at_place=velocity_bps,
-                zscore_at_place=zscore,
-            )
+        # Place new orders if:
+        # 1. Entry filters allow (time window + polarization)
+        # 2. Strategy says to quote this side
+        # 3. No pending order on this side
+        # 4. Inventory limits allow
+        if can_place_new_orders:
+            if quote_up and pending_up is None and inventory.up_shares < config.max_inventory:
+                pending_up = PendingOrder(
+                    timestamp_ms=btc_ts,
+                    side='UP',
+                    price=our_up_bid,
+                    velocity_at_place=velocity_bps,
+                    zscore_at_place=zscore,
+                )
 
-        if quote_down and pending_down is None and inventory.down_shares < config.max_inventory:
-            pending_down = PendingOrder(
-                timestamp_ms=btc_ts,
-                side='DOWN',
-                price=our_down_bid,
-                velocity_at_place=velocity_bps,
-                zscore_at_place=zscore,
-            )
+            if quote_down and pending_down is None and inventory.down_shares < config.max_inventory:
+                pending_down = PendingOrder(
+                    timestamp_ms=btc_ts,
+                    side='DOWN',
+                    price=our_down_bid,
+                    velocity_at_place=velocity_bps,
+                    zscore_at_place=zscore,
+                )
 
     # Calculate unrealized PnL from final inventory
     settle_up = 1.0 if resolution == 'UP' else 0.0
@@ -1094,13 +1133,13 @@ def forensic_analysis(
     print("FORENSIC ANALYSIS - Investigating Profitable Markets")
     print("=" * 80)
 
-    # Run with default config to find profitable markets
+    # Run with V1 best config to find profitable markets
     config = ASConfig(
-        mode=StrategyMode.DIRECTIONAL_VELOCITY,
-        gamma=0.1,
+        mode=StrategyMode.ASYMMETRIC_EWMA,
+        gamma=0.2,
         k=1.0,
-        base_spread=0.02,
-        min_velocity=0.10,
+        base_spread=0.01,
+        z_threshold=1.5,
     )
 
     result, market_results = run_backtest(btc_df, obs_df, config, hours, show_progress=True)
@@ -1167,24 +1206,25 @@ def generate_grid_configs(profile: str = "all") -> List[ASConfig]:
     """
     Generate configs for grid search based on profile.
 
-    Profiles (v1):
-    1. Pure Spread Capture (36)
-    2. Velocity-Filtered Spread (9)
-    3. Asymmetric Velocity (27)
-    4. Asymmetric EWMA (27)
-    5. Directional Velocity (48)
-    6. Directional EWMA (48)
+    Phase 2 REDESIGN - Velocity modes removed (2.5% autocorrelation = useless)
 
-    Profiles (Phase 2):
-    7. Extended EWMA Asymmetric (~320) - z-threshold, EWMA span, pulling variations
-    8. Combined Signal Mode (~80) - EWMA + velocity agreement
+    Profiles (Active):
+    1. Pure Spread Capture (36) - legacy
+    2. Velocity-Filtered Spread (9) - legacy
+    4. Asymmetric EWMA (27) - primary V1 mode
+    7. Extended EWMA Asymmetric (~320) - z-threshold, EWMA span variations
 
-    Total v1: ~195 configs
-    Total Phase 2: ~400 configs
+    Profiles (NEW - Phase 2 with filters):
+    12. Ultra-High Accuracy (~288) - tight polarization + time window, 80-87% expected
+    13. Balanced Opportunity (~324) - good coverage + moderate accuracy, 75-82% expected
+    14. High Volume (~144) - loose filters, most trades, 70-76% expected
+
+    REMOVED Profiles (velocity useless):
+    3, 5, 6, 8 - all used velocity signal
     """
     configs = []
 
-    # Profile 1: Pure Spread Capture - 36 configs
+    # Profile 1: Pure Spread Capture - 36 configs (legacy)
     if profile in ["all", "1", "pure_spread"]:
         for base_spread in [0.01, 0.02, 0.03]:
             for spread_widening_k in [0, 0.5, 1.0]:
@@ -1196,10 +1236,10 @@ def generate_grid_configs(profile: str = "all") -> List[ASConfig]:
                             spread_widening_k=spread_widening_k,
                             max_order_age_ms=max_order_age_ms,
                             max_adverse_move=max_adverse_move,
-                            velocity_filter_threshold=0.5,  # High to allow most quoting
+                            velocity_filter_threshold=0.5,
                         ))
 
-    # Profile 2: Velocity-Filtered Spread - 9 configs
+    # Profile 2: Velocity-Filtered Spread - 9 configs (legacy)
     if profile in ["all", "2", "velocity_filtered"]:
         for base_spread in [0.01, 0.02, 0.03]:
             for velocity_filter in [0.10, 0.20, 0.50]:
@@ -1209,19 +1249,7 @@ def generate_grid_configs(profile: str = "all") -> List[ASConfig]:
                     velocity_filter_threshold=velocity_filter,
                 ))
 
-    # Profile 3: Asymmetric Velocity - 27 configs
-    if profile in ["all", "3", "asymmetric_velocity"]:
-        for base_spread in [0.01, 0.02, 0.03]:
-            for min_velocity in [0.05, 0.10, 0.20]:
-                for gamma in [0.05, 0.1, 0.2]:
-                    configs.append(ASConfig(
-                        mode=StrategyMode.ASYMMETRIC_VELOCITY,
-                        base_spread=base_spread,
-                        min_velocity=min_velocity,
-                        gamma=gamma,
-                    ))
-
-    # Profile 4: Asymmetric EWMA - 27 configs
+    # Profile 4: Asymmetric EWMA - 27 configs (primary V1 mode)
     if profile in ["all", "4", "asymmetric_ewma"]:
         for base_spread in [0.01, 0.02, 0.03]:
             for z_threshold in [0.5, 1.0, 1.5]:
@@ -1233,86 +1261,127 @@ def generate_grid_configs(profile: str = "all") -> List[ASConfig]:
                         gamma=gamma,
                     ))
 
-    # Profile 5: Directional Velocity - 48 configs
-    if profile in ["all", "5", "directional_velocity"]:
-        for gamma in [0.05, 0.1, 0.2]:
-            for k in [0.5, 1.0, 2.0, 5.0]:
-                for base_spread in [0.01, 0.02]:
-                    for min_velocity in [0.05, 0.15]:
-                        configs.append(ASConfig(
-                            mode=StrategyMode.DIRECTIONAL_VELOCITY,
-                            gamma=gamma,
-                            k=k,
-                            base_spread=base_spread,
-                            min_velocity=min_velocity,
-                        ))
-
-    # Profile 6: Directional EWMA - 48 configs
-    if profile in ["all", "6", "directional_ewma"]:
-        for gamma in [0.05, 0.1, 0.2]:
-            for k in [0.5, 1.0, 2.0, 5.0]:
-                for base_spread in [0.01, 0.02]:
-                    for z_threshold in [0.5, 1.0]:
-                        configs.append(ASConfig(
-                            mode=StrategyMode.DIRECTIONAL_EWMA,
-                            gamma=gamma,
-                            k=k,
-                            base_spread=base_spread,
-                            z_threshold=z_threshold,
-                        ))
-
     # =========================================================================
-    # PHASE 2 PROFILES
+    # PHASE 2 PROFILES - Extended EWMA with filters
     # =========================================================================
 
-    # Profile 7: Extended EWMA Asymmetric - ~320 configs
-    # Focused on v1 winners: asymmetric_ewma with extended z-threshold,
-    # EWMA span variations, and pulling parameter variations
+    # Profile 7: Extended EWMA Asymmetric - ~500 configs
+    # Extended spans (up to 90s), K tuning (0.75, 1.0, 1.25)
     if profile in ["7", "extended_asymmetric"]:
-        for ewma_span in [300, 600, 900, 1800]:  # 5s, 10s, 15s, 30s at 60Hz
-            for z_threshold in [1.5, 2.0, 2.5, 3.0, 4.0]:  # Extended from v1's max of 1.5
-                for max_order_age_ms in [5000, 10000, 15000, 30000]:  # 5s to 30s
-                    for gamma in [0.1, 0.2]:  # Focus on v1 winners
+        for ewma_span in [300, 600, 900, 1800, 3600, 5400]:  # Up to 90s
+            for z_threshold in [1.5, 2.0, 2.5, 3.0]:
+                for gamma in [0.1, 0.2]:
+                    for base_spread in [0.01, 0.02]:
+                        for k in [0.75, 1.0, 1.25]:  # K tuning
+                            configs.append(ASConfig(
+                                mode=StrategyMode.ASYMMETRIC_EWMA,
+                                ewma_slow_span=ewma_span,
+                                z_threshold=z_threshold,
+                                gamma=gamma,
+                                base_spread=base_spread,
+                                k=k,
+                            ))
+
+    # Profile 9: Time-Windowed Entry - ~100 configs
+    if profile in ["9", "time_windowed"]:
+        for ewma_span in [300, 600, 1800, 3600]:
+            for z_threshold in [1.5, 2.0, 2.5]:
+                for window_min, window_max in [(300, 600), (200, 500), (400, 700)]:
+                    for gamma in [0.1, 0.2]:
                         for base_spread in [0.01, 0.02]:
                             configs.append(ASConfig(
                                 mode=StrategyMode.ASYMMETRIC_EWMA,
                                 ewma_slow_span=ewma_span,
                                 z_threshold=z_threshold,
-                                max_order_age_ms=max_order_age_ms,
                                 gamma=gamma,
                                 base_spread=base_spread,
-                                disable_pulling=False,
+                                entry_window_min_secs=window_min,
+                                entry_window_max_secs=window_max,
                             ))
 
-        # Also test disable_pulling=True for a subset (z=2.0, 3.0 only)
-        for ewma_span in [300, 600, 900]:
-            for z_threshold in [2.0, 3.0]:
+    # Profile 10: Dynamic Spread Test - ~50 configs
+    if profile in ["10", "dynamic_spread"]:
+        for ewma_span in [300, 600, 1800]:
+            for z_threshold in [1.5, 2.0, 2.5]:
                 for gamma in [0.1, 0.2]:
-                    for base_spread in [0.01, 0.02]:
+                    for base_spread in [0.01, 0.015, 0.02]:
                         configs.append(ASConfig(
                             mode=StrategyMode.ASYMMETRIC_EWMA,
                             ewma_slow_span=ewma_span,
                             z_threshold=z_threshold,
                             gamma=gamma,
                             base_spread=base_spread,
-                            disable_pulling=True,
+                            enable_dynamic_spread=True,
                         ))
 
-    # Profile 8: Combined Signal Mode - ~80 configs
-    # Both EWMA and velocity must agree for higher conviction
-    if profile in ["8", "combined"]:
-        for ewma_span in [300, 600, 900]:  # 5s, 10s, 15s
-            for z_threshold in [1.0, 1.5, 2.0]:
-                for min_velocity in [0.05, 0.10]:
-                    for gamma in [0.1, 0.2]:
-                        for base_spread in [0.01, 0.02]:
+    # =========================================================================
+    # Profile 12: Ultra-High Accuracy - ~288 configs (PRIORITY)
+    # Based on 87.4% accuracy finding: tight polarization + time window
+    # Expected accuracy: 80-87%
+    # =========================================================================
+    if profile in ["12", "ultra_high_accuracy"]:
+        for ewma_span in [3600, 5400]:  # 60s, 90s - best signal persistence
+            for z_threshold in [1.25, 1.5, 1.75]:
+                for window_min, window_max in [(400, 500), (450, 500), (350, 500)]:
+                    for pol_threshold in [0.20, 0.25, 0.30]:
+                        for gamma in [0.1, 0.2]:
+                            for spread in [0.01, 0.015]:
+                                configs.append(ASConfig(
+                                    mode=StrategyMode.ASYMMETRIC_EWMA,
+                                    ewma_slow_span=ewma_span,
+                                    z_threshold=z_threshold,
+                                    gamma=gamma,
+                                    base_spread=spread,
+                                    entry_window_min_secs=window_min,
+                                    entry_window_max_secs=window_max,
+                                    polarization_threshold=pol_threshold,
+                                    enable_polarization_filter=True,
+                                ))
+
+    # =========================================================================
+    # Profile 13: Balanced Opportunity - ~324 configs
+    # 82.7% accuracy, 82% market coverage
+    # Expected accuracy: 75-82%
+    # =========================================================================
+    if profile in ["13", "balanced"]:
+        for ewma_span in [1800, 3600, 5400]:
+            for z_threshold in [1.25, 1.5, 2.0]:
+                for window_min, window_max in [(300, 600), (350, 550), (400, 500)]:
+                    for pol_threshold in [0.25, 0.30, 0.35]:
+                        for gamma in [0.1, 0.2]:
                             configs.append(ASConfig(
-                                mode=StrategyMode.COMBINED_EWMA_VELOCITY,
+                                mode=StrategyMode.ASYMMETRIC_EWMA,
                                 ewma_slow_span=ewma_span,
                                 z_threshold=z_threshold,
-                                min_velocity=min_velocity,
                                 gamma=gamma,
-                                base_spread=base_spread,
+                                base_spread=0.01,
+                                entry_window_min_secs=window_min,
+                                entry_window_max_secs=window_max,
+                                polarization_threshold=pol_threshold,
+                                enable_polarization_filter=True,
+                            ))
+
+    # =========================================================================
+    # Profile 14: High Volume - ~144 configs
+    # More trades, slightly lower accuracy
+    # Expected accuracy: 70-76%
+    # =========================================================================
+    if profile in ["14", "high_volume"]:
+        for ewma_span in [1800, 3600]:
+            for z_threshold in [1.0, 1.25, 1.5]:
+                for window_min, window_max in [(200, 600), (300, 600)]:
+                    for pol_threshold in [0.30, 0.35, 0.40]:
+                        for gamma in [0.1, 0.2]:
+                            configs.append(ASConfig(
+                                mode=StrategyMode.ASYMMETRIC_EWMA,
+                                ewma_slow_span=ewma_span,
+                                z_threshold=z_threshold,
+                                gamma=gamma,
+                                base_spread=0.01,
+                                entry_window_min_secs=window_min,
+                                entry_window_max_secs=window_max,
+                                polarization_threshold=pol_threshold,
+                                enable_polarization_filter=True,
                             ))
 
     return configs
@@ -1415,16 +1484,17 @@ def print_grid_summary(df: pd.DataFrame, top_n: int = 20):
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="AS Market Making Backtest v2")
+    parser = argparse.ArgumentParser(description="AS Market Making Backtest v2 (Phase 2)")
     parser.add_argument("--forensic", action="store_true", help="Run forensic analysis")
     parser.add_argument("--grid-search", action="store_true", help="Run grid search")
     parser.add_argument("--profile", default="all",
-                        help="Grid profile: all, 1-6, 7 (extended_asymmetric), 8 (combined)")
+                        help="Grid profile: all, 1, 2, 4, 7, 9, 10, 12 (ultra_high_accuracy), "
+                             "13 (balanced), 14 (high_volume)")
     parser.add_argument("--output", default="research/as_backtest_results.csv")
     parser.add_argument("--data-split", default="training", choices=["training", "validation"])
 
     # Single run params
-    parser.add_argument("--mode", default="directional_velocity",
+    parser.add_argument("--mode", default="asymmetric_ewma",
                         choices=[m.value for m in StrategyMode])
     parser.add_argument("--gamma", type=float, default=0.1)
     parser.add_argument("--k", type=float, default=1.0)
@@ -1432,13 +1502,25 @@ def main():
     parser.add_argument("--min-velocity", type=float, default=0.10)
     parser.add_argument("--z-threshold", type=float, default=1.0)
 
-    # Phase 2 params
+    # Phase 2 EWMA params
     parser.add_argument("--ewma-span", type=int, default=300,
-                        help="EWMA slow span in ticks (300=5s, 600=10s, 900=15s, 1800=30s)")
+                        help="EWMA slow span in ticks (300=5s, 600=10s, 1800=30s, 3600=60s, 5400=90s)")
     parser.add_argument("--no-pulling", action="store_true",
                         help="Disable order pulling entirely")
     parser.add_argument("--max-order-age-ms", type=int, default=5000,
                         help="Max order age before pulling (ms)")
+
+    # Phase 2 Filter params (CRITICAL)
+    parser.add_argument("--polarization-threshold", type=float, default=0.30,
+                        help="Polarization filter: only trade if price < X or > (1-X)")
+    parser.add_argument("--enable-polarization", action="store_true",
+                        help="Enable polarization filter")
+    parser.add_argument("--entry-window-min", type=int, default=0,
+                        help="Min time remaining (secs) to place new orders (0=disabled)")
+    parser.add_argument("--entry-window-max", type=int, default=900,
+                        help="Max time remaining (secs) to place new orders (0=disabled)")
+    parser.add_argument("--dynamic-spread", action="store_true",
+                        help="Enable signal-strength-based dynamic spread")
     args = parser.parse_args()
 
     print("=" * 80)
@@ -1468,6 +1550,12 @@ def main():
             ewma_slow_span=args.ewma_span,
             disable_pulling=args.no_pulling,
             max_order_age_ms=args.max_order_age_ms,
+            # Phase 2 filters
+            polarization_threshold=args.polarization_threshold,
+            enable_polarization_filter=args.enable_polarization,
+            entry_window_min_secs=args.entry_window_min,
+            entry_window_max_secs=args.entry_window_max,
+            enable_dynamic_spread=args.dynamic_spread,
         )
 
         print(f"\nConfig: {config.to_dict()}")
