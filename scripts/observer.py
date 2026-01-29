@@ -2,6 +2,21 @@
 """
 Spread Capture Observer - PASSIVE GRID MM Strategy
 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+WARNING: DO NOT RUN THIS SCRIPT DIRECTLY FOR DATA COLLECTION!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+For data collection, use: python scripts/run_data_collection.py --hours N
+
+The run_data_collection.py wrapper runs BOTH:
+1. Observer (Polymarket orderbook at 5Hz)
+2. Binance Price Logger (BTC prices at 60Hz)
+
+Running observer.py alone will NOT capture the 60Hz Binance data needed for
+proper spike detection backtesting. The binance_price in observer is only 5Hz.
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
 Captures REAL market data at sub-second speeds for strategy analysis.
 Simulates PASSIVE GRID MM strategy (proven $95/hr in backtest).
 

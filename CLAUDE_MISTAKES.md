@@ -4,6 +4,20 @@
 
 ---
 
+## CRITICAL MISTAKES - Jan 28, 2026
+
+### OOS6 DATA COLLECTION - USED WRONG SCRIPT
+**What happened:** User asked to restart data collection. I ran `python3 scripts/observer.py` directly instead of `python3 scripts/run_data_collection.py`.
+**Cost:** OOS6 is MISSING the 60Hz Binance data needed for proper spike detection backtesting. The observer only captures 5Hz binance_price, not the 60Hz logger data.
+**Impact:** Cannot run proper grid search or OBI validation on OOS6 data. 35+ hours of data collection partially wasted.
+**FIX:**
+1. ALWAYS use `run_data_collection.py` for data collection - it runs BOTH observer AND Binance logger.
+2. Added prominent warning to `observer.py` docstring: "DO NOT RUN THIS SCRIPT DIRECTLY FOR DATA COLLECTION"
+3. The wrapper is at `scripts/run_data_collection.py --hours N`
+**Source:** Jan 28 19:39 UTC session, command that started PID 499722
+
+---
+
 ## CRITICAL MISTAKES - Jan 27, 2026
 
 ### 1. NO PROGRESS BAR ON LONG-RUNNING SCRIPTS
@@ -222,6 +236,22 @@ Before running ANY backtest or simulation:
 
 ---
 
-**Last updated:** Jan 27, 2026
-**Mistakes documented:** 28
+### 29. TRUSTED PAGINATED API DATA WITHOUT DEDUPLICATION
+**What happened:** Analyzed Gabagool merge frequency using Polymarket activity API. Concluded "only 4/28 markets have merges (14%)" and "Gabagool doesn't merge constantly." User corrected me - Gabagool actually has 252 BTC 15m markets with merges ($1.06M total).
+**Root cause:**
+- API pagination returned duplicate data at different offsets
+- Didn't deduplicate by transaction hash initially
+- Drew conclusions from incomplete data (50K activities all in 42-minute window)
+**Cost:** Wrong analysis, wasted time, had to redo work, user lost trust in findings.
+**FIX:**
+1. ALWAYS deduplicate API results by transaction hash
+2. Check data time range spans expected period
+3. If pagination returns same data repeatedly, investigate before concluding
+4. When user says something contradicts your finding, RE-VERIFY with different query approach
+**Source:** Whale merge analysis, Jan 29, 2026
+
+---
+
+**Last updated:** Jan 29, 2026
+**Mistakes documented:** 29
 **Sources:** CODEBASE_AUDIT_JAN17.md, AWS_7HR_OBSERVER_DEEP_ANALYSIS.md, VOL_FILTER_GRID_SEARCH_FINDINGS_JAN22.md, PLAN_FIX_ENTRY_FILL_JAN19.md, SPREAD_CAPTURE_FIX_PLAN.md
