@@ -37,8 +37,9 @@ logger = logging.getLogger(__name__)
 # CONSTANTS
 # =============================================================================
 
-# Spike detection (optimized for 60Hz Binance data)
-SPIKE_LOOKBACK = 3           # 3 ticks (~50ms at 60Hz)
+# Spike detection - INTENTIONALLY SHORT for latency arb (NOT CANONICAL)
+# Latency arb needs faster reaction than AGGRESSIVE strategy
+SPIKE_LOOKBACK = 3           # 3 ticks (~50ms at 60Hz) - intentionally short for speed
 DEFAULT_SPIKE_THRESHOLD = 0.02  # 0.02% minimum
 SPIKE_HISTORY_SIZE = 50
 

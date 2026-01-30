@@ -41,50 +41,137 @@ This document catalogs 7 directional market making strategies for Polymarket BTC
 - [Cartea & Wang (2019)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3439440) - Alpha signal extension
 - [Guéant-Lehalle-Fernandez-Tapia (2013)](https://arxiv.org/abs/1105.3115) - Closed-form approximation
 
-### Core Idea
-Quote both sides continuously, but SKEW quotes based on directional signal (BTC velocity/spike).
+### Polymarket Reality: Unified Orderbook
 
-### Quote Formula (GLFT)
+**CRITICAL:** Polymarket uses a unified orderbook where:
+- UP_price + DOWN_price ≈ $1.00 (always)
+- No shorting - you can only be LONG UP or LONG DOWN tokens
+- Exit via MERGE: 1 UP + 1 DOWN = $1.00 back (FREE via Builder Relayer)
 
+**Inventory Model:**
 ```
-reservation_price = mid_price - q * gamma * sigma^2 * (T - t)
-bid = reservation_price - spread/2 - skew * q
-ask = reservation_price + spread/2 - skew * q
-
-Where:
-  q = inventory position
-  gamma = risk aversion parameter
-  sigma = volatility estimate
-  T - t = time remaining
-  skew = alpha adjustment based on directional signal
+up_tokens:   tokens you hold (>= 0)
+down_tokens: tokens you hold (>= 0)
+pairs = min(up_tokens, down_tokens)  # Can merge for $1.00 each
+net_exposure = up_tokens - down_tokens  # +ve = bullish, -ve = bearish
 ```
 
-### Polymarket Implementation
+### Core Idea (Adapted for Polymarket)
+
+**Buy-Only Mode:** Only place BIDS, exit via MERGE (not selling).
+
+Goal: Accumulate pairs where `(up_cost + down_cost) < $1.00`, then merge for profit.
+
+Adjust bid aggressiveness based on:
+1. **Inventory balance** - bid more on whichever side you need
+2. **Directional signal** - bid more on predicted winner (using AGGRESSIVE's spike detection)
+
+### Recommended Signal: AGGRESSIVE's Spike Detection
+
+**FINDING:** Continuous signals (velocity, EWMA level) are weak (2.5% autocorrelation).
+Event-based spike detection from AGGRESSIVE achieves 70% directional accuracy.
+
+Use AGGRESSIVE's proven signal:
+```python
+# AGGRESSIVE spike detection (70% accuracy)
+z_score = (btc_price - ewma_slow) / ewma_std  # lookback: 72 ticks (1.2s)
+threshold = ou_sigmoid(z_score)  # adaptive threshold
+
+if z_score > threshold and obi_confirms:
+    spike_direction = "UP"
+elif z_score < -threshold and obi_confirms:
+    spike_direction = "DOWN"
+else:
+    spike_direction = None  # No signal
+```
+
+### Buy-Only Quote Formula
 
 ```python
-# When BTC velocity > 0 (expect UP to win):
-alpha_adjustment = k * velocity_bps * time_remaining_factor
+# Inventory state
+net_exposure = up_tokens - down_tokens
 
-up_bid = mid - spread/2 - alpha_adjustment   # Less aggressive buying UP
-up_ask = mid + spread/2 - alpha_adjustment   # More aggressive selling UP
-down_bid = mid - spread/2 + alpha_adjustment # More aggressive buying DOWN
-down_ask = mid + spread/2 + alpha_adjustment # Less aggressive selling DOWN
+# Time factor: More time = more risk = bigger adjustments
+time_factor = time_remaining / 900  # 900s = 15 min market
+
+# Inventory adjustment (gamma = risk aversion, 0.1-0.2)
+# Pushes bids toward completing pairs
+inventory_adjust = gamma * net_exposure * time_factor
+
+# Signal adjustment (k = signal multiplier, 1.0)
+# Only applied when spike detected
+if spike_direction == "UP":
+    signal_adjust = k * (z_score - threshold) * time_factor
+elif spike_direction == "DOWN":
+    signal_adjust = -k * (abs(z_score) - threshold) * time_factor
+else:
+    signal_adjust = 0
+
+# Base bid (aim for profitable pair cost)
+target_pair_cost = 0.97  # $0.03 profit per pair
+base_bid = target_pair_cost / 2  # $0.485
+
+# Final bids
+up_bid = base_bid - inventory_adjust + signal_adjust
+down_bid = base_bid + inventory_adjust - signal_adjust
+
+# Safety: clamp to not exceed market ask - min_edge
+up_bid = min(up_bid, market_up_ask - 0.01)
+down_bid = min(down_bid, market_down_ask - 0.01)
 ```
 
+### Parameter Explanation
+
+| Parameter | Value | Meaning |
+|-----------|-------|---------|
+| gamma | 0.1-0.2 | Risk aversion. Higher = faster rebalancing toward neutral |
+| k | 1.0 | Signal strength multiplier. Higher = more aggressive on predicted winner |
+| time_factor | remaining/total | More time = more uncertainty = bigger adjustments |
+| z_threshold | 1.5 | From AGGRESSIVE. Only trade signals in z-zone [0, 1.5] |
+
+### Why time_remaining (not time_elapsed)?
+
+`time_factor = time_remaining / 900` because:
+- **More time remaining = more can go wrong** = need bigger safety margin
+- **Less time remaining = closer to resolution** = prices more certain
+- As resolution approaches, inventory risk decreases (outcome becomes clear)
+
+### Profit Mechanisms
+
+1. **Pair Completion:** Buy UP @ $0.48 + DOWN @ $0.44 = $0.92 -> Merge for $1.00 = $0.08 profit
+2. **Directional Carry:** Buy predicted winner, hold to resolution (70% accuracy)
+3. **Merge Arbitrage:** When pair_cost < $1.00, guaranteed profit via merge
+
+### Backtest Results
+
+Best AS config (pure continuous): **$2.84/hr**
+AGGRESSIVE (event-based): **$7.76-17.59/hr**
+
+**CRITICAL UPDATE (Jan 29, 2026):** With TIME STOP + ORDER PULLING:
+- **$18.04/hr** with 220-500s time window + 5000ms pulling + z>1.5 + vel_aligned
+- See `research/findings/AS_TIME_STOP_CRITICAL_FINDING.md` for full analysis
+
+**Key Discovery:** The profit comes from **DIRECTIONAL CARRY** (65.5% fill accuracy, 80.4% unhedged on winners), NOT from pair merges (pair cost $1.031 > $1.00).
+
+**Recommendation:** Use AGGRESSIVE's spike detection as the signal source, with AS-style inventory management for pair completion.
+
 ### Pros
-- Earn spread both sides
-- Inventory balances naturally
-- No crossing spread (no taker fees)
+- Guaranteed exit via merge (no selling required)
+- Inventory naturally balances toward pairs
+- Combines proven 70% accurate signal with MM mechanics
+- No taker fees (limit orders only)
 
 ### Cons
-- Continuous quote management complexity
-- Adverse selection risk
-- Parameter calibration needed (gamma, sigma estimates)
+- Lower signal frequency than pure AGGRESSIVE (more selective)
+- Requires inventory tracking
+- Parameter tuning (gamma, k) affects performance
 
 ### Data Requirements
-- `velocity_bps` - BTC velocity signal
+- BTC price feed (60Hz) for spike detection
 - `time_remaining` - Seconds until market resolution
-- Orderbook state (mid price, spread)
+- Orderbook state (up_bid, up_ask, down_bid, down_ask)
+- OBI (orderbook imbalance) for signal confirmation
+- Inventory state (up_tokens, down_tokens)
 
 ---
 
@@ -447,4 +534,59 @@ When signals conflict:
 
 ---
 
-*Updated: January 28, 2026*
+---
+
+## CRITICAL FINDING: Time Stop + Order Pulling (Jan 29, 2026)
+
+**TIME STOP IS THE KEY TO AS PROFITABILITY**
+
+### Without Time Stop (Profile 15 Results)
+| Entry Window | Hourly Rate | Pair Cost |
+|--------------|-------------|-----------|
+| 300-900s | -$9.92/hr | $1.73 |
+| 400-900s | -$7.35/hr | $1.68 |
+| 500-900s | -$1.65/hr | $1.65 |
+
+### With Time Stop (220-500s) + Optimal Signals
+| Config | Win% | Pair Cost | Hourly Rate |
+|--------|------|-----------|-------------|
+| z>1.5 + vel_aligned | 65.5% | $1.031 | **+$18.04/hr** |
+| vel_aligned only | 65.0% | $1.038 | +$15.54/hr |
+| Baseline | 59.7% | $1.069 | +$2.25/hr |
+
+### Why Time Stop Works
+1. Avoids late-market adverse selection (high info, expensive prices)
+2. Catches early-mid market (cheaper prices, less informed flow)
+3. Filters out worst 16pp of adverse selection
+
+### Critical Insight: Profit Source
+| Source | PnL | Hourly |
+|--------|-----|--------|
+| Merge (pairs) | -$35.40 | -$2.86/hr |
+| Unrealized (carry) | +$258.83 | +$20.90/hr |
+| **Total** | **+$223.43** | **+$18.04/hr** |
+
+**The AS strategy makes money from DIRECTIONAL CARRY, not merges.**
+- 65.5% fills on winning side
+- 80.4% unhedged positions on correct side at resolution
+
+### Winning Config
+```python
+ASConfig(
+    mode=StrategyMode.ASYMMETRIC_EWMA,
+    z_threshold=1.5,
+    require_velocity_aligned=True,
+    entry_window_min_secs=220,  # TIME STOP
+    entry_window_max_secs=500,  # TIME STOP
+    max_order_age_ms=5000,      # SLOW PULLING
+)
+```
+
+### Next Steps
+1. Test multi-phase prototype (accumulate cheap → signal skew → time stop)
+2. Test fixed grid levels vs dynamic AS pricing
+3. See `research/findings/AS_TIME_STOP_CRITICAL_FINDING.md` for full analysis
+
+---
+
+*Updated: January 29, 2026*

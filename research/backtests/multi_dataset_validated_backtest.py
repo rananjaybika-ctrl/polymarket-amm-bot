@@ -53,7 +53,7 @@ OU_MAX_THRESHOLD = 0.10
 VELOCITY_CONFIRM_THRESHOLD = 0.10
 ENHANCED_SCORE_THRESHOLD = 0.40
 
-# Time-stop (matching live AGGRESSIVE)
+# Time-stop from config
 TIME_STOP_SECONDS = AGGRESSIVE_CONFIG.time_stop_seconds  # 120.0 from config
 
 # Loser bid calculation (FIXED - no /100 bug)
@@ -361,34 +361,47 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                     obs_idx += 1
                     break
 
-                # Check time-stop
+                # Check time-stop (ONLY if NOT in profit - matches live enhanced_spike.py:1177-1195)
                 elapsed_ms = obs_ts - entry_ts
                 if elapsed_ms >= time_stop_ms:
-                    loser_fill = loser_ask if pd.notna(loser_ask) else loser_target * 1.05
-                    pair_cost = winner_entry + loser_fill
-                    pnl = (1.0 - pair_cost) * TARGET_SHARES
+                    # Get current winner bid to check if in profit
+                    winner_side_current = position_data['winner_side']
+                    if winner_side_current == "UP":
+                        winner_bid_current = obs_row['up_bid']
+                    else:
+                        winner_bid_current = obs_row['down_bid']
 
-                    trades.append(TradeResult(
-                        market_slug=slug,
-                        cycle_num=cycle_num,
-                        entry_time_remaining=position_data['entry_time_rem'],
-                        signal_score=score,
-                        winner_side=position_data['winner_side'],
-                        winner_fill_price=winner_entry,
-                        loser_fill_price=loser_fill,
-                        hedge_type="time_stop",
-                        pair_cost=pair_cost,
-                        pnl=pnl,
-                        correct_direction=(resolution == position_data['winner_side']),
-                        spike_magnitude=spike_mag,
-                        dataset=dataset_name,
-                    ))
+                    # Check if in profit: winner_bid >= entry price
+                    in_profit = pd.notna(winner_bid_current) and winner_bid_current >= winner_entry
 
-                    in_position = False
-                    position_data = None
-                    last_hedge_ts = obs_ts
-                    obs_idx += 1
-                    break
+                    if not in_profit:
+                        # NOT in profit - execute time-stop
+                        loser_fill = loser_ask if pd.notna(loser_ask) else loser_target * 1.05
+                        pair_cost = winner_entry + loser_fill
+                        pnl = (1.0 - pair_cost) * TARGET_SHARES
+
+                        trades.append(TradeResult(
+                            market_slug=slug,
+                            cycle_num=cycle_num,
+                            entry_time_remaining=position_data['entry_time_rem'],
+                            signal_score=score,
+                            winner_side=position_data['winner_side'],
+                            winner_fill_price=winner_entry,
+                            loser_fill_price=loser_fill,
+                            hedge_type="time_stop",
+                            pair_cost=pair_cost,
+                            pnl=pnl,
+                            correct_direction=(resolution == position_data['winner_side']),
+                            spike_magnitude=spike_mag,
+                            dataset=dataset_name,
+                        ))
+
+                        in_position = False
+                        position_data = None
+                        last_hedge_ts = obs_ts
+                        obs_idx += 1
+                        break
+                    # else: in profit, keep waiting for passive fill (don't time-stop)
 
                 obs_idx += 1
 

@@ -81,8 +81,10 @@ class BinanceClient:
     # Velocity threshold for event-driven callbacks (bps/sec)
     VELOCITY_PULL_THRESHOLD = 0.05  # ~$5 BTC move in 10s
 
-    # Spike detection parameters (NEW)
-    DEFAULT_SPIKE_LOOKBACK = 3      # 3 ticks (~600ms at 5 ticks/sec, ~150ms with bookTicker)
+    # Spike detection parameters - CANONICAL from TRADING_CONFIGS.py (Jan 27, 2026)
+    # Source of truth: lookback_ms=1200, lookback_ticks=72 at 60Hz
+    # For bookTicker (~60Hz avg): 72 ticks ≈ 1200ms
+    DEFAULT_SPIKE_LOOKBACK = 72     # 72 ticks ≈ 1200ms at ~60Hz bookTicker (CANONICAL)
     DEFAULT_SPIKE_THRESHOLD = 0.02  # 0.02% minimum to trigger
 
     def __init__(
@@ -662,7 +664,7 @@ class BinanceClient:
         self._last_spike_callback_time = 0.0
         logger.debug("Reset spike state for new market")
 
-    def detect_spike(self, price: float) -> tuple:
+    def detect_spike(self, binance_price: float) -> tuple:
         """
         Detect raw Binance price spike over last N ticks.
 

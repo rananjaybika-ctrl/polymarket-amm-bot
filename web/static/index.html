@@ -129,7 +129,7 @@
                             </div>
                             <div class="config-field">
                                 <label>Time Stop (s)</label>
-                                <input type="number" id="aggressive-time-stop" value="180" min="30" step="30" title="Exit if position held too long without profit">
+                                <input type="number" id="aggressive-time-stop" value="120" min="30" step="30" title="Exit after 120s if not filled (validated config)">
                             </div>
                             <div class="config-field">
                                 <label>Z-Lo</label>
@@ -141,7 +141,11 @@
                             </div>
                             <div class="config-field">
                                 <label>Target Shares</label>
-                                <input type="number" id="aggressive-base-size" value="50" min="5" step="5" title="Shares per trade">
+                                <input type="number" id="aggressive-base-size" value="10" min="5" step="5" title="Shares per trade (10 for testing)">
+                            </div>
+                            <div class="config-field">
+                                <label>Skip High $</label>
+                                <input type="number" id="aggressive-high-entry" value="0.80" min="0.70" max="0.95" step="0.05" title="Skip entries at or above this price">
                             </div>
                             <div class="config-field">
                                 <label>Cycling</label>

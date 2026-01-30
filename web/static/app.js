@@ -333,6 +333,7 @@ function formatConfigTooltip(modeName, status) {
 
     if (modeName === 'aggressive') {
         lines.push(`Base Size: ${config.base_size || '--'}`);
+        lines.push(`Skip High: $${config.high_entry_threshold || '--'}`);
         lines.push(`Lookback: ${config.lookback_ms || '--'}ms`);
         lines.push(`Time Stop: ${config.time_stop_seconds || '--'}s`);
         lines.push(`Z-Lo: ${config.z_lo || '--'}`);
@@ -552,6 +553,7 @@ function getAggressiveConfig() {
         z_lo: parseFloat(document.getElementById('aggressive-z-lo').value),
         z_hi: parseFloat(document.getElementById('aggressive-z-hi').value),
         base_size: parseInt(document.getElementById('aggressive-base-size').value),
+        high_entry_threshold: parseFloat(document.getElementById('aggressive-high-entry').value),
         use_cycling: document.getElementById('aggressive-cycling').checked,
         max_daily_loss: parseFloat(document.getElementById('aggressive-max-loss').value) || 0
     };

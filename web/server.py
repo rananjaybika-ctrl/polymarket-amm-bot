@@ -242,11 +242,12 @@ class AggressiveBotConfig(BaseModel):
     threshold_method: str = "ou"          # "ou" for adaptive, "fixed" for static
     zscore_method: str = "ewma"           # Z-score tracking method
     lookback_ms: int = 1200               # Spike lookback in milliseconds
-    time_stop_seconds: float = 180.0      # Time-stop exit (3 minutes)
+    time_stop_seconds: float = 120.0      # Time-stop exit (2 minutes) - validated Jan 27
     use_cycling: bool = True              # Keep trading after hedge achieved, merge, continue
     z_lo: float = 0.0                     # Z-score lower bound for entry
     z_hi: float = 1.5                     # Z-score upper bound for entry
-    base_size: int = 50                   # Order size per trade
+    base_size: int = 10                   # Order size per trade (10 for testing phase)
+    high_entry_threshold: float = 0.80    # Skip entries at or above this price
     max_daily_loss: float = 0.0           # Stop trading if loss exceeds (0=disabled)
 
 

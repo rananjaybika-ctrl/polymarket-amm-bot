@@ -264,10 +264,12 @@ if elapsed_seconds >= 120.0:  # Optimized from 180s
 
 | File | Purpose |
 |------|---------|
-| `research/validate_oos4_all_paths.py` | OOS validation script |
-| `research/volatility_filter_analysis.py` | Core backtest engine |
-| `research/TRADING_CONFIGS.py` | Config definitions (Python) |
-| `research/analyze_obi_alpha.py` | OBI analysis script (Jan 28) |
+| `research/backtests/aggressive_main_backtest.py` | **Main backtest** (60Hz, matches live) |
+| `research/optimizers/aggressive_grid_search.py` | **Main grid search** (720 configs) |
+| `research/validation/validate_oos4_all_paths.py` | OOS validation script |
+| `research/analysis/volatility_filter_analysis.py` | Core backtest engine |
+| `research/reference/TRADING_CONFIGS.py` | Config definitions (Python) |
+| `research/analysis/analyze_obi_alpha.py` | OBI analysis script (Jan 28) |
 | `src/services/volatility_tracker.py` | LiveZScoreTracker |
 | `src/strategies/enhanced_spike.py` | Live trading strategy (includes OBI filter) |
 | `src/models/orderbook.py` | Orderbook with compute_imbalance() |

@@ -52,10 +52,11 @@ logger = logging.getLogger(__name__)
 # CONSTANTS
 # =============================================================================
 
-# Spike detection parameters (REPLACES velocity thresholds)
-# Updated Jan 20, 2026 from optimizer results (spike_param_optimizer_taker.py)
-# Best config: 1400ms lookback, 12% SL, 50 shares
-DEFAULT_SPIKE_LOOKBACK = 7       # 7 ticks = 1400ms at 5Hz (was 3 = 600ms)
+# Spike detection parameters - CANONICAL from TRADING_CONFIGS.py (Jan 27, 2026)
+# Source of truth: research/reference/TRADING_CONFIGS.py AGGRESSIVE config
+# CANONICAL: lookback_ms=1200, lookback_ticks=72 at 60Hz
+# For live trading with bookTicker (~60Hz avg): 72 ticks ≈ 1200ms
+DEFAULT_SPIKE_LOOKBACK = 72      # 72 ticks ≈ 1200ms at ~60Hz bookTicker (CANONICAL)
 DEFAULT_SPIKE_THRESHOLD = 0.02  # 0.02% minimum spike magnitude
 SPIKE_HISTORY_SIZE = 50         # Keep last 50 prices for spike detection
 
@@ -1089,17 +1090,19 @@ class EnhancedSpikeStrategy:
                     if spike_direction == "UP" and up_imbalance is not None:
                         obi_confirms = up_imbalance > 0
                         if not obi_confirms:
-                            logger.debug(
-                                f"[OBI] Rejecting UP spike: up_imbalance={up_imbalance:.3f} <= 0 "
-                                f"(89% acc when confirms vs 77% when disagrees)"
+                            # INFO level to make OBI rejections visible in live trading
+                            logger.info(
+                                f"[OBI REJECT] UP spike rejected: up_imbalance={up_imbalance:.3f} <= 0 "
+                                f"(mag={spike_magnitude:.4f}%)"
                             )
                             spike_direction = None
                     elif spike_direction == "DOWN" and down_imbalance is not None:
                         obi_confirms = down_imbalance > 0
                         if not obi_confirms:
-                            logger.debug(
-                                f"[OBI] Rejecting DOWN spike: down_imbalance={down_imbalance:.3f} <= 0 "
-                                f"(89% acc when confirms vs 77% when disagrees)"
+                            # INFO level to make OBI rejections visible in live trading
+                            logger.info(
+                                f"[OBI REJECT] DOWN spike rejected: down_imbalance={down_imbalance:.3f} <= 0 "
+                                f"(mag={spike_magnitude:.4f}%)"
                             )
                             spike_direction = None
 

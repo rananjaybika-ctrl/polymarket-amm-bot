@@ -187,8 +187,8 @@ class CycleRecord:
     time_remaining_at_complete: float
 
 
-# Spike detection constants (from enhanced_spike.py)
-SPIKE_LOOKBACK = 3           # 3 ticks for spike detection
+# Spike detection - CANONICAL from TRADING_CONFIGS.py (Jan 27, 2026)
+SPIKE_LOOKBACK = 72          # 72 ticks ≈ 1200ms (CANONICAL)
 SPIKE_THRESHOLD = 0.02       # 0.02% minimum to trigger
 # Hedge pricing (v2: recalibrated Jan 18, 2026)
 DROP_MULTIPLIER = 0.50       # Reduced from 0.68 - spike has weak predictive power

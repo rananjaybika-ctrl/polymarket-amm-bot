@@ -112,8 +112,8 @@ Using **REALISTIC fill model** (matching live strategy):
 
 | Script | Purpose | Key Features |
 |--------|---------|--------------|
-| `research/enhanced_spike_60hz_optimized.py` | **60Hz backtest (MAIN)** | Vectorized spike detection, realistic fills, full composite scoring |
-| `research/enhanced_spike_60hz_backtest.py` | 60Hz backtest (original) | Tick-by-tick processing (slower) |
+| `research/backtests/aggressive_main_backtest.py` | **AGGRESSIVE main backtest** | 60Hz, proper cycling, matches live strategy |
+| ~~`research/enhanced_spike_60hz_backtest.py`~~ | (renamed to aggressive_main_backtest.py) | |
 | `research/enhanced_spike_10hr_backtest.py` | 5Hz observer-based backtest | Uses pre-computed spikes from observer |
 | `research/enhanced_spike_backtest.py` | Original enhanced spike backtest | Merges HF + observer data |
 | `scripts/backtest_7hr_analysis.py` | 7-hour AWS observer analysis | Cycling, velocity zones, market exclusion |
@@ -580,7 +580,7 @@ The optimizer revealed THREE distinct hedge outcomes:
 
 | Script | Purpose | Notes |
 |--------|---------|-------|
-| `research/enhanced_spike_60hz_backtest.py` | Original 60Hz | Tick-by-tick (slower) |
+| `research/backtests/aggressive_main_backtest.py` | **Current main backtest** | Renamed from enhanced_spike_60hz_backtest.py |
 | `research/enhanced_spike_backtest.py` | Pre-60Hz version | Merged HF + observer |
 | `research/enhanced_spike_10hr_backtest.py` | 10-hour specific | One-off analysis |
 

@@ -401,6 +401,21 @@ def compute_score_v2(spike_mag, velocity_bps, time_remaining, regime):
 
 ---
 
+## CRITICAL UPDATE: Time Stop Validation (Jan 29, 2026)
+
+**The 300-600s time window finding has been VALIDATED in AS backtesting.**
+
+With **220-500s time window** (narrower early window):
+- Fill accuracy: 65.5% (vs 53% without time stop)
+- Pair cost: $1.031 (vs $1.06+ without)
+- Total hourly: +$18.04/hr (vs negative without)
+
+**Time stop recovers ~12pp of adverse selection loss.**
+
+See `research/findings/AS_TIME_STOP_CRITICAL_FINDING.md` for full analysis.
+
+---
+
 ## Files Reference
 
 - Raw signal data: `research/signal_path1_v2.csv`, `research/signal_path2_v2.csv`

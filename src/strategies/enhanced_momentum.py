@@ -49,8 +49,8 @@ DEFAULT_HEDGE_RATIO = 0.50
 # T2 stop-loss (riding tranche)
 DEFAULT_T2_STOP_LOSS_PCT = 0.12
 
-# Spike detection
-SPIKE_LOOKBACK = 3
+# Spike detection - CANONICAL from TRADING_CONFIGS.py (Jan 27, 2026)
+SPIKE_LOOKBACK = 72  # 72 ticks ≈ 1200ms (CANONICAL)
 SPIKE_THRESHOLD = 0.02
 # Hedge pricing (v2: recalibrated Jan 18, 2026 - see HEDGE_PRICING_FINDINGS.md)
 DROP_MULTIPLIER = 0.50   # Reduced from 0.68 - spike has weak predictive power

@@ -39,6 +39,12 @@ logs/
 # Data exports (keep directory, ignore CSVs)
 data/*.csv
 data/*.json
+data/archive/
+
+# Research data files (large)
+research/findings/data/
+research/**/*.csv
+research/**/*.csv.gz
 
 # IDE
 .idea/

@@ -431,36 +431,48 @@ def simulate_market(btc_df: pd.DataFrame, obs_df: pd.DataFrame,
                 btc_idx += 1
                 continue
 
-            # Check time-stop
+            # Check time-stop (ONLY if NOT in profit - matches live enhanced_spike.py)
             elapsed_ms = btc_ts - entry_ts
             if elapsed_ms >= time_stop_ms:
-                loser_fill = loser_ask  # Market order at ask
-                pair_cost = winner_entry + loser_fill
-                pnl = (1.0 - pair_cost) * TARGET_SHARES
+                # Get current winner bid to check if in profit
+                if winner_side == "UP":
+                    winner_bid_current = obs_row['up_bid']
+                else:
+                    winner_bid_current = obs_row['down_bid']
 
-                trades.append(TradeResult(
-                    market_slug=slug,
-                    cycle_num=cycle_num,
-                    entry_time_remaining=position_data['entry_time_rem'],
-                    signal_score=score,
-                    winner_side=winner_side,
-                    winner_fill_price=winner_entry,
-                    loser_fill_price=loser_fill,
-                    hedge_type="time_stop",
-                    pair_cost=pair_cost,
-                    pnl=pnl,
-                    correct_direction=(resolution == winner_side),
-                    spike_magnitude=spike_mag,
-                    obi_available=obi_available,
-                    obi_confirmed=obi_confirmed,
-                ))
+                # Check if in profit: winner_bid >= entry price
+                in_profit = pd.notna(winner_bid_current) and winner_bid_current >= winner_entry
 
-                in_position = False
-                position_data = None
-                last_hedge_ts = btc_ts
-                detector.reset()
-                btc_idx += 1
-                continue
+                if not in_profit:
+                    # NOT in profit - execute time-stop
+                    loser_fill = loser_ask  # Market order at ask
+                    pair_cost = winner_entry + loser_fill
+                    pnl = (1.0 - pair_cost) * TARGET_SHARES
+
+                    trades.append(TradeResult(
+                        market_slug=slug,
+                        cycle_num=cycle_num,
+                        entry_time_remaining=position_data['entry_time_rem'],
+                        signal_score=score,
+                        winner_side=winner_side,
+                        winner_fill_price=winner_entry,
+                        loser_fill_price=loser_fill,
+                        hedge_type="time_stop",
+                        pair_cost=pair_cost,
+                        pnl=pnl,
+                        correct_direction=(resolution == winner_side),
+                        spike_magnitude=spike_mag,
+                        obi_available=obi_available,
+                        obi_confirmed=obi_confirmed,
+                    ))
+
+                    in_position = False
+                    position_data = None
+                    last_hedge_ts = btc_ts
+                    detector.reset()
+                    btc_idx += 1
+                    continue
+                # else: in profit, keep waiting for passive fill
 
             btc_idx += 1
             continue

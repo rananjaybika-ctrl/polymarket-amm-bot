@@ -128,10 +128,10 @@ AGGRESSIVE = TradingConfig(
     lookback_ticks=72,
     lookback_ms=1200,
 
-    # STOP SETTINGS - USE 120s TIME-STOP (optimized from 180s)
+    # STOP SETTINGS - USE 20s TIME-STOP (testing faster cycling)
     # TIME120s runs 28% more cycles than TIME300s
     stop_loss_pct=None,         # NO price-based stop
-    time_stop_seconds=120.0,    # Exit after 120s if not filled AND not in profit
+    time_stop_seconds=20.0,     # Exit after 20s if not filled (TESTING)
 
     # Cycling ON for more trades
     use_cycling=True,

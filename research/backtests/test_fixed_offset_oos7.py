@@ -565,18 +565,7 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
             scan_row = mdf.iloc[j]
             scan_ts = scan_row['timestamp_ms']
 
-            # Time-based stop check
-            elapsed_ms = scan_ts - entry_ts
-            if elapsed_ms >= time_stop_ms:
-                if loser_side == "UP":
-                    loser_fill = scan_row['up_ask']
-                else:
-                    loser_fill = scan_row['down_ask']
-                hedge_type = "time_stop"
-                hedge_fill_ts = scan_ts
-                break
-
-            # Passive fill check
+            # Passive fill check (CHECK FIRST - before time-stop)
             if loser_side == "UP":
                 curr_loser_ask = scan_row['up_ask']
             else:
@@ -587,6 +576,31 @@ def simulate_market(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
                 hedge_type = "passive"
                 hedge_fill_ts = scan_ts
                 break
+
+            # Time-based stop check (ONLY if NOT in profit - matches live enhanced_spike.py)
+            elapsed_ms = scan_ts - entry_ts
+            if elapsed_ms >= time_stop_ms:
+                # Get current winner bid to check if in profit
+                if winner_side == "UP":
+                    winner_bid_current = scan_row['up_bid']
+                else:
+                    winner_bid_current = scan_row['down_bid']
+
+                # Check if in profit: winner_bid >= entry price
+                in_profit = pd.notna(winner_bid_current) and winner_bid_current >= winner_entry
+
+                if not in_profit:
+                    # NOT in profit - execute time-stop
+                    if loser_side == "UP":
+                        loser_fill = scan_row['up_ask']
+                    else:
+                        loser_fill = scan_row['down_ask']
+                    hedge_type = "time_stop"
+                    hedge_fill_ts = scan_ts
+                    break
+                # else: in profit, keep waiting for passive fill
+
+            # Continue scanning to next row
 
         # If no hedge, resolve at market end
         if hedge_type == "resolution":

@@ -21,6 +21,9 @@ Both strategies are uncorrelated (different signals, different market conditions
 |----------|------|---------------|------------|--------|
 | **AGGRESSIVE** | ~$9.00 | 50 shares | ~70% dir | DEPLOYED (TIME120s_SKIP) |
 | **CONTRARIAN** | $618 | 2,500 shares | 43.4% WR | PRODUCTION READY |
+| **AS (Time Stop)** | $18.04 → **-$7/hr OOS** | 10 shares | 65% → 44% | **OVERFIT** (Jan 29) |
+
+**UPDATE (Jan 29):** AS strategy OVERFIT - training shows +$18/hr but OOS shows -$7/hr to -$21/hr. Weak z-zone (like AGGRESSIVE) helps but still negative on most OOS data. See `research/findings/AS_WINNING_CONFIGS.md` for full analysis.
 
 ---
 
@@ -113,6 +116,8 @@ python research/validate_oos4_all_paths.py --combined
 - [strategies/CONTRARIAN.md](strategies/CONTRARIAN.md) - Full CONTRARIAN config + performance
 
 ### Research Findings
+- [findings/AS_WINNING_CONFIGS.md](findings/AS_WINNING_CONFIGS.md) - **NEW** All winning AS configs with analysis
+- [findings/AS_TIME_STOP_CRITICAL_FINDING.md](findings/AS_TIME_STOP_CRITICAL_FINDING.md) - Time stop breakthrough
 - [findings/STOP_TYPES.md](findings/STOP_TYPES.md) - Time vs price stop analysis
 - [findings/VOLATILITY_FILTER.md](findings/VOLATILITY_FILTER.md) - Z-score filtering, z-zone analysis
 - [findings/LOSING_PATTERNS.md](findings/LOSING_PATTERNS.md) - Winner/loser discriminators
@@ -131,14 +136,14 @@ python research/validate_oos4_all_paths.py --combined
 
 | File | Purpose |
 |------|---------|
-| `research/validate_oos4_all_paths.py` | OOS validation (Path 1 + Path 2) |
-| `research/volatility_filter_analysis.py` | Core backtest engine |
-| `research/enhanced_spike_60hz_backtest.py` | Reference for proper cycling logic |
-| `research/velocity_options_backtest.py` | BASELINE + velocity methods (zone grid search) |
-| `research/acceleration_signal_backtest.py` | Acceleration signal methods |
-| `research/regime_adaptive_backtest.py` | Regime detection methods |
-| `research/multi_signal_backtest.py` | Multi-signal combination methods |
-| `research/kalman_signal_backtest.py` | Kalman filter methods |
+| `research/backtests/aggressive_main_backtest.py` | **AGGRESSIVE main backtest** (proper cycling) |
+| `research/optimizers/aggressive_grid_search.py` | **AGGRESSIVE grid search** (720 configs) |
+| `research/validation/validate_oos4_all_paths.py` | OOS validation (Path 1 + Path 2) |
+| `research/analysis/volatility_filter_analysis.py` | Core backtest engine |
+| `research/backtests/velocity_options_backtest.py` | BASELINE + velocity methods (zone grid search) |
+| `research/backtests/acceleration_signal_backtest.py` | Acceleration signal methods |
+| `research/backtests/regime_adaptive_backtest.py` | Regime detection methods |
+| `research/backtests/multi_signal_backtest.py` | Multi-signal combination methods |
 | `research/ML_DIMENSION_REDUCTION_PLAN.md` | ML analysis plan for parameter importance |
 | `src/services/volatility_tracker.py` | LiveZScoreTracker for production |
 
@@ -151,13 +156,13 @@ Before creating ANY new backtest script:
 1. **Read completely** the 3 most relevant existing files - not grep, actually READ
 2. **Copy-paste first** - Start from working code, then modify. NEVER create from scratch
 3. **Checklist before new script:**
-   - [ ] CSV output included? (copy from spike_param_optimizer.py)
-   - [ ] Proper cycling logic with `in_position` flag? (copy from enhanced_spike_60hz_backtest.py)
+   - [ ] CSV output included? (copy from optimizers/spike_param_optimizer.py)
+   - [ ] Proper cycling logic with `in_position` flag? (copy from backtests/aggressive_main_backtest.py)
    - [ ] Matches existing patterns?
 4. **Reference files for new backtests:**
-   - `enhanced_spike_60hz_backtest.py` - ONLY file with proper cycling
-   - `spike_param_optimizer.py` - CSV output pattern
-   - `volatility_filter_analysis.py` - Grid search structure
+   - `backtests/aggressive_main_backtest.py` - ONLY file with proper cycling
+   - `optimizers/spike_param_optimizer.py` - CSV output pattern
+   - `analysis/volatility_filter_analysis.py` - Grid search structure
 
 ### Proper Cycling Logic (CRITICAL)
 
