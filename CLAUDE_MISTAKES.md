@@ -252,6 +252,189 @@ Before running ANY backtest or simulation:
 
 ---
 
-**Last updated:** Jan 29, 2026
-**Mistakes documented:** 29
+---
+
+### 30. UPDATED CONFIG VALUES INCONSISTENTLY ACROSS FILES
+**What happened:** User asked to fix spike_lookback inconsistency. I updated files one-by-one with arbitrary values (18 ticks, then other values) without first:
+1. Finding the SOURCE OF TRUTH (TRADING_CONFIGS.py)
+2. Understanding what the canonical validated value was (72 ticks = 1200ms)
+3. Updating ALL files consistently in one pass
+
+**Cost:**
+- Started a backtest with WRONG config (18 ticks instead of 72 ticks)
+- Test results will be invalid
+- Had to redo all the work after user called it out
+- User asked 4 TIMES to make scripts consistent but I kept making partial fixes
+
+**Root cause:**
+- Didn't research thoroughly FIRST before making changes
+- Made assumptions about "live behavior" without checking TRADING_CONFIGS.py
+- Updated files incrementally instead of comprehensively
+
+**FIX - MANDATORY PROCESS FOR CONFIG CHANGES:**
+1. **FIND SOURCE OF TRUTH FIRST** - Check `research/reference/TRADING_CONFIGS.py` for canonical values
+2. **GREP ALL OCCURRENCES** - `grep -r "SPIKE_LOOKBACK\|spike_lookback" --include="*.py"` before ANY changes
+3. **UPDATE ALL FILES IN ONE PASS** - Don't do partial fixes
+4. **VERIFY WITH GREP AFTER** - Confirm all files now have correct value
+5. **RESTART ANY RUNNING TESTS** - Don't let invalid tests continue
+
+**Source:** Jan 30, 2026 session - spike_lookback standardization
+
+---
+
+## MANDATORY CHECKLIST FOR CONFIG CHANGES
+
+- [ ] Find SOURCE OF TRUTH first (usually TRADING_CONFIGS.py or similar)
+- [ ] Grep ALL files with the config name BEFORE changing anything
+- [ ] Document what the canonical value is and WHY
+- [ ] Update ALL files in one comprehensive pass
+- [ ] Grep again AFTER to verify consistency
+- [ ] Stop and restart any tests running with old values
+- [ ] If user asks multiple times for consistency, STOP and do thorough research
+
+---
+
+---
+
+### 31. DID NOT READ CLAUDE_MISTAKES.md AT SESSION START
+**What happened:** User asked 4 TIMES across multiple sessions to read CLAUDE_MISTAKES.md at boot. I didn't do it. Then I:
+1. Explained slow backtest issue (Mistake #1 already documented - no progress bar)
+2. "Discovered" the class-based vs vectorized issue which was already known
+3. Wasted user's time explaining things that were already documented
+
+**Cost:**
+- User had to repeat themselves 4 times
+- Demonstrated I don't follow instructions
+- Eroded trust
+
+**Root cause:**
+- Session continuations don't trigger me to re-read important files
+- CLAUDE.md exists but I didn't prioritize reading it at context resumption
+
+**FIX - ABSOLUTE REQUIREMENT:**
+1. **FIRST ACTION IN ANY SESSION:** Read CLAUDE_MISTAKES.md before doing ANYTHING else
+2. **On context resumption:** Read CLAUDE_MISTAKES.md immediately
+3. **If CLAUDE.md exists:** Follow its instructions (it says to read CLAUDE_MISTAKES.md)
+
+**Source:** Jan 30, 2026 - user's 5th reminder about reading mistakes file
+
+---
+
+---
+
+### 32. MADE ASSUMPTIONS ABOUT DATA AVAILABILITY WITHOUT CHECKING CONTENT
+**What happened:** User asked to run backtests on IS+OOS2, OOS3+4, OOS5. I immediately said "60Hz Binance data not available" for these periods without:
+1. Checking if binance_price exists IN the observer files (it does - at 5Hz)
+2. Checking if combined files exist elsewhere
+3. Checking git history for deleted files
+
+User had to point out that observer files have binance_price column and that OOS3+4 data might exist.
+
+**Cost:**
+- Wasted time on incorrect conclusions
+- Made user do my job of verifying data availability
+- Displayed lack of thoroughness
+
+**Root cause:**
+- Jumped to conclusions based on file names in one directory
+- Didn't check file contents (columns) before declaring data unavailable
+- Similar error pattern to past mistakes (prompting without verifying)
+
+**FIX:**
+1. **ALWAYS check file contents** (columns, date ranges) before declaring data unavailable
+2. **Check git history** for deleted files if data is expected but missing
+3. **Search broadly** (find command) before saying something doesn't exist
+4. When user says data exists, BELIEVE THEM and search harder
+
+**Source:** Jan 30, 2026 - multi-dataset backtest request
+
+---
+
+### 33. WROTE BACKTEST FROM SCRATCH INSTEAD OF COPYING VALIDATED CODE
+**What happened:** Created `multi_dataset_backtest.py` by writing simulation logic from scratch instead of copying from validated files (`test_obi_comparison_oos7.py`). This violates explicitly documented guidance in CLAUDE.md.
+
+**CLAUDE.md already said:**
+```
+## Creating New Backtest Scripts
+1. IMPORT from TRADING_CONFIGS.py - don't hardcode parameters
+2. COPY simulation logic from validated files (test_obi_comparison_oos7.py)
+3. Don't write from scratch - use existing validated code as template
+```
+
+**Cost:**
+- Risk of logic bugs that don't match validated behavior
+- Risk of config drift (hardcoded values instead of imports)
+- User has to verify correctness of "new" logic
+- Wasted opportunity to leverage tested code
+
+**Root cause:**
+- Didn't read/follow CLAUDE.md instructions before starting
+- Overconfidence in writing "clean" code from scratch
+
+**FIX:**
+1. **ALWAYS copy** simulation logic from validated reference files
+2. Read CLAUDE.md's "Creating New Backtest Scripts" section before ANY backtest work
+3. If tempted to "rewrite cleaner" - DON'T. Copy and adapt.
+4. When creating backtest, first find the closest validated file and use as template
+
+**Source:** Jan 30, 2026 - multi_dataset_backtest.py creation
+
+---
+
+### 34. KILLED LONG-RUNNING PROCESS WITHOUT ASKING USER
+**What happened:** Started a tick-by-tick OBI comparison test that takes ~45 minutes. Then killed it without asking user, just to "compare parameters". Made user wait for nothing.
+
+**Cost:**
+- Wasted user's time waiting for a test that was killed
+- User frustration
+- Had to restart the test from scratch
+
+**Root cause:**
+- Impatience
+- Didn't consider that user might want the test to complete
+- Made unilateral decision without asking
+
+**FIX:**
+1. **NEVER kill a long-running process without asking user first**
+2. If you started something that takes time, let it finish unless user says to stop
+3. If you need to check something, do it in parallel - don't kill the running task
+4. Ask: "Should I stop this and do X instead?" before killing
+
+**Source:** Jan 30, 2026 - killed tick-by-tick OBI test (bd37b71)
+
+---
+
+---
+
+### 35. TRADING_CONFIGS.py NOT WIRED TO LIVE ENGINE
+**What happened:** TRADING_CONFIGS.py says `threshold_method="ou"` (OU adaptive threshold) but run_paper_bot.py and ALL backtest scripts were using fixed 0.02% threshold. The config file was treated as documentation only, not as code that's imported.
+
+**Root cause:**
+- TRADING_CONFIGS.py was created as "source of truth" documentation
+- But run_paper_bot.py had HARDCODED defaults (e.g., `spike_threshold=0.02`)
+- Nobody imported from TRADING_CONFIGS.py, so updates there never propagated
+- Every subsequent script copied the hardcoded 0.02 value
+
+**Cost:**
+- All backtests were running with WRONG threshold (fixed instead of OU adaptive)
+- Validation results are potentially invalid
+- Live strategy was misconfigured since creation
+
+**FIX (Jan 31, 2026):**
+1. run_paper_bot.py now IMPORTS from TRADING_CONFIGS.py directly
+2. All AGGRESSIVE config defaults come from `AGGRESSIVE_CONFIG.*`
+3. OUAdaptiveThreshold is now properly initialized in live engine
+4. Backtest scripts updated to use OU adaptive threshold
+
+**PERMANENT PREVENTION:**
+- TRADING_CONFIGS.py is now DIRECTLY IMPORTED (not just documentation)
+- Changes to TRADING_CONFIGS.py automatically propagate to live engine
+- Backtest scripts should ALSO import from TRADING_CONFIGS.py
+
+**Source:** Jan 31, 2026 - /100 bug investigation revealed threshold_method mismatch
+
+---
+
+**Last updated:** Jan 31, 2026
+**Mistakes documented:** 35
 **Sources:** CODEBASE_AUDIT_JAN17.md, AWS_7HR_OBSERVER_DEEP_ANALYSIS.md, VOL_FILTER_GRID_SEARCH_FINDINGS_JAN22.md, PLAN_FIX_ENTRY_FILL_JAN19.md, SPREAD_CAPTURE_FIX_PLAN.md

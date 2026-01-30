@@ -89,6 +89,12 @@ from src.services.health_monitor import get_health_monitor, HealthMonitor
 from src.services.auto_redeemer import AutoRedeemer
 from src.services.orderbook_cache import OrderbookManager
 
+# =============================================================================
+# CRITICAL: Import TRADING_CONFIGS.py as SINGLE SOURCE OF TRUTH
+# All hardcoded values below should come from here!
+# =============================================================================
+from research.reference.TRADING_CONFIGS import AGGRESSIVE as AGGRESSIVE_CONFIG
+
 
 # Configure logging
 logging.basicConfig(
@@ -505,14 +511,18 @@ class PaperTradingBot:
         # Updated based on optimizer results (Jan 18, 2026)
         spread_base_size: int = 30,           # Total shares per trade
         spread_grid_levels: int = 1,          # Single price level (optimizer winner)
-        spread_spike_lookback: int = 3,       # 300ms at 5Hz (18 ticks at 60Hz = robust across all sessions)
+        # =============================================================================
+        # AGGRESSIVE (Path 1) parameters - SOURCED FROM TRADING_CONFIGS.py
+        # DO NOT HARDCODE! Update TRADING_CONFIGS.py instead.
+        # =============================================================================
+        spread_spike_lookback: int = AGGRESSIVE_CONFIG.lookback_ticks,  # From TRADING_CONFIGS.py
         spread_max_imbalance_pct: float = 0.10,  # Max inventory imbalance (10%)
-        spread_enable_cycling: bool = True,   # Re-enter same market (optimal per backtest)
+        spread_enable_cycling: bool = AGGRESSIVE_CONFIG.use_cycling,    # From TRADING_CONFIGS.py
         spread_min_velocity_bps: float = 0.50,  # Only trade zones 5-6 (velocity >= 0.50) - matches backtest
-        # AGGRESSIVE (Path 1) specific parameters
-        zscore_lo: float = 0.0,               # Z-score lower bound for entry
-        zscore_hi: float = 1.5,               # Z-score upper bound for entry
-        time_stop_seconds: float = 120.0,     # Time-stop exit (2 minutes) - optimized Jan 27
+        zscore_lo: float = AGGRESSIVE_CONFIG.z_lo,                      # From TRADING_CONFIGS.py
+        zscore_hi: float = AGGRESSIVE_CONFIG.z_hi,                      # From TRADING_CONFIGS.py
+        time_stop_seconds: float = AGGRESSIVE_CONFIG.time_stop_seconds, # From TRADING_CONFIGS.py
+        high_entry_threshold: float = AGGRESSIVE_CONFIG.high_entry_threshold,  # From TRADING_CONFIGS.py
         # CONTRARIAN (Path 2) specific parameters
         contrarian_pullback_threshold: float = 0.0001,  # 0.01% pullback from peak
         contrarian_retracement_min: float = 0.30,       # Must retrace 30% of move
@@ -596,6 +606,7 @@ class PaperTradingBot:
         self.zscore_lo = zscore_lo
         self.zscore_hi = zscore_hi
         self.time_stop_seconds = time_stop_seconds
+        self.high_entry_threshold = high_entry_threshold
 
         # CONTRARIAN (Path 2) specific parameters
         self.contrarian_pullback_threshold = contrarian_pullback_threshold
@@ -694,7 +705,7 @@ class PaperTradingBot:
                 # NEW: Continuous velocity mode params (optimizer winner Jan 18)
                 base_size=self.spread_base_size,
                 grid_levels=self.spread_grid_levels,
-                spike_lookback=self.spread_spike_lookback,  # 3 ticks = 300ms at 5Hz (robust across sessions)
+                spike_lookback=self.spread_spike_lookback,  # 72 ticks ≈ 1200ms (CANONICAL)
                 max_imbalance_pct=self.spread_max_imbalance_pct,
                 enable_cycling=self.spread_enable_cycling,
                 min_velocity_bps=self.spread_min_velocity_bps,  # Zone filter
@@ -708,7 +719,7 @@ class PaperTradingBot:
             logger.info(
                 f"[SPREADCAP] Continuous velocity mode initialized: "
                 f"base_size={self.spread_base_size}, grid_levels={self.spread_grid_levels}, "
-                f"spike_lookback={self.spread_spike_lookback} (300ms), "
+                f"spike_lookback={self.spread_spike_lookback}, "
                 f"max_imbalance={self.spread_max_imbalance_pct*100:.0f}%, target={self.accum_target_shares}, "
                 f"cycling={self.spread_enable_cycling}, stop_loss=None{zone_info}"
             )
@@ -774,28 +785,42 @@ class PaperTradingBot:
         # AGGRESSIVE Strategy (Path 1): Spike detection with velocity confirmation
         # Uses EnhancedSpikeStrategy with Z-score filter and time-stop
         # TIME120s_SKIP config (Jan 27, 2026): 120s time-stop + skip entries >= $0.90
+        # CRITICAL: Uses OU adaptive threshold (NOT fixed 0.02) per TRADING_CONFIGS.py
         self._aggressive_strategy: Optional["EnhancedSpikeStrategy"] = None
         if self.accum_mode == "aggressive":
             from src.strategies.enhanced_spike import EnhancedSpikeStrategy
+            from src.strategies.ou_volatility import OUParameters, OUAdaptiveThreshold
+
+            # Load OU parameters and create adaptive threshold
+            ou_params_path = project_root / "research" / "ou_params.json"
+            ou_adaptive = None
+            try:
+                ou_params = OUParameters.load(str(ou_params_path))
+                ou_adaptive = OUAdaptiveThreshold(ou_params)
+                logger.info(f"[AGGRESSIVE] OU adaptive threshold loaded from {ou_params_path}")
+            except Exception as e:
+                logger.warning(f"[AGGRESSIVE] Failed to load OU params: {e} - using fixed threshold")
+
             self._aggressive_strategy = EnhancedSpikeStrategy(
                 base_size=self.spread_base_size,
                 spike_lookback=self.spread_spike_lookback,
-                time_stop_seconds=self.time_stop_seconds,  # 120.0 (optimized from 180.0)
+                time_stop_seconds=self.time_stop_seconds,
                 stop_loss_pct=None,  # No price-based SL - use time-stop only
                 zscore_lo=self.zscore_lo,
                 zscore_hi=self.zscore_hi,
                 zscore_filter_enabled=True,
                 enable_cycling=self.spread_enable_cycling,
-                # TIME120s_SKIP parameters - TESTING CONFIG (10sh, skip >= $0.80)
-                # Production: base_size=50, high_entry_threshold=0.90
-                skip_high_entry=True,           # Skip entries >= $0.80 (unhedgeable at 10sh)
-                high_entry_threshold=0.80,      # Testing threshold (min hedge = $0.10 at 10sh)
-                min_time_remaining=180.0,       # time_stop + 60s buffer (prevents resolution exits)
+                # Skip high entries - FROM TRADING_CONFIGS.py
+                skip_high_entry=AGGRESSIVE_CONFIG.skip_high_entry,
+                high_entry_threshold=self.high_entry_threshold,
+                min_time_remaining=AGGRESSIVE_CONFIG.min_time_remaining,  # FROM TRADING_CONFIGS.py
+                ou_adaptive_threshold=ou_adaptive,  # USE OU ADAPTIVE (per TRADING_CONFIGS.py threshold_method="ou")
             )
             logger.info(
                 f"[AGGRESSIVE] Initialized: base_size={self.spread_base_size}, "
                 f"spike_lookback={self.spread_spike_lookback}, time_stop={self.time_stop_seconds}s, "
-                f"z_bounds=[{self.zscore_lo}, {self.zscore_hi}], skip_high_entry=True (>=$0.80) [TESTING]"
+                f"z_bounds=[{self.zscore_lo}, {self.zscore_hi}], skip_high>=${self.high_entry_threshold}, "
+                f"threshold={'OU_ADAPTIVE' if ou_adaptive else 'FIXED_0.02'}"
             )
 
         # CONTRARIAN Strategy (Path 2): Bet against BTC direction at reversal
@@ -1172,21 +1197,26 @@ class PaperTradingBot:
         """
         trading_mode = config.get("mode", "paper")
 
+        # =============================================================================
+        # ALL DEFAULTS COME FROM TRADING_CONFIGS.py - THE SINGLE SOURCE OF TRUTH
+        # Web UI config can override, but defaults are always correct from TRADING_CONFIGS
+        # =============================================================================
         return cls(
             initial_balance=config.get("starting_balance", 500.0),
             # Set accum_mode to aggressive (uses EnhancedSpikeStrategy)
             accum_mode="aggressive",
-            # AGGRESSIVE specific parameters - TESTING CONFIG
-            # Production: base_size=50, Testing: base_size=10
-            spread_base_size=config.get("base_size", 10),  # TESTING: 10 shares
-            spread_enable_cycling=config.get("use_cycling", True),
-            # Z-score bounds for entry filtering
-            zscore_lo=config.get("z_lo", 0.0),
-            zscore_hi=config.get("z_hi", 1.5),
-            # Time-stop for exit (optimized from 180.0 to 120.0, Jan 27)
-            time_stop_seconds=config.get("time_stop_seconds", 120.0),
-            # Spike detection lookback
-            spread_spike_lookback=config.get("lookback_ms", 1200) // 100,  # Convert ms to ticks
+            # AGGRESSIVE specific parameters - DEFAULTS FROM TRADING_CONFIGS.py
+            spread_base_size=config.get("base_size", 50),  # Production default
+            spread_enable_cycling=config.get("use_cycling", AGGRESSIVE_CONFIG.use_cycling),
+            # Z-score bounds - FROM TRADING_CONFIGS.py
+            zscore_lo=config.get("z_lo", AGGRESSIVE_CONFIG.z_lo),
+            zscore_hi=config.get("z_hi", AGGRESSIVE_CONFIG.z_hi),
+            # Time-stop - FROM TRADING_CONFIGS.py
+            time_stop_seconds=config.get("time_stop_seconds", AGGRESSIVE_CONFIG.time_stop_seconds),
+            # Skip high entries - FROM TRADING_CONFIGS.py
+            high_entry_threshold=config.get("high_entry_threshold", AGGRESSIVE_CONFIG.high_entry_threshold),
+            # Spike detection lookback - FROM TRADING_CONFIGS.py
+            spread_spike_lookback=config.get("lookback_ticks", AGGRESSIVE_CONFIG.lookback_ticks),
             # Max daily loss protection
             max_daily_loss=config.get("max_daily_loss", 0.0),
             # Output
@@ -4975,10 +5005,24 @@ class PaperTradingBot:
                             # Auto-merge if a new cycle was recorded
                             if len(strategy._completed_pairs) > completed_pairs_before:
                                 last_cycle = strategy._completed_pairs[-1]
+                                pair_cost = last_cycle["pair_cost"]
+                                pairs = last_cycle["pairs"]
+                                hedge_type = last_cycle.get("hedge_type", "unknown")
+
+                                # TRADE SUMMARY LOG for live monitoring
+                                pnl_per_share = 1.0 - pair_cost
+                                total_pnl = pnl_per_share * pairs
+                                result = "WIN" if pair_cost < 1.0 else "LOSS"
+                                trade_num = len(strategy._completed_pairs)
+                                logger.info(
+                                    f"[TRADE #{trade_num}] {result} | pair_cost=${pair_cost:.4f} | "
+                                    f"pnl=${total_pnl:.2f} | hedge={hedge_type} | pairs={pairs}"
+                                )
+
                                 await self._auto_merge_after_cycle(
                                     market=market,
-                                    pairs_to_merge=last_cycle["pairs"],
-                                    pair_cost=last_cycle["pair_cost"],
+                                    pairs_to_merge=pairs,
+                                    pair_cost=pair_cost,
                                     source="WS_FILL"
                                 )
                 except asyncio.QueueEmpty:
@@ -5060,10 +5104,24 @@ class PaperTradingBot:
                             # Auto-merge if a new cycle was recorded
                             if len(strategy._completed_pairs) > completed_pairs_before:
                                 last_cycle = strategy._completed_pairs[-1]
+                                pair_cost = last_cycle["pair_cost"]
+                                pairs = last_cycle["pairs"]
+                                hedge_type = last_cycle.get("hedge_type", "unknown")
+
+                                # TRADE SUMMARY LOG for live monitoring
+                                pnl_per_share = 1.0 - pair_cost
+                                total_pnl = pnl_per_share * pairs
+                                result = "WIN" if pair_cost < 1.0 else "LOSS"
+                                trade_num = len(strategy._completed_pairs)
+                                logger.info(
+                                    f"[TRADE #{trade_num}] {result} | pair_cost=${pair_cost:.4f} | "
+                                    f"pnl=${total_pnl:.2f} | hedge={hedge_type} | pairs={pairs}"
+                                )
+
                                 await self._auto_merge_after_cycle(
                                     market=market,
-                                    pairs_to_merge=last_cycle["pairs"],
-                                    pair_cost=last_cycle["pair_cost"],
+                                    pairs_to_merge=pairs,
+                                    pair_cost=pair_cost,
                                     source="PAPER_FILL"
                                 )
             except Exception as e:
@@ -5115,8 +5173,12 @@ class PaperTradingBot:
                         up_imbalance = up_book.compute_imbalance(levels=5)
                     if down_book:
                         down_imbalance = down_book.compute_imbalance(levels=5)
+
+                    # Log OBI values periodically to verify data flow (every 100 checks)
+                    if self._opportunities_checked % 100 == 0:
+                        logger.info(f"[OBI DATA] up_imbalance={up_imbalance:.3f}, down_imbalance={down_imbalance:.3f}")
             except Exception as e:
-                logger.debug(f"[OBI] Failed to compute imbalance: {e}")
+                logger.warning(f"[OBI] Failed to compute imbalance: {e}")
 
         # Generate quotes
         current_time = time.time()
@@ -5194,10 +5256,24 @@ class PaperTradingBot:
                             # Auto-merge if a new cycle was recorded
                             if len(strategy._completed_pairs) > completed_pairs_before:
                                 last_cycle = strategy._completed_pairs[-1]
+                                pair_cost = last_cycle["pair_cost"]
+                                pairs = last_cycle["pairs"]
+                                hedge_type = last_cycle.get("hedge_type", "unknown")
+
+                                # TRADE SUMMARY LOG for live monitoring
+                                pnl_per_share = 1.0 - pair_cost
+                                total_pnl = pnl_per_share * pairs
+                                result = "WIN" if pair_cost < 1.0 else "LOSS"
+                                trade_num = len(strategy._completed_pairs)
+                                logger.info(
+                                    f"[TRADE #{trade_num}] {result} | pair_cost=${pair_cost:.4f} | "
+                                    f"pnl=${total_pnl:.2f} | hedge={hedge_type} | pairs={pairs}"
+                                )
+
                                 await self._auto_merge_after_cycle(
                                     market=market,
-                                    pairs_to_merge=last_cycle["pairs"],
-                                    pair_cost=last_cycle["pair_cost"],
+                                    pairs_to_merge=pairs,
+                                    pair_cost=pair_cost,
                                     source="EXEC_FILL"
                                 )
 

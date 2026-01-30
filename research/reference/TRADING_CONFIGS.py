@@ -1,18 +1,56 @@
 """
-Master Trading Configurations - VALIDATED Jan 22, 2026
+Master Trading Configurations - UPDATED Jan 27, 2026
 
-These configs are validated against 81.71 hours of data across 254 markets.
+These configs are validated against 157.4 hours of data across 456 markets.
 Stop-out effects ARE factored into PnL calculations.
 
 IMPORTANT: Time-based stops work DIFFERENTLY than price-based stops:
-- AGGRESSIVE: 180s time-stop is BETTER (+33% PnL)
-- BALANCED/CONSERVATIVE: 15% price-stop is BETTER
+- AGGRESSIVE: 120s time-stop + skip rule (TIME120s_SKIP config)
+- BALANCED/CONSERVATIVE: 15% price-stop is BETTER (DEPRECATED)
 
 Usage:
-    from research.TRADING_CONFIGS import AGGRESSIVE, BALANCED, CONSERVATIVE
+    from research.reference.TRADING_CONFIGS import AGGRESSIVE, BALANCED, CONSERVATIVE
 
     config = AGGRESSIVE
     # Use config['lookback_ticks'], config['stop_loss_pct'], etc.
+
+# =============================================================================
+# ⚠️  THIS FILE IS THE SINGLE SOURCE OF TRUTH - AUTO-WIRED TO LIVE ENGINE  ⚠️
+# =============================================================================
+#
+# As of Jan 31, 2026, this file is DIRECTLY IMPORTED by:
+#   - scripts/run_paper_bot.py (AGGRESSIVE config used as defaults)
+#
+# Changes to AGGRESSIVE config values HERE will automatically propagate to
+# the live trading engine. No manual sync required for these parameters:
+#   - lookback_ticks, time_stop_seconds, z_lo, z_hi
+#   - high_entry_threshold, min_time_remaining, skip_high_entry
+#   - use_cycling, threshold_method (OU adaptive)
+#
+# STILL NEED MANUAL UPDATES (grep to find occurrences):
+# 1. src/strategies/enhanced_spike.py (DEFAULT_SPIKE_LOOKBACK for fallback)
+# 2. Backtest scripts (research/backtests/*.py) - should also import from here
+#
+# 2. VECTORIZED SPIKE DETECTION (backtests use these for speed):
+#    - research/backtests/*_backtest.py - detect_spikes_ou() functions
+#    - research/optimizers/*.py - spike detection functions
+#    - Ensure threshold_method matches (OU vs fixed vs EWMA)
+#
+# 3. HARDCODED VALUES:
+#    - SPIKE_LOOKBACK_TICKS, SPIKE_THRESHOLD in any backtest
+#    - TIME_STOP_SECONDS, SKIP_THRESHOLD constants
+#    - DROP_MULTIPLIER, DROP_INTERCEPT for loser bid calculation
+#
+# 4. PRECOMPUTED REFERENCES:
+#    - Any script that precomputes spikes with specific lookback
+#    - Kalman state preprocessing
+#
+# VERIFICATION: After changes, run:
+#    grep -r "lookback_ticks\|SPIKE_LOOKBACK\|spike_lookback" --include="*.py" | grep -v __pycache__
+#    grep -r "time_stop\|TIME_STOP" --include="*.py" | grep -v __pycache__
+#
+# See CLAUDE_MISTAKES.md #30 for why this matters.
+# =============================================================================
 """
 
 from dataclasses import dataclass
@@ -53,6 +91,15 @@ class TradingConfig:
     premature_stop_pct: float
     premature_pnl_lost: float
 
+    # TIME120s_SKIP parameters (Jan 27, 2026)
+    skip_high_entry: bool = False  # Skip entries >= high_entry_threshold
+    high_entry_threshold: float = 0.90  # Turkey problem cutoff
+    min_time_remaining: float = 60.0  # Minimum seconds before market end
+
+    # OBI (Orderbook Imbalance) filter (Jan 28, 2026)
+    # When OBI confirms spike: 89% accuracy vs 77% when disagrees (+4.1pp improvement)
+    use_obi_filter: bool = True  # Skip entries when orderbook disagrees with spike
+
     @property
     def z_zone_label(self) -> str:
         if self.z_lo is None and self.z_hi is None:
@@ -69,8 +116,9 @@ class TradingConfig:
 # VALIDATED CONFIGURATIONS (Jan 24, 2026)
 # =============================================================================
 
-# OOS4 VALIDATED (Jan 24, 2026): $16.72/hr @50sh, 72.4% dir acc, 145 trades
-# Consistent across IS ($7.76/hr), OOS3 ($17.59/hr), OOS4 ($16.72/hr)
+# TIME120s_SKIP + OBI VALIDATED (Jan 28, 2026): ~$9.00/hr avg across 157.4h cross-validation
+# +24% hourly rate vs TIME180s, skip rule eliminates turkey problem losses
+# OBI filter adds +4.1pp accuracy when orderbook confirms spike direction
 AGGRESSIVE = TradingConfig(
     name="AGGRESSIVE",
 
@@ -80,10 +128,10 @@ AGGRESSIVE = TradingConfig(
     lookback_ticks=72,
     lookback_ms=1200,
 
-    # STOP SETTINGS - USE 180s TIME-STOP (NOT price-stop!)
-    # Time-stop gives +33% PnL improvement over 15% price-stop
+    # STOP SETTINGS - USE 120s TIME-STOP (optimized from 180s)
+    # TIME120s runs 28% more cycles than TIME300s
     stop_loss_pct=None,         # NO price-based stop
-    time_stop_seconds=180.0,    # Exit after 180s if not filled AND not in profit
+    time_stop_seconds=120.0,    # Exit after 120s if not filled AND not in profit
 
     # Cycling ON for more trades
     use_cycling=True,
@@ -92,13 +140,18 @@ AGGRESSIVE = TradingConfig(
     z_lo=0.0,
     z_hi=1.5,
 
-    # Expected performance (at 5 shares)
-    expected_pnl=40.35,          # OOS4: $16.72/hr * 24.2h / 10 scale for 5sh
-    expected_hourly_rate=1.672,  # at 5 shares, OOS4
-    expected_win_rate=72.4,
-    expected_trades=145,         # OOS4
-    premature_stop_pct=27.6,     # time-stop exits
-    premature_pnl_lost=-3.50,
+    # TIME120s_SKIP parameters
+    skip_high_entry=True,        # Skip entries >= $0.90 (unhedgeable)
+    high_entry_threshold=0.90,   # Turkey problem cutoff
+    min_time_remaining=180.0,    # time_stop + 60s buffer (prevents resolution exits)
+
+    # Expected performance (at 50 shares, TIME120s_SKIP cross-validation)
+    expected_pnl=90.00,          # ~$9.00/hr * 10h example
+    expected_hourly_rate=9.00,   # at 50 shares, cross-validated
+    expected_win_rate=70.0,
+    expected_trades=150,         # estimate
+    premature_stop_pct=25.0,     # time-stop exits
+    premature_pnl_lost=-2.50,
 )
 
 
@@ -231,6 +284,55 @@ def print_config_summary():
         print(f"  Expected @5sh: ${cfg.expected_pnl:.2f} PnL, {cfg.expected_win_rate:.1f}% win rate")
         print(f"  Expected @50sh: ${cfg.expected_pnl * 10:.2f} PnL")
         print(f"  Premature Stop: {cfg.premature_stop_pct:.1f}% (${cfg.premature_pnl_lost:.2f} lost)")
+
+
+# =============================================================================
+# PARAMETER EXPLANATIONS (moved from run_paper_bot.py Jan 31, 2026)
+# =============================================================================
+#
+# lookback_ticks = 72
+#   - 72 ticks ≈ 1200ms at ~60Hz Binance bookTicker stream
+#   - Formula: ticks = ms * freq / 1000 = 1200 * 60 / 1000 = 72
+#   - This is the CANONICAL lookback validated across all datasets
+#
+# time_stop_seconds = 120.0
+#   - Time-stop exit after 2 minutes if hedge not filled
+#   - Optimized from 180.0 to 120.0 on Jan 27, 2026
+#   - TIME120s runs 28% more cycles than TIME300s
+#
+# high_entry_threshold = 0.90
+#   - Skip entries at or above this price (prevents unhedgeable trades)
+#   - At $0.90 entry, min hedge = $0.10 which requires $1 min order at 10 shares
+#   - Testing value: 0.80 (more conservative for small size)
+#   - Production value: 0.90 (at 50 shares, $0.10 * 50 = $5 hedge is viable)
+#
+# min_time_remaining = 180.0
+#   - Entry cutoff: don't enter if < 180 seconds remaining
+#   - Formula: time_stop_seconds + 60s buffer = 120 + 60 = 180
+#   - Prevents resolution exits (entering too close to market end)
+#
+# skip_high_entry = True
+#   - Enable the high entry skip rule
+#   - When winner_ask >= high_entry_threshold, skip the trade
+#   - Prevents "turkey problem" where we can't hedge expensive entries
+#
+# threshold_method = "ou"
+#   - Use OU (Ornstein-Uhlenbeck) adaptive threshold, NOT fixed 0.02%
+#   - Threshold scales with volatility: low vol → lower threshold, high vol → higher
+#   - Range: 0.015% to 0.10% based on EWMA volatility z-score
+#   - CRITICAL: Fixed 0.02% was WRONG - always use OU adaptive
+#
+# z_lo = 0.0, z_hi = 1.5
+#   - Z-score volatility filter bounds for entry
+#   - Only trade when volatility z-score is between 0.0 and 1.5
+#   - Filters out extreme low/high volatility regimes
+#
+# use_cycling = True
+#   - Re-enter same market after hedge fills
+#   - Optimal per backtest: more trades = more PnL
+#   - MIN_CYCLE_GAP_MS controls minimum gap between trades
+#
+# =============================================================================
 
 
 if __name__ == "__main__":
