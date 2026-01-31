@@ -35,7 +35,8 @@ Supersedes: spike_capture.py (raw spike), spread_capture.py (velocity-based)
 import logging
 import math
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
@@ -192,6 +193,470 @@ class VelocityZone(Enum):
     NEUTRAL = "neutral"
     MODERATE = "moderate"
     STRONG = "strong"
+
+
+class CycleStatus(Enum):
+    """Status of a trading cycle."""
+    PENDING_ENTRY = "pending_entry"
+    ENTRY_FILLED = "entry_filled"
+    PENDING_HEDGE = "pending_hedge"
+    COMPLETED = "completed"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+
+# =============================================================================
+# MULTI-CYCLE TRADING DATA STRUCTURES (Jan 31, 2026)
+# =============================================================================
+#
+# PURPOSE: Allow multiple concurrent entry/hedge cycles to capture more opportunities.
+# Research showed 4,066 good spikes missed in 19 hours due to position blocking.
+# Expected improvement: +89% more good trades (242 → 457 in 19 hours)
+#
+# TO REVERT TO SINGLE-CYCLE MODE:
+# 1. In TRADING_CONFIGS.py, set enable_multicycle=False in AGGRESSIVE config
+# 2. The MultiCycleManager will automatically limit to max_cycles=1
+# 3. No code changes needed - just config toggle
+#
+# ALTERNATIVE: To completely remove multi-cycle code:
+# 1. Delete MultiCycleManager class, CycleOrder, TradingCycle, CycleStatus
+# 2. Revert EnhancedSpikeStrategy to use self.state directly (as before)
+# 3. Remove cycle_manager from __init__ and get_quotes()/on_fill()
+# =============================================================================
+
+@dataclass
+class CycleOrder:
+    """Tracks a single order within a cycle."""
+    order_id: str           # Unique ID (uuid or from exchange)
+    cycle_id: str           # Parent cycle ID
+    side: str               # "UP" or "DOWN"
+    order_type: str         # "entry" or "hedge"
+    target_price: float     # Expected fill price
+    shares: int
+    submitted_ts: int       # When order was submitted (ms)
+    filled: bool = False
+    fill_price: float = 0.0
+    fill_ts: int = 0
+
+
+@dataclass
+class TradingCycle:
+    """Complete cycle with entry + hedge tracking."""
+    id: str                          # Unique cycle ID
+    created_ts: int                  # Creation timestamp (ms)
+    timeout_ts: int                  # Expiry timestamp (ms)
+    shares: int                      # Shares per leg
+
+    # Spike info (locked at creation)
+    spike_direction: str             # "UP" or "DOWN"
+    spike_magnitude: float
+
+    # Sides (determined by spike direction)
+    winner_side: str                 # Side we're betting on
+    loser_side: str                  # Hedge side
+
+    # Order tracking
+    entry_order: Optional[CycleOrder] = None
+    hedge_order: Optional[CycleOrder] = None
+
+    # Status
+    status: CycleStatus = CycleStatus.PENDING_ENTRY
+
+    @property
+    def is_active(self) -> bool:
+        return self.status not in (
+            CycleStatus.COMPLETED,
+            CycleStatus.EXPIRED,
+            CycleStatus.CANCELLED
+        )
+
+
+class MultiCycleManager:
+    """
+    Manages multiple parallel trading cycles with robust order tracking.
+
+    KEY DESIGN PRINCIPLES:
+    1. Every order has a unique ID
+    2. Order ID → Cycle ID mapping for instant lookup
+    3. Fallback matching by (side, price proximity, timing)
+    4. Toggleable via enable_multicycle flag
+    5. Logs ambiguous matches for debugging
+
+    Usage:
+        manager = MultiCycleManager(max_cycles=2, shares_per_cycle=20)
+
+        # Create new cycle on spike
+        cycle = manager.create_cycle("UP", 0.05, winner_ask=0.45, loser_bid=0.52)
+
+        # Route fills
+        result = manager.on_fill("UP", 0.45, 20, order_id="entry_xxx")
+        if result:
+            cycle, fill_type = result  # fill_type is "entry" or "hedge"
+    """
+
+    def __init__(
+        self,
+        max_cycles: int = 2,
+        shares_per_cycle: int = 20,
+        time_stop_seconds: float = 180.0,
+        enable_multicycle: bool = True,
+    ):
+        self.max_cycles = max_cycles if enable_multicycle else 1
+        self.shares_per_cycle = shares_per_cycle
+        self.time_stop_ms = int(time_stop_seconds * 1000)
+        self.enable_multicycle = enable_multicycle
+
+        # Active cycles
+        self.cycles: Dict[str, TradingCycle] = {}
+
+        # ORDER ID → CYCLE ID mapping (PRIMARY lookup method)
+        self.order_to_cycle: Dict[str, str] = {}
+
+        # Stats
+        self.total_cycles_created = 0
+        self.total_fills_matched = 0
+        self.ambiguous_matches = 0
+
+    def can_enter_new_cycle(self) -> bool:
+        """Check if we have capacity for new entry."""
+        self._cleanup_expired()
+        active_count = sum(1 for c in self.cycles.values() if c.is_active)
+        return active_count < self.max_cycles
+
+    def create_cycle(
+        self,
+        spike_direction: str,
+        spike_magnitude: float,
+        winner_ask: float,
+        loser_bid: float,
+    ) -> Optional[TradingCycle]:
+        """
+        Create new cycle and generate entry order.
+
+        Returns cycle if created, None if at capacity.
+        """
+        if not self.can_enter_new_cycle():
+            return None
+
+        now_ms = int(time.time() * 1000)
+        cycle_id = f"cycle_{uuid.uuid4().hex[:8]}"
+
+        # Determine sides based on spike direction
+        winner_side = spike_direction  # UP spike → buy UP
+        loser_side = "DOWN" if winner_side == "UP" else "UP"
+
+        cycle = TradingCycle(
+            id=cycle_id,
+            created_ts=now_ms,
+            timeout_ts=now_ms + self.time_stop_ms,
+            shares=self.shares_per_cycle,
+            spike_direction=spike_direction,
+            spike_magnitude=spike_magnitude,
+            winner_side=winner_side,
+            loser_side=loser_side,
+            status=CycleStatus.PENDING_ENTRY,
+        )
+
+        # Create entry order
+        entry_order_id = f"entry_{cycle_id}"
+        cycle.entry_order = CycleOrder(
+            order_id=entry_order_id,
+            cycle_id=cycle_id,
+            side=winner_side,
+            order_type="entry",
+            target_price=winner_ask,
+            shares=self.shares_per_cycle,
+            submitted_ts=now_ms,
+        )
+
+        # Register mappings
+        self.cycles[cycle_id] = cycle
+        self.order_to_cycle[entry_order_id] = cycle_id
+        self.total_cycles_created += 1
+
+        logger.debug(
+            f"[MULTICYCLE] Created {cycle_id[:12]}: {spike_direction} spike, "
+            f"entry={winner_side}@${winner_ask:.3f}, shares={self.shares_per_cycle}"
+        )
+
+        return cycle
+
+    def on_fill(
+        self,
+        side: str,
+        price: float,
+        size: int,
+        order_id: Optional[str] = None,
+    ) -> Optional[Tuple[TradingCycle, str]]:
+        """
+        Route fill to correct cycle.
+
+        Returns (cycle, fill_type) where fill_type is "entry" or "hedge".
+        Returns None if no matching cycle found.
+        """
+        # METHOD 1: Direct order_id lookup (PREFERRED)
+        if order_id and order_id in self.order_to_cycle:
+            cycle_id = self.order_to_cycle[order_id]
+            cycle = self.cycles.get(cycle_id)
+            if cycle:
+                return self._process_fill(cycle, side, price, size, order_id)
+
+        # METHOD 2: Fallback matching (for paper trading or missing order_id)
+        return self._fallback_match(side, price, size)
+
+    def _process_fill(
+        self,
+        cycle: TradingCycle,
+        side: str,
+        price: float,
+        size: int,
+        order_id: Optional[str] = None,
+    ) -> Optional[Tuple[TradingCycle, str]]:
+        """Process fill for a specific cycle."""
+        now_ms = int(time.time() * 1000)
+
+        # Check if this is entry or hedge
+        if cycle.status == CycleStatus.PENDING_ENTRY:
+            # Entry fill
+            if cycle.entry_order and side == cycle.entry_order.side:
+                cycle.entry_order.filled = True
+                cycle.entry_order.fill_price = price
+                cycle.entry_order.fill_ts = now_ms
+                cycle.status = CycleStatus.ENTRY_FILLED
+
+                # Now create hedge order
+                hedge_order_id = f"hedge_{cycle.id}"
+                cycle.hedge_order = CycleOrder(
+                    order_id=hedge_order_id,
+                    cycle_id=cycle.id,
+                    side=cycle.loser_side,
+                    order_type="hedge",
+                    target_price=self._calculate_hedge_target(cycle, price),
+                    shares=self.shares_per_cycle,
+                    submitted_ts=now_ms,
+                )
+                self.order_to_cycle[hedge_order_id] = cycle.id
+                cycle.status = CycleStatus.PENDING_HEDGE
+
+                self.total_fills_matched += 1
+                logger.info(
+                    f"[MULTICYCLE] Entry filled: {cycle.id[:12]} {side}@${price:.3f}, "
+                    f"hedge target={cycle.loser_side}@${cycle.hedge_order.target_price:.3f}"
+                )
+                return (cycle, "entry")
+
+        elif cycle.status == CycleStatus.PENDING_HEDGE:
+            # Hedge fill
+            if cycle.hedge_order and side == cycle.hedge_order.side:
+                cycle.hedge_order.filled = True
+                cycle.hedge_order.fill_price = price
+                cycle.hedge_order.fill_ts = now_ms
+                cycle.status = CycleStatus.COMPLETED
+
+                self.total_fills_matched += 1
+                logger.info(
+                    f"[MULTICYCLE] Hedge filled: {cycle.id[:12]} {side}@${price:.3f}, "
+                    f"CYCLE COMPLETE"
+                )
+                return (cycle, "hedge")
+
+        return None
+
+    def _fallback_match(
+        self,
+        side: str,
+        price: float,
+        size: int,
+    ) -> Optional[Tuple[TradingCycle, str]]:
+        """
+        Fallback matching when order_id not available.
+
+        Priority:
+        1. Exact side match for pending order type
+        2. Price proximity (within 5 cents)
+        3. Most recent cycle first
+        """
+        candidates = []
+
+        for cycle in self.cycles.values():
+            if not cycle.is_active:
+                continue
+
+            # Check if waiting for entry on this side
+            if (cycle.status == CycleStatus.PENDING_ENTRY and
+                cycle.entry_order and
+                cycle.entry_order.side == side):
+                price_diff = abs(cycle.entry_order.target_price - price)
+                candidates.append((cycle, "entry", price_diff, cycle.created_ts))
+
+            # Check if waiting for hedge on this side
+            elif (cycle.status == CycleStatus.PENDING_HEDGE and
+                  cycle.hedge_order and
+                  cycle.hedge_order.side == side):
+                price_diff = abs(cycle.hedge_order.target_price - price)
+                candidates.append((cycle, "hedge", price_diff, cycle.created_ts))
+
+        if not candidates:
+            return None
+
+        if len(candidates) > 1:
+            self.ambiguous_matches += 1
+            logger.warning(
+                f"[MULTICYCLE] Ambiguous fill match: {len(candidates)} candidates for "
+                f"{side}@${price:.3f} (total ambiguous: {self.ambiguous_matches})"
+            )
+
+        # Sort by: price proximity (primary), then recency (secondary)
+        candidates.sort(key=lambda x: (x[2], -x[3]))
+        best = candidates[0]
+
+        return self._process_fill(best[0], side, price, size, None)
+
+    def _calculate_hedge_target(self, cycle: TradingCycle, entry_price: float) -> float:
+        """Calculate hedge bid price based on entry and spike magnitude."""
+        # Use same formula as single-cycle mode
+        expected_drop = DROP_MULTIPLIER * cycle.spike_magnitude + DROP_INTERCEPT
+        max_loser = DEFAULT_TARGET_PAIR_COST - entry_price
+        loser_bid = min((1.0 - entry_price) - expected_drop, max_loser)
+        return max(0.01, min(0.95, loser_bid))
+
+    def _cleanup_expired(self):
+        """Mark expired cycles."""
+        now_ms = int(time.time() * 1000)
+        for cycle in self.cycles.values():
+            if cycle.is_active and now_ms > cycle.timeout_ts:
+                cycle.status = CycleStatus.EXPIRED
+                logger.info(f"[MULTICYCLE] Cycle expired: {cycle.id[:12]}")
+
+    def get_pending_orders(self) -> List[Tuple[str, str, float, int]]:
+        """
+        Get all pending orders across all cycles.
+
+        Returns list of (side, order_type, price, shares)
+        """
+        orders = []
+        for cycle in self.cycles.values():
+            if cycle.status == CycleStatus.PENDING_ENTRY and cycle.entry_order:
+                orders.append((
+                    cycle.entry_order.side,
+                    "entry",
+                    cycle.entry_order.target_price,
+                    cycle.entry_order.shares,
+                ))
+            elif cycle.status == CycleStatus.PENDING_HEDGE and cycle.hedge_order:
+                orders.append((
+                    cycle.hedge_order.side,
+                    "hedge",
+                    cycle.hedge_order.target_price,
+                    cycle.hedge_order.shares,
+                ))
+        return orders
+
+    def get_active_cycles(self) -> List[TradingCycle]:
+        """Get list of active cycles."""
+        return [c for c in self.cycles.values() if c.is_active]
+
+    def get_status(self) -> Dict:
+        """Get manager status for logging."""
+        active = self.get_active_cycles()
+        return {
+            "enable_multicycle": self.enable_multicycle,
+            "max_cycles": self.max_cycles,
+            "shares_per_cycle": self.shares_per_cycle,
+            "active_cycles": len(active),
+            "total_created": self.total_cycles_created,
+            "fills_matched": self.total_fills_matched,
+            "ambiguous_matches": self.ambiguous_matches,
+            "cycles": [
+                {
+                    "id": c.id[:12],
+                    "status": c.status.value,
+                    "spike": c.spike_direction,
+                    "winner": c.winner_side,
+                    "entry_filled": c.entry_order.filled if c.entry_order else False,
+                    "hedge_filled": c.hedge_order.filled if c.hedge_order else False,
+                }
+                for c in active
+            ]
+        }
+
+    def reset(self) -> None:
+        """Reset manager for new market."""
+        self.cycles.clear()
+        self.order_to_cycle.clear()
+        # Keep stats for session tracking
+
+
+# =============================================================================
+# ENHANCED OBI FILTER FUNCTION (Jan 31, 2026)
+# =============================================================================
+#
+# PURPOSE: Enhanced OBI filter with ML-validated spike quality checks.
+# Previous OBI filter was binary (reject if OBI <= 0).
+# New filter adds: magnitude check, loser spread, time remaining, depth.
+#
+# TO REVERT TO SIMPLE OBI FILTER:
+# 1. In get_quotes(), replace call to should_take_spike_enhanced() with
+#    the original simple OBI check:
+#        if spike_direction == "UP" and up_imbalance is not None:
+#            obi_confirms = up_imbalance > 0
+#        elif spike_direction == "DOWN" and down_imbalance is not None:
+#            obi_confirms = down_imbalance > 0
+#
+# 2. Or simply don't call should_take_spike_enhanced() at all if not needed.
+#
+# The original simple OBI check code is preserved in get_quotes() around line 1100+
+# (look for "OBI CONFIRMATION FILTER" comment block)
+# =============================================================================
+
+def should_take_spike_enhanced(
+    spike_direction: str,
+    obi_winner: float,
+    loser_spread: float = 0.05,
+    time_remaining: float = 600.0,
+    winner_ask_depth: Optional[float] = None,
+) -> Tuple[bool, str]:
+    """
+    ML-validated spike filter with enhanced OBI and market structure checks.
+
+    Based on research findings (Jan 31, 2026):
+    - OBI confirmation: 49% vs 31% good spike rate (+18pp)
+    - Strong-sell OBI: only 19.3% good vs 49% when confirms
+    - Wider loser spread: correlation +0.19 with good spikes
+    - More time: correlation +0.24 with good spikes
+    - Low depth: correlation -0.24 with good spikes
+
+    Args:
+        spike_direction: "UP" or "DOWN"
+        obi_winner: Orderbook imbalance for winner side (-1 to +1)
+        loser_spread: Bid-ask spread on loser side
+        time_remaining: Seconds until market resolution
+        winner_ask_depth: Depth at winner ask (optional)
+
+    Returns:
+        (should_take, reason) tuple
+    """
+    # CRITICAL: OBI confirmation (49% vs 31% good spike rate)
+    if obi_winner <= 0:
+        return False, f"OBI disagrees (obi={obi_winner:.3f})"
+
+    # Strong-sell OBI = only 19.3% good (vs 49% when confirms)
+    if obi_winner < -0.3:
+        return False, f"OBI strong sell (obi={obi_winner:.3f})"
+
+    # Wider loser spread = more room for drop (correlation +0.19)
+    if loser_spread < 0.02:
+        return False, f"Loser spread too tight ({loser_spread:.3f})"
+
+    # More time = better chance of drop (correlation +0.24)
+    if time_remaining < 300:
+        return False, f"Too close to expiry ({time_remaining:.0f}s)"
+
+    # Low depth = easier to move price (correlation -0.24)
+    if winner_ask_depth is not None and winner_ask_depth > 5000:
+        return False, f"Winner depth too high (${winner_ask_depth:.0f})"
+
+    return True, "All filters passed"
 
 
 # =============================================================================
@@ -358,6 +823,11 @@ class EnhancedSpikeStrategy:
         skip_high_entry: bool = False,
         high_entry_threshold: float = DEFAULT_HIGH_ENTRY_THRESHOLD,
         min_time_remaining: float = 60.0,  # Configurable (was hardcoded MIN_TIME_REMAINING)
+        # MULTI-CYCLE TRADING (Jan 31, 2026)
+        # Set enable_multicycle=False to revert to single-cycle mode
+        enable_multicycle: bool = True,
+        max_cycles: int = 2,
+        shares_per_cycle: int = 20,
         # LEGACY parameters (aliases for backward compatibility)
         entry_size: Optional[int] = None,
         entry_offset: float = DEFAULT_ENTRY_OFFSET,
@@ -415,6 +885,25 @@ class EnhancedSpikeStrategy:
         self.state.last_velocity_zone = VelocityZone.NEUTRAL
         self._completed_pairs: List[Dict[str, Any]] = []
 
+        # MULTI-CYCLE TRADING (Jan 31, 2026)
+        # Set enable_multicycle=False to revert to single-cycle mode
+        self.enable_multicycle = enable_multicycle
+        self.max_cycles = max_cycles
+        self.shares_per_cycle = shares_per_cycle
+        self.cycle_manager: Optional[MultiCycleManager] = None
+
+        if enable_multicycle:
+            self.cycle_manager = MultiCycleManager(
+                max_cycles=max_cycles,
+                shares_per_cycle=shares_per_cycle,
+                time_stop_seconds=time_stop_seconds,
+                enable_multicycle=True,
+            )
+            logger.info(
+                f"[ENHSPIKE] Multi-cycle ENABLED: max={max_cycles}, shares_per={shares_per_cycle}, "
+                f"total_capacity={max_cycles * shares_per_cycle}"
+            )
+
         zscore_info = ""
         if zscore_filter_enabled and zscore_tracker:
             zscore_info = f", zscore_filter=[{zscore_lo}, {zscore_hi}]"
@@ -423,11 +912,12 @@ class EnhancedSpikeStrategy:
 
         stop_info = f"{stop_loss_pct:.0%}" if stop_loss_pct else "None"
         skip_info = f", skip_high_entry={skip_high_entry} (>=${high_entry_threshold:.2f})" if skip_high_entry else ""
+        multicycle_info = f", multicycle={enable_multicycle} ({max_cycles}x{shares_per_cycle})" if enable_multicycle else ""
         logger.info(
             f"[ENHSPIKE] Initialized: base_size={base_size}, lookback={spike_lookback}, "
             f"threshold={spike_threshold:.2f}%, target_pair=${target_pair_cost:.2f}, "
             f"stop_loss={stop_info}, time_stop={time_stop_seconds}s, min_time={min_time_remaining}s, "
-            f"cycling={enable_cycling}{zscore_info}{skip_info}"
+            f"cycling={enable_cycling}{zscore_info}{skip_info}{multicycle_info}"
         )
 
     # =========================================================================
@@ -1083,9 +1573,31 @@ class EnhancedSpikeStrategy:
                 if should_trade:
                     spike_direction = raw_spike_direction
 
-                    # OBI CONFIRMATION FILTER (January 28, 2026):
+                    # =========================================================
+                    # OBI CONFIRMATION FILTER (January 28, 2026)
+                    # =========================================================
+                    # CURRENT BEHAVIOR: Simple binary check (OBI > 0)
                     # When OBI confirms spike direction: 89% accuracy vs 77% when disagrees
                     # Improvement: +4.1pp at 30-tick horizon
+                    #
+                    # TO DISABLE OBI FILTER ENTIRELY:
+                    # Comment out the entire if/elif block below (lines checking up_imbalance/down_imbalance)
+                    # The spike will pass through without OBI validation
+                    #
+                    # TO USE ENHANCED OBI FILTER (should_take_spike_enhanced):
+                    # Replace the if/elif block below with:
+                    #     obi_winner = up_imbalance if spike_direction == "UP" else down_imbalance
+                    #     should_take, reason = should_take_spike_enhanced(
+                    #         spike_direction=spike_direction,
+                    #         obi_winner=obi_winner if obi_winner is not None else 0.5,
+                    #         loser_spread=loser_spread,  # Must pass from caller
+                    #         time_remaining=time_remaining,
+                    #         winner_ask_depth=winner_ask_depth,  # Must pass from caller
+                    #     )
+                    #     if not should_take:
+                    #         logger.info(f"[ENHANCED OBI REJECT] {spike_direction}: {reason}")
+                    #         spike_direction = None
+                    # =========================================================
                     obi_confirms = True
                     if spike_direction == "UP" and up_imbalance is not None:
                         obi_confirms = up_imbalance > 0
@@ -1200,6 +1712,99 @@ class EnhancedSpikeStrategy:
 
         quotes = []
 
+        # =========================================================================
+        # MULTI-CYCLE MODE (Jan 31, 2026)
+        # =========================================================================
+        # When enabled, use cycle manager for entry/hedge tracking
+        # To revert: set enable_multicycle=False in config
+        if self.enable_multicycle and self.cycle_manager is not None:
+            # Check if we can create a new cycle
+            if spike_direction is not None and self.cycle_manager.can_enter_new_cycle():
+                winner_side = spike_direction
+                loser_side = "DOWN" if winner_side == "UP" else "UP"
+
+                if winner_side == "UP":
+                    winner_ask = up_ask
+                    winner_bid = up_bid
+                    loser_bid = down_bid
+                else:
+                    winner_ask = down_ask
+                    winner_bid = down_bid
+                    loser_bid = up_bid
+
+                # SKIP HIGH-ENTRY check
+                if self.skip_high_entry and winner_ask >= self.high_entry_threshold:
+                    logger.debug(
+                        f"[MULTICYCLE] SKIP: {winner_side} ask=${winner_ask:.3f} >= "
+                        f"${self.high_entry_threshold:.2f} (unhedgeable)"
+                    )
+                else:
+                    # Create new cycle
+                    cycle = self.cycle_manager.create_cycle(
+                        spike_direction=spike_direction,
+                        spike_magnitude=spike_magnitude,
+                        winner_ask=winner_ask,
+                        loser_bid=loser_bid,
+                    )
+                    if cycle:
+                        # Generate entry quote using cycle's shares
+                        entry_price = min(winner_bid + 0.01, winner_ask - 0.01)
+                        entry_price = round(entry_price, 2)
+                        entry_price = max(0.01, min(self.max_share_price, entry_price))
+
+                        quotes.append({
+                            'side': winner_side,
+                            'price': entry_price,
+                            'size': self.shares_per_cycle,  # Use per-cycle size
+                            'level': 0,
+                            'is_rebalance': False,
+                            'is_spike_entry': True,
+                            'spike_magnitude': spike_magnitude,
+                            'enhanced_score': enhanced_score,
+                            'zscore': current_zscore if self.zscore_tracker else None,
+                            'zscore_regime': self.zscore_tracker.get_regime() if self.zscore_tracker else None,
+                            'cycle_id': cycle.id,  # Track which cycle this is for
+                            'order_id': cycle.entry_order.order_id if cycle.entry_order else None,
+                        })
+
+                        logger.info(
+                            f"[MULTICYCLE] New cycle {cycle.id[:12]}: {winner_side} entry @ ${entry_price:.3f} "
+                            f"(spike={spike_magnitude:.4f}%, active={len(self.cycle_manager.get_active_cycles())})"
+                        )
+
+            # Generate hedge quotes for pending cycles
+            for cycle in self.cycle_manager.get_active_cycles():
+                if cycle.status == CycleStatus.PENDING_HEDGE and cycle.hedge_order:
+                    loser_side = cycle.loser_side
+                    loser_ask = down_ask if loser_side == "DOWN" else up_ask
+                    loser_bid_price = down_bid if loser_side == "DOWN" else up_bid
+
+                    # Use magnitude-based hedge pricing
+                    hedge_bid = self.calculate_magnitude_loser_bid(
+                        cycle.spike_magnitude,
+                        loser_ask,
+                        cycle.entry_order.fill_price if cycle.entry_order else 0.5,
+                    )
+                    hedge_bid = round(hedge_bid, 2)
+                    hedge_bid = max(0.01, min(self.max_share_price, hedge_bid))
+
+                    quotes.append({
+                        'side': loser_side,
+                        'price': hedge_bid,
+                        'size': self.shares_per_cycle,
+                        'level': 0,
+                        'is_rebalance': False,
+                        'is_hedge': True,
+                        'cycle_id': cycle.id,
+                        'order_id': cycle.hedge_order.order_id,
+                    })
+
+            s.quotes_generated += len(quotes)
+            return quotes
+
+        # =========================================================================
+        # SINGLE-CYCLE MODE (original behavior)
+        # =========================================================================
         # PHASE 1: Entry not filled yet
         if s.first_fill_side is None:
             # Determine winner based on spike (preferred) or velocity (fallback)
@@ -1212,6 +1817,16 @@ class EnhancedSpikeStrategy:
                 winner_side = "UP" if velocity_bps > 0 else "DOWN"
 
             loser_side = "DOWN" if winner_side == "UP" else "UP"
+
+            # TARGET SHARES CHECK: Don't exceed target on either side
+            # NOTE: When changing base_size, ensure target_shares is updated accordingly
+            winner_shares = s.up_shares if winner_side == "UP" else s.down_shares
+            if winner_shares + self.base_size > self.target_shares:
+                logger.debug(
+                    f"[ENHSPIKE] SKIP: {winner_side} would exceed target "
+                    f"({winner_shares} + {self.base_size} > {self.target_shares})"
+                )
+                return []
 
             # Winner entry - buy at ASK for speed (spike mode) or bid+offset (velocity mode)
             if winner_side == "UP":
@@ -1415,11 +2030,54 @@ class EnhancedSpikeStrategy:
     # FILL HANDLING
     # =========================================================================
 
-    def on_fill(self, side: str, price: float, size: int) -> None:
-        """Handle a fill notification."""
+    def on_fill(self, side: str, price: float, size: int, order_id: Optional[str] = None) -> None:
+        """
+        Handle a fill notification.
+
+        Args:
+            side: "UP" or "DOWN"
+            price: Fill price
+            size: Number of shares filled
+            order_id: Optional order ID for multi-cycle routing
+        """
         s = self.state
         side_upper = side.upper()
 
+        # MULTI-CYCLE ROUTING (Jan 31, 2026)
+        # Route fills through cycle manager when enabled
+        # To revert: set enable_multicycle=False in config or strategy init
+        if self.enable_multicycle and self.cycle_manager is not None:
+            result = self.cycle_manager.on_fill(side_upper, price, size, order_id)
+            if result:
+                cycle, fill_type = result
+                # Update state to reflect the fill
+                if side_upper == "UP":
+                    s.up_cost += price * size
+                    s.up_shares += size
+                    s.up_avg_price = round(s.up_cost / s.up_shares, 4) if s.up_shares > 0 else 0.0
+                    s.total_up_fills += size
+                else:
+                    s.down_cost += price * size
+                    s.down_shares += size
+                    s.down_avg_price = round(s.down_cost / s.down_shares, 4) if s.down_shares > 0 else 0.0
+                    s.total_down_fills += size
+
+                logger.info(
+                    f"[MULTICYCLE] Fill routed: {fill_type} for {cycle.id[:12]} "
+                    f"({cycle.spike_direction} spike) | {side_upper} {size}@${price:.3f}"
+                )
+
+                # Check for completed cycles
+                if cycle.status == CycleStatus.COMPLETED:
+                    self._check_completed_pairs()
+                return
+            else:
+                logger.warning(
+                    f"[MULTICYCLE] Unrouted fill: {side_upper} {size}@${price:.3f} "
+                    f"(order_id={order_id}) - falling through to single-cycle handling"
+                )
+
+        # SINGLE-CYCLE MODE (original behavior)
         if side_upper == "UP":
             s.up_cost += price * size
             s.up_shares += size
@@ -1583,7 +2241,7 @@ class EnhancedSpikeStrategy:
     def get_status(self) -> Dict[str, Any]:
         """Get current strategy status."""
         s = self.state
-        return {
+        status = {
             "phase": s.phase.value,
             "position": {
                 "up_shares": s.up_shares,
@@ -1622,6 +2280,12 @@ class EnhancedSpikeStrategy:
             "zscore_filter": self.get_zscore_stats(),
         }
 
+        # Add multi-cycle status if enabled
+        if self.enable_multicycle and self.cycle_manager is not None:
+            status["multicycle"] = self.cycle_manager.get_status()
+
+        return status
+
     def get_completed_cycles(self) -> List[Dict[str, Any]]:
         """Get list of completed pair matches."""
         return self._completed_pairs.copy()
@@ -1641,7 +2305,15 @@ class EnhancedSpikeStrategy:
         self._completed_pairs = []
         self.clear_spike_history()
         self._zscore_skip_count = 0
-        logger.info(f"[ENHSPIKE] Reset for market #{markets} (spike history cleared)")
+
+        # Reset multi-cycle manager for new market
+        if self.cycle_manager is not None:
+            self.cycle_manager.reset()
+            logger.info(
+                f"[ENHSPIKE] Reset for market #{markets} (spike history + multicycle cleared)"
+            )
+        else:
+            logger.info(f"[ENHSPIKE] Reset for market #{markets} (spike history cleared)")
 
     def reset_for_cycle(self) -> None:
         """Reset state for next cycle WITHIN same market (cycling mode)."""

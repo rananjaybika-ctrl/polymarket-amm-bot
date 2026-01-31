@@ -100,6 +100,13 @@ class TradingConfig:
     # When OBI confirms spike: 89% accuracy vs 77% when disagrees (+4.1pp improvement)
     use_obi_filter: bool = True  # Skip entries when orderbook disagrees with spike
 
+    # Multi-cycle trading (Jan 31, 2026)
+    # Allows multiple concurrent entry/hedge cycles to capture more opportunities
+    # 4,066 good spikes missed in 19 hours due to position blocking
+    enable_multicycle: bool = True   # Toggle ON/OFF
+    max_cycles: int = 2              # Max concurrent cycles (2 cycles × 20 shares = 40 total)
+    shares_per_cycle: int = 20       # Shares per cycle
+
     @property
     def z_zone_label(self) -> str:
         if self.z_lo is None and self.z_hi is None:
@@ -119,6 +126,11 @@ class TradingConfig:
 # TIME120s_SKIP + OBI VALIDATED (Jan 28, 2026): ~$9.00/hr avg across 157.4h cross-validation
 # +24% hourly rate vs TIME180s, skip rule eliminates turkey problem losses
 # OBI filter adds +4.1pp accuracy when orderbook confirms spike direction
+#
+# MULTI-CYCLE TRADING (Jan 31, 2026):
+# - Added enable_multicycle, max_cycles, shares_per_cycle
+# - Expected +89% more good trades (242 → 457 in 19 hours)
+# - TO REVERT: Set enable_multicycle=False (falls back to single-cycle mode)
 AGGRESSIVE = TradingConfig(
     name="AGGRESSIVE",
 
@@ -128,10 +140,10 @@ AGGRESSIVE = TradingConfig(
     lookback_ticks=72,
     lookback_ms=1200,
 
-    # STOP SETTINGS - USE 20s TIME-STOP (testing faster cycling)
-    # TIME120s runs 28% more cycles than TIME300s
+    # STOP SETTINGS - USE 180s TIME-STOP (validated Jan 31, 2026)
+    # See: research/findings/TIMESTOP_OFFSET_STUDY_20260131.md
     stop_loss_pct=None,         # NO price-based stop
-    time_stop_seconds=20.0,     # Exit after 20s if not filled (TESTING)
+    time_stop_seconds=180.0,    # Exit after 180s if not filled (CURRENT_TS180 winner)
 
     # Cycling ON for more trades
     use_cycling=True,
@@ -140,10 +152,16 @@ AGGRESSIVE = TradingConfig(
     z_lo=0.0,
     z_hi=1.5,
 
-    # TIME120s_SKIP parameters
+    # TIME180s_SKIP parameters (updated from TIME120s, Jan 31, 2026)
     skip_high_entry=True,        # Skip entries >= $0.90 (unhedgeable)
     high_entry_threshold=0.90,   # Turkey problem cutoff
-    min_time_remaining=180.0,    # time_stop + 60s buffer (prevents resolution exits)
+    min_time_remaining=240.0,    # time_stop + 60s buffer = 180 + 60 = 240
+
+    # MULTI-CYCLE TRADING (Jan 31, 2026)
+    # TO REVERT TO SINGLE-CYCLE: Set enable_multicycle=False
+    enable_multicycle=True,      # Toggle multi-cycle ON/OFF
+    max_cycles=2,                # Max concurrent cycles
+    shares_per_cycle=20,         # Shares per cycle (total = 2 × 20 = 40)
 
     # Expected performance (at 50 shares, TIME120s_SKIP cross-validation)
     expected_pnl=90.00,          # ~$9.00/hr * 10h example

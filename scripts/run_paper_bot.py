@@ -456,7 +456,7 @@ class PaperTradingBot:
         accum_pair_cost_target: float = 0.995,  # Target pair cost for normal trading
         accum_pair_cost_limit: float = 1.02,  # Max pair cost for rebalancing
         accum_max_imbalance_pct: float = 0.20,  # Max imbalance as % of target (20% = 6 shares)
-        hard_max_imbalance: int = 10,  # HARD LIMIT: Stop ALL trading if imbalance >= this
+        hard_max_imbalance: int = 60,  # HARD LIMIT: Stop ALL trading if imbalance >= this (raised for 50-share trades)
         accum_target_shares: int = 50,  # Target shares per side per market (capped by max_position_pct)
         accum_buy_both_sides: bool = True,  # Try to buy both sides each cycle
         max_position_pct: float = 0.17,  # Max shares per side as % of balance (17% of $100 = 17 shares)
@@ -509,7 +509,7 @@ class PaperTradingBot:
         session_end_utc: Optional[datetime] = None,
         # NEW: Spread Capture continuous velocity mode parameters
         # Updated based on optimizer results (Jan 18, 2026)
-        spread_base_size: int = 30,           # Total shares per trade
+        spread_base_size: int = 50,           # Total shares per trade (AGGRESSIVE base_size)
         spread_grid_levels: int = 1,          # Single price level (optimizer winner)
         # =============================================================================
         # AGGRESSIVE (Path 1) parameters - SOURCED FROM TRADING_CONFIGS.py
@@ -815,12 +815,22 @@ class PaperTradingBot:
                 high_entry_threshold=self.high_entry_threshold,
                 min_time_remaining=AGGRESSIVE_CONFIG.min_time_remaining,  # FROM TRADING_CONFIGS.py
                 ou_adaptive_threshold=ou_adaptive,  # USE OU ADAPTIVE (per TRADING_CONFIGS.py threshold_method="ou")
+                # MULTI-CYCLE TRADING (Jan 31, 2026) - FROM TRADING_CONFIGS.py
+                # To revert: set enable_multicycle=False in TRADING_CONFIGS.py
+                enable_multicycle=AGGRESSIVE_CONFIG.enable_multicycle,
+                max_cycles=AGGRESSIVE_CONFIG.max_cycles,
+                shares_per_cycle=AGGRESSIVE_CONFIG.shares_per_cycle,
             )
+            multicycle_info = ""
+            if AGGRESSIVE_CONFIG.enable_multicycle:
+                multicycle_info = (
+                    f", multicycle={AGGRESSIVE_CONFIG.max_cycles}x{AGGRESSIVE_CONFIG.shares_per_cycle}"
+                )
             logger.info(
                 f"[AGGRESSIVE] Initialized: base_size={self.spread_base_size}, "
                 f"spike_lookback={self.spread_spike_lookback}, time_stop={self.time_stop_seconds}s, "
                 f"z_bounds=[{self.zscore_lo}, {self.zscore_hi}], skip_high>=${self.high_entry_threshold}, "
-                f"threshold={'OU_ADAPTIVE' if ou_adaptive else 'FIXED_0.02'}"
+                f"threshold={'OU_ADAPTIVE' if ou_adaptive else 'FIXED_0.02'}{multicycle_info}"
             )
 
         # CONTRARIAN Strategy (Path 2): Bet against BTC direction at reversal
@@ -2540,14 +2550,18 @@ class PaperTradingBot:
         # Log mode info
         logger.info("=" * 50)
         if self.accum_mode == "calculus_maker":
-            mode_label = "CALCULUS MAKER"
+            self.mode_label = "CALCULUS MAKER"
         elif self.accum_mode == "fair_value_mm":
-            mode_label = "FAIR VALUE MM"
+            self.mode_label = "FAIR VALUE MM"
         elif self.accum_mode == "spread_capture":
-            mode_label = "SPREAD CAPTURE (Continuous Velocity)"
+            self.mode_label = "SPREAD CAPTURE (Continuous Velocity)"
+        elif self.accum_mode == "latency_arb":
+            self.mode_label = "LATENCY_ARB (DEPRECATED)"
+        elif self.accum_mode == "aggressive":
+            self.mode_label = "AGGRESSIVE"
         else:
-            mode_label = "STANDARD"
-        logger.info(f"ACCUMULATION MODE [{mode_label}] - High Frequency Trading")
+            self.mode_label = "STANDARD"
+        logger.info(f"ACCUMULATION MODE [{self.mode_label}] - High Frequency Trading")
         logger.info("=" * 50)
         logger.info(f"  - Trade size: {self.accum_trade_size} shares per trade")
         logger.info(f"  - Pair cost limit: ${self.accum_pair_cost_limit}")
@@ -3684,19 +3698,19 @@ class PaperTradingBot:
                 if new_up_imbalance >= current_imbalance:
                     buy_up = False
                     if self._opportunities_checked % 100 == 0:
-                        logger.info(f"⛔ {mode_label} BLOCKED UP: imbalanced {current_imbalance:.0f} > limit, UP doesn't reduce")
+                        logger.info(f"⛔ {self.mode_label} BLOCKED UP: imbalanced {current_imbalance:.0f} > limit, UP doesn't reduce")
                 else:
                     if self._opportunities_checked % 100 == 0:
-                        logger.info(f"✅ {mode_label} ALLOWING UP: reduces imbalance {current_imbalance:.0f} → {new_up_imbalance:.0f}")
+                        logger.info(f"✅ {self.mode_label} ALLOWING UP: reduces imbalance {current_imbalance:.0f} → {new_up_imbalance:.0f}")
 
             if buy_down:
                 if new_down_imbalance >= current_imbalance:
                     buy_down = False
                     if self._opportunities_checked % 100 == 0:
-                        logger.info(f"⛔ {mode_label} BLOCKED DOWN: imbalanced {current_imbalance:.0f} > limit, DOWN doesn't reduce")
+                        logger.info(f"⛔ {self.mode_label} BLOCKED DOWN: imbalanced {current_imbalance:.0f} > limit, DOWN doesn't reduce")
                 else:
                     if self._opportunities_checked % 100 == 0:
-                        logger.info(f"✅ {mode_label} ALLOWING DOWN: reduces imbalance {current_imbalance:.0f} → {new_down_imbalance:.0f}")
+                        logger.info(f"✅ {self.mode_label} ALLOWING DOWN: reduces imbalance {current_imbalance:.0f} → {new_down_imbalance:.0f}")
 
         # If buying both sides, check net result
         elif buy_up and buy_down:
@@ -3711,7 +3725,7 @@ class PaperTradingBot:
                 buy_down = False
                 surplus_side = "UP" if new_up > new_down else "DOWN"
                 logger.info(
-                    f"⛔ {mode_label} BLOCKED BOTH: net imbalance {net_imbalance:.0f} > limit {max_imbalance} "
+                    f"⛔ {self.mode_label} BLOCKED BOTH: net imbalance {net_imbalance:.0f} > limit {max_imbalance} "
                     f"({surplus_side} surplus). Waiting for balance."
                 )
 
@@ -3720,12 +3734,12 @@ class PaperTradingBot:
             if buy_up:
                 if new_up_imbalance > max_imbalance:
                     buy_up = False
-                    logger.info(f"⛔ {mode_label} BLOCKED UP: would create imbalance {new_up_imbalance:.0f} > limit {max_imbalance}")
+                    logger.info(f"⛔ {self.mode_label} BLOCKED UP: would create imbalance {new_up_imbalance:.0f} > limit {max_imbalance}")
 
             if buy_down:
                 if new_down_imbalance > max_imbalance:
                     buy_down = False
-                    logger.info(f"⛔ {mode_label} BLOCKED DOWN: would create imbalance {new_down_imbalance:.0f} > limit {max_imbalance}")
+                    logger.info(f"⛔ {self.mode_label} BLOCKED DOWN: would create imbalance {new_down_imbalance:.0f} > limit {max_imbalance}")
 
         # Execute trades with DYNAMIC ORDERING
         # Buy cheaper side first to minimize slippage risk
@@ -5164,8 +5178,9 @@ class PaperTradingBot:
         down_imbalance = None
         if self._orderbook_manager and self._orderbook_manager.cache:
             try:
-                up_token = market.tokens[0].token_id if market.tokens else None
-                down_token = market.tokens[1].token_id if len(market.tokens) > 1 else None
+                # BTCMarket uses up_token_id/down_token_id directly (not .tokens list)
+                up_token = getattr(market, 'up_token_id', None)
+                down_token = getattr(market, 'down_token_id', None)
 
                 if up_token and down_token:
                     up_book, down_book = await self._orderbook_manager.cache.get_pair(up_token, down_token)
@@ -6632,11 +6647,15 @@ async def main():
     )
 
     # ACCUMULATION MODE parameters (now the only mode)
+    # NOTE: When changing trade size, also update:
+    #   - --accum-target-shares (should be >= trade size)
+    #   - hard_max_imbalance in code (default 60, should be > trade size)
+    #   - For AGGRESSIVE mode: base_size in EnhancedSpikeStrategy (separate param)
     parser.add_argument(
         '--accum-trade-size',
         type=int,
         default=2,
-        help='Shares per trade (default: 2)',
+        help='Shares per trade (default: 2). NOTE: For aggressive mode, also update target_shares and hard_max_imbalance',
     )
     parser.add_argument(
         '--accum-pair-cost-limit',
@@ -6671,9 +6690,11 @@ async def main():
     parser.add_argument(
         '--accum-mode',
         type=str,
-        choices=['standard', 'calculus_maker', 'spread_capture', 'enhanced_momentum', 'latency_arb', 'opportunistic_mm'],
+        # NOTE: When changing trade size, also update --accum-max-imbalance-pct accordingly
+        # AGGRESSIVE mode is the main spike detection strategy (uses TRADING_CONFIGS.py)
+        choices=['standard', 'calculus_maker', 'spread_capture', 'enhanced_momentum', 'latency_arb', 'opportunistic_mm', 'aggressive'],
         default='standard',
-        help='Accumulation strategy mode: standard, calculus_maker (exponential decay), spread_capture (continuous velocity MM), enhanced_momentum (partial hedging), latency_arb (spike detection), or opportunistic_mm (two-sided quoting)',
+        help='Accumulation strategy mode: aggressive (RECOMMENDED - spike detection from TRADING_CONFIGS.py), standard, calculus_maker, spread_capture, enhanced_momentum, latency_arb (broken), or opportunistic_mm',
     )
 
     parser.add_argument(
