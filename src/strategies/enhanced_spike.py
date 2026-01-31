@@ -42,6 +42,24 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from src.config import FeeConfig
 
+# =============================================================================
+# SHARED LOGIC - Import from src/core (Single Source of Truth)
+# =============================================================================
+# NOTE: src/core/trading_utils.py contains the canonical implementations.
+# Some standalone functions in this file are kept for backward compatibility
+# but should be considered deprecated in favor of src/core imports.
+from src.core import (
+    polymarket_taker_fee,
+    calculate_pnl_with_fees,
+    velocity_confirms_spike as velocity_confirms_spike_core,
+    obi_confirms_spike,
+    should_take_spike_enhanced as should_take_spike_enhanced_core,
+    compute_enhanced_score as compute_enhanced_score_core,
+    calculate_loser_bid as calculate_loser_bid_core,
+    VELOCITY_CONFIRM_THRESHOLD as VELOCITY_CONFIRM_THRESHOLD_CORE,
+    ENHANCED_SCORE_THRESHOLD as ENHANCED_SCORE_THRESHOLD_CORE,
+)
+
 if TYPE_CHECKING:
     from src.strategies.ou_volatility import OUAdaptiveThreshold
     from src.services.volatility_tracker import LiveZScoreTracker
@@ -608,6 +626,9 @@ class MultiCycleManager:
 # The original simple OBI check code is preserved in get_quotes() around line 1100+
 # (look for "OBI CONFIRMATION FILTER" comment block)
 # =============================================================================
+# DEPRECATED: Use should_take_spike_enhanced_core from src/core instead
+# Kept for backward compatibility only.
+# =============================================================================
 
 def should_take_spike_enhanced(
     spike_direction: str,
@@ -617,46 +638,16 @@ def should_take_spike_enhanced(
     winner_ask_depth: Optional[float] = None,
 ) -> Tuple[bool, str]:
     """
+    DEPRECATED: Use should_take_spike_enhanced_core from src/core instead.
+
     ML-validated spike filter with enhanced OBI and market structure checks.
-
-    Based on research findings (Jan 31, 2026):
-    - OBI confirmation: 49% vs 31% good spike rate (+18pp)
-    - Strong-sell OBI: only 19.3% good vs 49% when confirms
-    - Wider loser spread: correlation +0.19 with good spikes
-    - More time: correlation +0.24 with good spikes
-    - Low depth: correlation -0.24 with good spikes
-
-    Args:
-        spike_direction: "UP" or "DOWN"
-        obi_winner: Orderbook imbalance for winner side (-1 to +1)
-        loser_spread: Bid-ask spread on loser side
-        time_remaining: Seconds until market resolution
-        winner_ask_depth: Depth at winner ask (optional)
-
-    Returns:
-        (should_take, reason) tuple
+    This is a local copy for backward compatibility.
+    Canonical implementation: src/core/trading_utils.py
     """
-    # CRITICAL: OBI confirmation (49% vs 31% good spike rate)
-    if obi_winner <= 0:
-        return False, f"OBI disagrees (obi={obi_winner:.3f})"
-
-    # Strong-sell OBI = only 19.3% good (vs 49% when confirms)
-    if obi_winner < -0.3:
-        return False, f"OBI strong sell (obi={obi_winner:.3f})"
-
-    # Wider loser spread = more room for drop (correlation +0.19)
-    if loser_spread < 0.02:
-        return False, f"Loser spread too tight ({loser_spread:.3f})"
-
-    # More time = better chance of drop (correlation +0.24)
-    if time_remaining < 300:
-        return False, f"Too close to expiry ({time_remaining:.0f}s)"
-
-    # Low depth = easier to move price (correlation -0.24)
-    if winner_ask_depth is not None and winner_ask_depth > 5000:
-        return False, f"Winner depth too high (${winner_ask_depth:.0f})"
-
-    return True, "All filters passed"
+    # Delegate to canonical implementation
+    return should_take_spike_enhanced_core(
+        spike_direction, obi_winner, loser_spread, time_remaining, winner_ask_depth
+    )
 
 
 # =============================================================================
@@ -2448,6 +2439,10 @@ def calculate_magnitude_loser_bid(
     return max(loser_bid, 0.01)
 
 
+# =============================================================================
+# DEPRECATED: Use compute_enhanced_score_core from src/core instead
+# =============================================================================
+
 def compute_enhanced_score(
     spike_magnitude: float,
     velocity_bps: float,
@@ -2455,51 +2450,16 @@ def compute_enhanced_score(
     time_remaining: float,
 ) -> float:
     """
+    DEPRECATED: Use compute_enhanced_score_core from src/core instead.
+
     Standalone composite score calculation for enhanced signal filtering.
-
-    Used for computing signal quality outside the EnhancedSpikeStrategy class.
-    Same formula as EnhancedSpikeStrategy.compute_enhanced_score().
-
-    Score formula (from backtest optimization - January 17, 2026):
-        0.40 * spike_magnitude_score +
-        0.30 * velocity_strength_score +
-        0.20 * confirmation_bonus +
-        0.10 * urgency_score
-
-    Args:
-        spike_magnitude: Absolute BTC % change (e.g., 0.05 for 0.05%)
-        velocity_bps: Current velocity in basis points per second
-        spike_direction: "UP" or "DOWN"
-        time_remaining: Seconds until market resolution
-
-    Returns:
-        Composite score [0, 1]. Trade if score >= 0.40.
+    This is a wrapper for backward compatibility.
+    Canonical implementation: src/core/trading_utils.py
     """
-    # Spike magnitude score: 0-5% maps to 0-1
-    spike_score = min(spike_magnitude / 0.05, 1.0)
-
-    # Velocity strength score: 0-0.5 bps maps to 0-1
-    velocity_score = min(abs(velocity_bps) / 0.50, 1.0)
-
-    # Check if velocity confirms spike direction
-    velocity_confirms = (
-        (spike_direction == "UP" and velocity_bps > 0) or
-        (spike_direction == "DOWN" and velocity_bps < 0)
+    # Delegate to canonical implementation
+    return compute_enhanced_score_core(
+        spike_magnitude, velocity_bps, spike_direction, time_remaining
     )
-    confirmation_bonus = 1.0 if velocity_confirms else 0.0
-
-    # Urgency score: higher as market approaches resolution
-    urgency_score = 1.0 - min(time_remaining / 900.0, 1.0)
-
-    # Weighted composite
-    score = (
-        0.40 * spike_score +
-        0.30 * velocity_score +
-        0.20 * confirmation_bonus +
-        0.10 * urgency_score
-    )
-
-    return round(score, 3)
 
 
 def should_take_enhanced_signal(

@@ -262,17 +262,48 @@ if elapsed_seconds >= 120.0:  # Optimized from 180s
 
 ## Files Reference
 
+### Architecture (Jan 31, 2026)
+
+**Two Sources of Truth:**
+1. `src/core/` - Shared LOGIC (fee model, filters, calculations)
+2. `research/reference/TRADING_CONFIGS.py` - Winner PARAMS for live trading
+
 | File | Purpose |
 |------|---------|
-| `research/backtests/aggressive_main_backtest.py` | **Main backtest** (60Hz, matches live) |
-| `research/optimizers/aggressive_grid_search.py` | **Main grid search** (720 configs) |
-| `research/validation/validate_oos4_all_paths.py` | OOS validation script |
-| `research/analysis/volatility_filter_analysis.py` | Core backtest engine |
-| `research/reference/TRADING_CONFIGS.py` | Config definitions (Python) |
-| `research/analysis/analyze_obi_alpha.py` | OBI analysis script (Jan 28) |
+| **Shared Logic** | |
+| `src/core/__init__.py` | Re-exports all shared functions |
+| `src/core/trading_utils.py` | **LOGIC SOURCE OF TRUTH** - Fee model, OBI filter, score calc |
+| **Parameters** | |
+| `research/reference/TRADING_CONFIGS.py` | **PARAM SOURCE OF TRUTH** - Winner config for live |
+| **Grid Search** | |
+| `research/optimizers/aggressive_grid_search.py` | **MAIN GRID SEARCH** - 18 configs (defines own params) |
+| `research/optimizers/aggressive_grid_search_v1_legacy.py` | Legacy grid search (720 configs, deprecated) |
+| **Backtests** | |
+| `research/backtests/multi_dataset_validated_backtest.py` | Quick single-config validation (imports from src/core) |
+| **Live Trading** | |
+| `src/strategies/enhanced_spike.py` | Live strategy (imports from src/core + TRADING_CONFIGS) |
 | `src/services/volatility_tracker.py` | LiveZScoreTracker |
-| `src/strategies/enhanced_spike.py` | Live trading strategy (includes OBI filter) |
 | `src/models/orderbook.py` | Orderbook with compute_imbalance() |
+
+### Import Pattern
+
+```python
+# For shared LOGIC (both live and backtest):
+from src.core import (
+    polymarket_taker_fee,
+    calculate_pnl_with_fees,
+    velocity_confirms_spike,
+    obi_confirms_spike,
+    should_take_spike_enhanced,
+    compute_enhanced_score,
+    calculate_loser_bid,
+    TradeResult,
+    BacktestCycle,
+)
+
+# For PARAMS (live only):
+from research.reference.TRADING_CONFIGS import AGGRESSIVE
+```
 
 ---
 

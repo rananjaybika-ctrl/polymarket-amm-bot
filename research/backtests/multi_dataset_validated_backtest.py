@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """
-Multi-Dataset AGGRESSIVE Backtest - COPIED FROM aggressive_main_backtest.py
+Multi-Dataset AGGRESSIVE Backtest - QUICK SINGLE-CONFIG VALIDATION
 
-Runs validated backtest on multiple datasets:
-- IS+OOS2 (Jan 16-19): OBI OFF
-- OOS3+4 (Jan 22-24): OBI OFF
-- OOS5 (Jan 26): OBI OFF
-- OOS7 (Jan 29-30): OBI ON
+=============================================================================
+USE THIS FOR: Quick validation with winner config (no grid search)
+FOR GRID SEARCH: Use entry_spike_magnitude_test.py instead
+=============================================================================
+
+Runs validated backtest on multiple datasets with SINGLE winner config:
+- IS+OOS2 (Jan 16-19): OBI OFF - 69h
+- OOS3+4 (Jan 22-24): OBI OFF - 47h
+- OOS5 (Jan 26): OBI OFF - 41h
+- OOS7 (Jan 29-30): OBI ON - 19h
 
 Uses 60Hz Binance HF data for spike detection (matching live strategy).
 Simulation logic COPIED from aggressive_main_backtest.py.
+
+NOTE: This file does NOT have fee model or grid search.
+For comprehensive analysis, use entry_spike_magnitude_test.py.
 
 Usage:
     python research/backtests/multi_dataset_validated_backtest.py
@@ -21,14 +29,37 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict
 from tqdm import tqdm
+import math
+import sys
+
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+# =============================================================================
+# SHARED LOGIC - Import from src/core (Single Source of Truth)
+# =============================================================================
+
+from src.core import (
+    # Fee model
+    polymarket_taker_fee,
+    calculate_pnl_with_fees,
+    # Signal filters
+    velocity_confirms_spike,
+    obi_confirms_spike,
+    should_take_spike_enhanced,
+    compute_enhanced_score,
+    # Calculations
+    calculate_loser_bid,
+    # Data classes
+    TradeResult,
+    # Constants
+    VELOCITY_CONFIRM_THRESHOLD,
+    ENHANCED_SCORE_THRESHOLD,
+)
 
 # =============================================================================
 # CONFIGURATION - SOURCED FROM TRADING_CONFIGS.py (Jan 31, 2026)
 # =============================================================================
-
-import math
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Import from TRADING_CONFIGS.py - SINGLE SOURCE OF TRUTH
 from research.reference.TRADING_CONFIGS import AGGRESSIVE as AGGRESSIVE_CONFIG
@@ -49,9 +80,7 @@ OU_SIGMOID_STEEPNESS = 1.5
 OU_MIN_THRESHOLD = 0.015
 OU_MAX_THRESHOLD = 0.10
 
-# Enhanced signal filtering
-VELOCITY_CONFIRM_THRESHOLD = 0.10
-ENHANCED_SCORE_THRESHOLD = 0.40
+# Note: VELOCITY_CONFIRM_THRESHOLD and ENHANCED_SCORE_THRESHOLD imported from src/core
 
 # Time-stop from config
 TIME_STOP_SECONDS = AGGRESSIVE_CONFIG.time_stop_seconds  # 120.0 from config
@@ -63,6 +92,8 @@ TARGET_PAIR_COST = 0.99
 
 # Cycling
 MIN_CYCLE_GAP_MS = 200
+
+# Note: Fee model (polymarket_taker_fee, calculate_pnl_with_fees) imported from src/core
 
 # =============================================================================
 # OU PARAMETERS (for adaptive threshold)
@@ -140,26 +171,7 @@ DATASETS = {
     },
 }
 
-# =============================================================================
-# DATA CLASSES (COPIED from aggressive_main_backtest.py)
-# =============================================================================
-
-@dataclass
-class TradeResult:
-    market_slug: str
-    cycle_num: int
-    entry_time_remaining: float
-    signal_score: float
-    winner_side: str
-    winner_fill_price: float
-    loser_fill_price: float
-    hedge_type: str
-    pair_cost: float
-    pnl: float
-    correct_direction: bool
-    spike_magnitude: float
-    dataset: str
-
+# Note: TradeResult dataclass imported from src/core
 
 # =============================================================================
 # SPIKE DETECTION - VECTORIZED PRECOMPUTATION FOR SPEED
@@ -211,61 +223,12 @@ def precompute_spikes_ou(btc_df: pd.DataFrame, lookback: int = SPIKE_LOOKBACK) -
 # SpikeDetector class removed - using vectorized precompute_spikes_ou() instead
 
 
-# =============================================================================
-# HELPER FUNCTIONS (COPIED from aggressive_main_backtest.py)
-# =============================================================================
-
-def velocity_confirms_spike(spike_dir: str, velocity_bps: float) -> bool:
-    """Check if velocity confirms spike direction."""
-    if spike_dir == "UP":
-        return velocity_bps > -VELOCITY_CONFIRM_THRESHOLD
-    elif spike_dir == "DOWN":
-        return velocity_bps < VELOCITY_CONFIRM_THRESHOLD
-    return True
-
-
-def obi_confirms_spike(spike_dir: str, up_imbalance: Optional[float],
-                       down_imbalance: Optional[float]) -> Tuple[bool, bool]:
-    """
-    Check if Order Book Imbalance confirms spike direction.
-    Returns: (obi_available, obi_confirms)
-    """
-    if spike_dir == "UP":
-        if up_imbalance is not None and not np.isnan(up_imbalance):
-            return True, up_imbalance > 0
-    elif spike_dir == "DOWN":
-        if down_imbalance is not None and not np.isnan(down_imbalance):
-            return True, down_imbalance > 0
-    return False, True  # Not available = don't filter
-
-
-def compute_enhanced_score(spike_mag: float, velocity_bps: float,
-                           spike_dir: str, time_remaining: float) -> float:
-    """Compute composite score (matching live strategy)."""
-    spike_score = min(spike_mag / 0.05, 1.0)
-    velocity_score = min(abs(velocity_bps) / 0.50, 1.0)
-
-    vel_confirms = (spike_dir == "UP" and velocity_bps > 0) or \
-                   (spike_dir == "DOWN" and velocity_bps < 0)
-    confirm_bonus = 1.0 if vel_confirms else 0.0
-
-    urgency = 1.0 - min(time_remaining / 900.0, 1.0)
-
-    score = (0.40 * spike_score +
-             0.30 * velocity_score +
-             0.20 * confirm_bonus +
-             0.10 * urgency)
-
-    return round(score, 3)
-
-
-def calculate_loser_bid(winner_entry: float, spike_magnitude: float) -> float:
-    """Calculate loser bid. FIXED: No /100 division."""
-    expected_drop = DROP_MULTIPLIER * spike_magnitude + DROP_INTERCEPT
-    max_loser = TARGET_PAIR_COST - winner_entry
-    loser_bid = min((1.0 - winner_entry) - expected_drop, max_loser)
-    return max(0.01, min(0.95, loser_bid))
-
+# Note: Helper functions imported from src/core:
+# - velocity_confirms_spike
+# - obi_confirms_spike
+# - should_take_spike_enhanced
+# - compute_enhanced_score
+# - calculate_loser_bid
 
 # =============================================================================
 # SIMULATION - OPTIMIZED WITH PRECOMPUTED SPIKES
@@ -336,8 +299,10 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
 
                 # Check passive fill
                 if pd.notna(loser_ask) and loser_ask <= loser_target:
-                    pair_cost = winner_entry + loser_target
-                    pnl = (1.0 - pair_cost) * TARGET_SHARES
+                    pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
+                        winner_entry, loser_target, TARGET_SHARES,
+                        is_taker_entry=True, is_taker_exit=False
+                    )
 
                     trades.append(TradeResult(
                         market_slug=slug,
@@ -348,8 +313,11 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                         winner_fill_price=winner_entry,
                         loser_fill_price=loser_target,
                         hedge_type="passive",
-                        pair_cost=pair_cost,
-                        pnl=pnl,
+                        pair_cost=winner_entry + loser_target,
+                        pnl_gross=pnl_gross,
+                        pnl_net=pnl_net,
+                        entry_fee=entry_fee,
+                        exit_fee=exit_fee,
                         correct_direction=(resolution == position_data['winner_side']),
                         spike_magnitude=spike_mag,
                         dataset=dataset_name,
@@ -377,8 +345,10 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                     if not in_profit:
                         # NOT in profit - execute time-stop
                         loser_fill = loser_ask if pd.notna(loser_ask) else loser_target * 1.05
-                        pair_cost = winner_entry + loser_fill
-                        pnl = (1.0 - pair_cost) * TARGET_SHARES
+                        pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
+                            winner_entry, loser_fill, TARGET_SHARES,
+                            is_taker_entry=True, is_taker_exit=True
+                        )
 
                         trades.append(TradeResult(
                             market_slug=slug,
@@ -389,8 +359,11 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                             winner_fill_price=winner_entry,
                             loser_fill_price=loser_fill,
                             hedge_type="time_stop",
-                            pair_cost=pair_cost,
-                            pnl=pnl,
+                            pair_cost=winner_entry + loser_fill,
+                            pnl_gross=pnl_gross,
+                            pnl_net=pnl_net,
+                            entry_fee=entry_fee,
+                            exit_fee=exit_fee,
                             correct_direction=(resolution == position_data['winner_side']),
                             spike_magnitude=spike_mag,
                             dataset=dataset_name,
@@ -411,11 +384,14 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                 winner_side = position_data['winner_side']
                 winner_entry = position_data['winner_entry']
                 if resolution == winner_side:
-                    pnl = (1.0 - winner_entry) * TARGET_SHARES
                     loser_fill = 0.0
                 else:
-                    pnl = (0.0 - winner_entry) * TARGET_SHARES
                     loser_fill = 1.0
+
+                # Resolution: entry was taker, no exit fee (settlement)
+                entry_fee = polymarket_taker_fee(winner_entry) * winner_entry * TARGET_SHARES
+                pnl_gross = (1.0 - winner_entry - loser_fill) * TARGET_SHARES
+                pnl_net = pnl_gross - entry_fee
 
                 trades.append(TradeResult(
                     market_slug=slug,
@@ -427,7 +403,10 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                     loser_fill_price=loser_fill,
                     hedge_type="resolution",
                     pair_cost=winner_entry + loser_fill,
-                    pnl=pnl,
+                    pnl_gross=pnl_gross,
+                    pnl_net=pnl_net,
+                    entry_fee=entry_fee,
+                    exit_fee=0.0,
                     correct_direction=(resolution == winner_side),
                     spike_magnitude=position_data['spike_magnitude'],
                     dataset=dataset_name,
@@ -477,25 +456,40 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
             spike_idx += 1
             continue
 
-        # OBI filter
-        if use_obi_filter:
-            up_imbalance = obs_row.get('up_imbalance', None)
-            down_imbalance = obs_row.get('down_imbalance', None)
-            obi_available, obi_confirmed = obi_confirms_spike(spike_dir, up_imbalance, down_imbalance)
-            if obi_available and not obi_confirmed:
-                spike_idx += 1
-                continue
-
-        # High entry check
+        # Get prices first (needed for enhanced OBI filter)
         winner_side = spike_dir
         if winner_side == "UP":
             winner_ask = obs_row['up_ask']
+            loser_bid = obs_row.get('down_bid', None)
+            loser_ask_val = obs_row.get('down_ask', None)
+            obi_winner = obs_row.get('up_imbalance', None)
         else:
             winner_ask = obs_row['down_ask']
+            loser_bid = obs_row.get('up_bid', None)
+            loser_ask_val = obs_row.get('up_ask', None)
+            obi_winner = obs_row.get('down_imbalance', None)
 
         if pd.isna(winner_ask) or winner_ask >= HIGH_ENTRY_THRESHOLD:
             spike_idx += 1
             continue
+
+        # Enhanced OBI filter
+        if use_obi_filter:
+            if obi_winner is not None and not np.isnan(obi_winner):
+                loser_spread = 0.05  # Default
+                if pd.notna(loser_bid) and pd.notna(loser_ask_val):
+                    loser_spread = loser_ask_val - loser_bid
+
+                should_take, reject_reason = should_take_spike_enhanced(
+                    spike_direction=spike_dir,
+                    obi_winner=obi_winner,
+                    loser_spread=loser_spread,
+                    time_remaining=time_rem,
+                    winner_ask_depth=None,
+                )
+                if not should_take:
+                    spike_idx += 1
+                    continue
 
         # ENTRY
         cycle_num += 1
@@ -653,11 +647,13 @@ def print_results(trades: List[TradeResult], dataset_key: str, hours: float):
     config = DATASETS[dataset_key]
     df = pd.DataFrame([t.__dict__ for t in trades])
 
-    total_pnl = df['pnl'].sum()
+    total_pnl_gross = df['pnl_gross'].sum()
+    total_pnl_net = df['pnl_net'].sum()
+    total_fees = df['entry_fee'].sum() + df['exit_fee'].sum()
     total_trades = len(df)
     win_rate = df['correct_direction'].mean() * 100
     avg_pair_cost = df['pair_cost'].mean()
-    hourly_rate = total_pnl / hours if hours > 0 else 0
+    hourly_rate = total_pnl_net / hours if hours > 0 else 0
 
     passive = (df['hedge_type'] == 'passive').sum()
     time_stop = (df['hedge_type'] == 'time_stop').sum()
@@ -668,7 +664,8 @@ def print_results(trades: List[TradeResult], dataset_key: str, hours: float):
     print(f"{'='*60}")
     print(f"Total trades: {total_trades}")
     print(f"Direction accuracy: {win_rate:.1f}%")
-    print(f"Total PnL: ${total_pnl:.2f}")
+    print(f"PnL Gross: ${total_pnl_gross:.2f}")
+    print(f"PnL Net:   ${total_pnl_net:.2f} (after ${total_fees:.2f} fees)")
     print(f"Hourly rate: ${hourly_rate:.2f}/hr")
     print(f"Avg pair cost: ${avg_pair_cost:.4f}")
     print(f"\nHedge breakdown:")
@@ -681,7 +678,9 @@ def print_results(trades: List[TradeResult], dataset_key: str, hours: float):
         'name': config['name'],
         'obi': 'ON' if config['use_obi'] else 'OFF',
         'trades': total_trades,
-        'pnl': total_pnl,
+        'pnl_gross': total_pnl_gross,
+        'pnl_net': total_pnl_net,
+        'fees': total_fees,
         'hourly_rate': hourly_rate,
         'win_rate': win_rate,
         'avg_pair_cost': avg_pair_cost,
@@ -719,19 +718,20 @@ def main():
         print("=" * 60)
 
         total_hours = sum(r['hours'] for r in all_results)
-        total_pnl = sum(r['pnl'] for r in all_results)
+        total_pnl_net = sum(r['pnl_net'] for r in all_results)
+        total_fees = sum(r['fees'] for r in all_results)
         total_trades = sum(r['trades'] for r in all_results)
 
         print(f"\nTotal hours: {total_hours:.1f}")
         print(f"Total trades: {total_trades}")
-        print(f"Total PnL: ${total_pnl:.2f}")
-        print(f"Combined hourly rate: ${total_pnl/total_hours:.2f}/hr")
+        print(f"Total PnL Net: ${total_pnl_net:.2f} (after ${total_fees:.2f} fees)")
+        print(f"Combined hourly rate: ${total_pnl_net/total_hours:.2f}/hr")
 
         print("\n" + "-" * 80)
-        print(f"{'Dataset':<20} {'OBI':<5} {'Trades':>8} {'PnL':>12} {'$/hr':>10} {'Win%':>8}")
+        print(f"{'Dataset':<20} {'OBI':<5} {'Trades':>8} {'PnL Net':>12} {'$/hr':>10} {'Win%':>8}")
         print("-" * 80)
         for r in all_results:
-            print(f"{r['dataset']:<20} {r['obi']:<5} {r['trades']:>8} ${r['pnl']:>10.2f} ${r['hourly_rate']:>9.2f} {r['win_rate']:>7.1f}%")
+            print(f"{r['dataset']:<20} {r['obi']:<5} {r['trades']:>8} ${r['pnl_net']:>10.2f} ${r['hourly_rate']:>9.2f} {r['win_rate']:>7.1f}%")
 
     # Save results
     if all_trades:

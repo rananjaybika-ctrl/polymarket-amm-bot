@@ -1,412 +1,338 @@
 #!/usr/bin/env python3
 """
-AGGRESSIVE Mode Grid Search - Parameter Optimization
+AGGRESSIVE Grid Search - Main Optimization File
 
-Tests combinations of time-stop, hedge, and filter parameters to find optimal
-configurations for AGGRESSIVE mode.
+=============================================================================
+THIS IS THE CANONICAL GRID SEARCH FILE (Jan 31, 2026)
+Location: research/optimizers/aggressive_grid_search.py
+Legacy: research/optimizers/aggressive_grid_search_v1_legacy.py
+=============================================================================
 
-MIRRORS LIVE AGGRESSIVE CONFIG:
-- threshold_method: "ou" or "ewma" (NOT "regime"/"fixed")
-- zscore_method: "ewma" (fixed)
+Grid dimensions:
+1. Time-Stop: 30s, 180s, 240s
+2. Loser Offset: TIGHTER, TIGHT, CURRENT
+3. Multi-Cycle: SINGLE (1×50), MULTI (2×20)
 
-GRID PARAMETERS (7 dimensions, heavily pruned):
-┌───────────────────┬─────────────────────────────┬───────┬─────────────────────┐
-│ Parameter         │ Values                      │ Count │ Rationale           │
-├───────────────────┼─────────────────────────────┼───────┼─────────────────────┤
-│ time_stop         │ [20, 40, 60, 80, 120] sec   │ 5     │ Core volume question│
-│ lookback_ms       │ [1200, 1600, 2000] ms       │ 3     │ Dropped redundant   │
-│ drop_intercept    │ [0.04, 0.06, 0.08]          │ 3     │ Hedge aggression    │
-│ target_pair_cost  │ [0.98, 0.99]                │ 2     │ Dropped aggressive  │
-│ cycling           │ [True, False]               │ 2     │ Re-entry or not     │
-│ threshold_method  │ ["ou", "ewma"]              │ 2     │ OU sigmoid vs EWMA  │
-│ velocity_mode     │ ["all", "none"]             │ 2     │ Filter or not       │
-└───────────────────┴─────────────────────────────┴───────┴─────────────────────┘
+Grid: 3 offsets × 3 time-stops × 2 cycle-modes = 18 configurations
 
-FIXED AT VALIDATED VALUES (not in grid):
-- z_score_zone = (0.0, 1.5)  → Validated best
-- zscore_method = "ewma"      → Mirrors live (no drift risk)
-- skip_low_regime = True      → 48% accuracy is trash
+Loser bid formula:
+    expected_drop = DROP_MULTIPLIER * spike_magnitude + DROP_INTERCEPT
+    loser_bid = (1.0 - winner_entry) - expected_drop
 
-Total: 5 × 3 × 3 × 2 × 2 × 2 × 2 = 720 configurations
+Offset presets:
+    TIGHTER: DROP_MULT=0.15, DROP_INT=0.03 (very aggressive, fastest fill)
+    TIGHT:   DROP_MULT=0.30, DROP_INT=0.05 (aggressive, faster fill)
+    CURRENT: DROP_MULT=0.50, DROP_INT=0.08 (baseline)
 
-PRODUCTION CONFIG:
-- BASE_SIZE = 50 shares
-- HIGH_ENTRY_THRESHOLD = 0.90
+Cycle modes:
+    SINGLE: 1 cycle × 50 shares (original behavior)
+    MULTI:  2 cycles × 20 shares (captures more opportunities)
 
-Follows SCRIPT_RULES.md:
-- Progress bar (tqdm) ✓
-- ETA estimate ✓
-- Checkpoint saves every 10 configs ✓
+Features:
+- Fee model with gross/net PnL separation
+- Dataset coverage validation
+- Checkpoint saves after each config
+- Offset + time-stop + multi-cycle sensitivity analysis
+- OU adaptive threshold (per TRADING_CONFIGS.py)
+- OBI filter (ON for OOS7, OFF for others)
+
+Datasets (176h total):
+- IS+OOS2 (OBI OFF) - 69h
+- OOS3+4 (OBI OFF) - 47h
+- OOS5 (OBI OFF) - 41h
+- OOS7 (OBI ON) - 19h
 
 Usage:
     python research/optimizers/aggressive_grid_search.py
-    python research/optimizers/aggressive_grid_search.py --quick  # Reduced grid for testing
+
+For quick single-config validation, use:
+    python research/backtests/multi_dataset_validated_backtest.py
 """
 
-import argparse
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Tuple
-from collections import deque
-from itertools import product
+from dataclasses import dataclass
+from typing import List, Optional, Tuple, Dict
 from tqdm import tqdm
-import time
+import math
 import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # =============================================================================
-# PRODUCTION CONFIGURATION (NOT TESTING)
+# SHARED LOGIC - FROM src/core (Single Source of Truth for HOW to calculate)
 # =============================================================================
+from src.core import (
+    polymarket_taker_fee,
+    calculate_pnl_with_fees,
+    velocity_confirms_spike,
+    obi_confirms_spike,
+    should_take_spike_enhanced,
+    compute_enhanced_score,
+    calculate_loser_bid as calculate_loser_bid_core,
+    BacktestCycle,
+)
 
-BASE_SIZE = 50  # PRODUCTION: 50 shares (NOT 10)
-HIGH_ENTRY_THRESHOLD = 0.90  # PRODUCTION: skip >= $0.90 (NOT $0.80)
+# =============================================================================
+# GRID SEARCH PARAMETERS - Define here, NOT from TRADING_CONFIGS
+# =============================================================================
+# Grid search tests MANY values to find the winner.
+# Winner values then get saved to TRADING_CONFIGS.py for live trading.
+#
+# FIXED PARAMS (not part of grid - same for all tests):
+TARGET_SHARES = 50
+MIN_TIME = 240              # Entry cutoff (time_stop + 60s buffer)
+MIN_RUNTIME_SECS = 300      # 5 min market duration filter
+HIGH_ENTRY_THRESHOLD = 0.90 # Skip entries >= $0.90
+SPIKE_LOOKBACK = 72         # 72 ticks (1200ms at 60Hz)
 
-# Fixed parameters
-MIN_TIME_REMAINING = 180  # seconds
-MIN_RUNTIME_SECS = 300  # 5 minutes minimum market duration
-
-# Spike detection - REGIME-BASED THRESHOLDS (not fixed 0.02%)
-# LOW regime has 48% accuracy = worse than coin flip, MUST FILTER OUT
-ATR_PERIOD = 14
-ATR_WINDOW = 300
-LOW_PERCENTILE = 25
-HIGH_PERCENTILE = 75
-REGIME_THRESHOLDS = {
-    "LOW": 0.010,    # 0.01% in low vol
-    "MEDIUM": 0.020,  # 0.02% in medium vol
-    "HIGH": 0.035,   # 0.035% in high vol
-}
-
-# OU-based adaptive threshold parameters (MIRRORS LIVE)
-# See PLAN_OU_ADAPTIVE_THRESHOLD.md for derivation
+# OU ADAPTIVE THRESHOLD params
 OU_BASE_THRESHOLD = 0.02
-OU_K_LOW = 0.5          # Multiplier at low vol (z << 0)
-OU_K_HIGH = 1.75        # Multiplier at high vol (z >> 0)
+OU_K_LOW = 0.5
+OU_K_HIGH = 1.75
 OU_SIGMOID_STEEPNESS = 1.5
-OU_MIN_THRESHOLD = 0.015  # Floor (raised from 0.005 to filter noise)
-OU_MAX_THRESHOLD = 0.10   # Ceiling
+OU_MIN_THRESHOLD = 0.015
+OU_MAX_THRESHOLD = 0.10
 
-# EWMA-based adaptive threshold parameters
-# Uses fast/slow volatility ratio (no calibration needed)
-EWMA_BASE_THRESHOLD = 0.02
-EWMA_MIN_THRESHOLD = 0.010
-EWMA_MAX_THRESHOLD = 0.10
-EWMA_MIN_RATIO = 0.5
-EWMA_MAX_RATIO = 3.0
-EWMA_FAST_HALFLIFE = 60    # seconds
-EWMA_SLOW_HALFLIFE = 300   # seconds
-
-# Z-SCORE FILTER (validated: best zone 0 < z < 1.5)
-ZSCORE_EWMA_HALFLIFE_TICKS = 300  # 5 seconds at 60Hz
-
-# Enhanced signal filtering
+# Signal filtering thresholds
 VELOCITY_CONFIRM_THRESHOLD = 0.10
 ENHANCED_SCORE_THRESHOLD = 0.40
 
+# Loser bid defaults (CURRENT baseline - also tested in grid)
+DEFAULT_DROP_MULTIPLIER = 0.50
+DEFAULT_DROP_INTERCEPT = 0.08
+TARGET_PAIR_COST = 0.99
+
 # Cycling
-MIN_CYCLE_GAP_MS = 200  # Allow fast re-entry after hedge
+MIN_CYCLE_GAP_MS = 200
 
-# Loser bid calculation (base values - grid search will override)
-DROP_MULTIPLIER = 0.50
 
-# =============================================================================
-# GRID SEARCH PARAMETERS (HEAVILY PRUNED - 720 configs)
-# =============================================================================
-
-# CORE PARAMETERS (vary in grid)
-TIME_STOPS = [20, 40, 60, 80, 120]  # seconds - Core volume question
-LOOKBACKS_MS = [1200, 1600, 2000]   # ms - Dropped 1400 (too close to 1200)
-DROP_INTERCEPTS = [0.04, 0.06, 0.08]  # LOWER = HIGHER loser_bid = FASTER fills
-TARGET_PAIRS = [0.98, 0.99]         # Dropped 0.97 (too aggressive)
-CYCLING_OPTIONS = [True, False]     # Re-enter after hedge or not
-
-# FILTER PARAMETERS (vary in grid)
-# MIRRORS LIVE: AGGRESSIVE uses threshold_method="ou", zscore_method="ewma"
-THRESHOLD_METHODS = [
-    "ou",             # OU-calibrated sigmoid: threshold = base * sigmoid(z-score)
-    "ewma",           # EWMA fast/slow ratio: threshold = base * (fast_vol / slow_vol)
-]
-VELOCITY_MODES = [
-    "all",            # Reject only contradicting velocity (validated best)
-    "none",           # No velocity filter
-]
-
-# FIXED AT VALIDATED VALUES (not in grid)
-# These were validated in previous research and don't need re-testing
-FIXED_Z_LO = 0.0              # Z-score lower bound (validated: 0 < z < 1.5)
-FIXED_Z_HI = 1.5              # Z-score upper bound
-FIXED_ZSCORE_METHOD = "ewma"  # No drift risk (OU can drift if market changes)
-FIXED_SKIP_LOW_REGIME = True  # LOW regime = 48% accuracy = trash
+# FEE MODEL: imported from src.core (polymarket_taker_fee, calculate_pnl_with_fees)
 
 # =============================================================================
-# FEE MODEL (from spike_param_optimizer_taker.py)
+# CONFIG CLASS - Combines time-stop, loser offset, AND multi-cycle
 # =============================================================================
 
-def polymarket_taker_fee(price: float) -> float:
-    """
-    Polymarket taker fee: 1.56% * (1 - |2*price - 1|)
+@dataclass
+class TestConfig:
+    """Configuration for time-stop + loser offset + multi-cycle test."""
+    name: str
+    time_stop_seconds: float
+    drop_multiplier: float
+    drop_intercept: float
+    offset_name: str  # TIGHTER, TIGHT, CURRENT
+    # Multi-cycle parameters
+    max_cycles: int = 1      # 1 = single-cycle, 2+ = multi-cycle
+    shares_per_cycle: int = 50  # Shares per cycle
+    cycle_mode: str = "SINGLE"  # SINGLE or MULTI
 
-    Examples:
-        price = 0.50 -> fee = 1.56%
-        price = 0.40 -> fee = 1.25%
-        price = 0.90 -> fee = 0.31%
-    """
-    return 0.0156 * (1 - abs(2 * price - 1))
+    @property
+    def total_shares(self) -> int:
+        """Total shares across all cycles."""
+        return self.max_cycles * self.shares_per_cycle
 
-
-def calculate_pnl_with_fees(winner_entry: float, loser_fill: float, shares: int,
-                            is_taker_entry: bool, is_taker_exit: bool) -> Tuple[float, float, float, float]:
-    """
-    Calculate PnL with proper maker/taker fee handling.
-
-    Args:
-        winner_entry: Entry price for winner side
-        loser_fill: Fill price for loser hedge
-        shares: Number of shares
-        is_taker_entry: True if entry was taker (crossed spread)
-        is_taker_exit: True if exit was taker (time-stop market order)
-
-    Returns:
-        Tuple of (net_pnl, gross_pnl, entry_fee, exit_fee)
-    """
-    pair_cost = winner_entry + loser_fill
-    gross_pnl = (1.0 - pair_cost) * shares
-
-    entry_fee = polymarket_taker_fee(winner_entry) * winner_entry * shares if is_taker_entry else 0
-    exit_fee = polymarket_taker_fee(loser_fill) * loser_fill * shares if is_taker_exit else 0
-
-    net_pnl = gross_pnl - entry_fee - exit_fee
-    return net_pnl, gross_pnl, entry_fee, exit_fee
+    def calculate_loser_bid(self, winner_entry: float, spike_magnitude: float) -> float:
+        """Calculate loser bid with this config's offset parameters."""
+        expected_drop = self.drop_multiplier * spike_magnitude + self.drop_intercept
+        max_loser = TARGET_PAIR_COST - winner_entry
+        loser_bid = min((1.0 - winner_entry) - expected_drop, max_loser)
+        return max(0.01, min(0.95, loser_bid))
 
 
 # =============================================================================
-# VOLATILITY & REGIME CLASSIFICATION (from spike_param_optimizer_taker.py)
+# GRID PARAMETERS: OFFSET × TIME-STOP × CYCLE-MODE
 # =============================================================================
 
-def calculate_rolling_atr(prices: pd.Series, period: int = ATR_PERIOD) -> pd.Series:
-    """Calculate rolling ATR (using price changes as proxy for true range)."""
-    tr = prices.diff().abs()
-    atr = tr.rolling(window=period).mean()
-    return atr
+# Offset parameters: (DROP_MULTIPLIER, DROP_INTERCEPT, description)
+OFFSET_PRESETS = {
+    "TIGHTER": (0.15, 0.03, "Very aggressive, fastest fill"),
+    "TIGHT": (0.30, 0.05, "Aggressive, faster fill"),
+    "CURRENT": (0.50, 0.08, "Current baseline"),
+}
+
+# Time-stops to test
+TIME_STOPS = [30.0, 180.0, 240.0]
+
+# Cycle modes: (max_cycles, shares_per_cycle, description)
+CYCLE_MODES = {
+    "SINGLE": (1, 50, "Original: 1 cycle × 50 shares"),
+    "MULTI": (2, 20, "Multi-cycle: 2 cycles × 20 shares"),
+}
+
+# Generate all configs: 3 offsets × 3 time-stops × 2 cycle-modes = 18 configs
+CONFIGS = []
+for offset_name, (mult, intercept, offset_desc) in OFFSET_PRESETS.items():
+    for ts in TIME_STOPS:
+        for cycle_mode, (max_cycles, shares_per, cycle_desc) in CYCLE_MODES.items():
+            name = f"{offset_name}_TS{int(ts)}_{cycle_mode}"
+            CONFIGS.append(TestConfig(
+                name=name,
+                time_stop_seconds=ts,
+                drop_multiplier=mult,
+                drop_intercept=intercept,
+                offset_name=offset_name,
+                max_cycles=max_cycles,
+                shares_per_cycle=shares_per,
+                cycle_mode=cycle_mode,
+            ))
+
+print(f"Generated {len(CONFIGS)} configs: {len(OFFSET_PRESETS)} offsets × {len(TIME_STOPS)} time-stops × {len(CYCLE_MODES)} cycle-modes")
 
 
-def classify_regime_vectorized(atr_series: pd.Series, window: int = ATR_WINDOW) -> pd.Series:
-    """Classify volatility regime for each point based on ATR percentile."""
-    percentile = atr_series.rolling(window=window, min_periods=window//2).apply(
-        lambda x: (pd.Series(x).rank().iloc[-1] / len(x)) * 100, raw=False
-    )
+# =============================================================================
+# OU PARAMETERS (for adaptive threshold)
+# =============================================================================
 
-    regime = pd.Series('MEDIUM', index=atr_series.index)
-    regime[percentile < LOW_PERCENTILE] = 'LOW'
-    regime[percentile > HIGH_PERCENTILE] = 'HIGH'
-
-    return regime
+_ou_params = None
 
 
-def compute_ewma_volatility(prices: pd.Series, halflife_ticks: int = ZSCORE_EWMA_HALFLIFE_TICKS) -> pd.Series:
-    """
-    Compute EWMA volatility for z-score calculation.
-
-    Returns rolling EWMA standard deviation of returns.
-    """
-    returns = prices.pct_change() * 100  # % returns
-    alpha = 1 - 0.5 ** (1.0 / halflife_ticks)
-
-    # EWMA variance
-    variance = returns.ewm(alpha=alpha, adjust=False).var()
-    volatility = np.sqrt(variance)
-
-    return volatility
-
-
-def compute_zscore_ewma(volatility: pd.Series) -> pd.Series:
-    """
-    Compute EWMA-based z-score of log volatility.
-
-    Uses rolling statistics - fully adaptive, no drift.
-    z = (log(vol) - rolling_mean(log(vol))) / rolling_std(log(vol))
-    """
-    log_vol = np.log(volatility.clip(lower=1e-6))
-    rolling_mean = log_vol.rolling(window=ZSCORE_EWMA_HALFLIFE_TICKS * 2, min_periods=60).mean()
-    rolling_std = log_vol.rolling(window=ZSCORE_EWMA_HALFLIFE_TICKS * 2, min_periods=60).std()
-
-    zscore = (log_vol - rolling_mean) / rolling_std.clip(lower=1e-6)
-    return zscore
-
-
-def load_ou_params(filepath: str = "research/ou_params.json") -> Optional[dict]:
-    """Load OU parameters from JSON file."""
-    import json
+def load_ou_params():
+    """Load OU parameters for adaptive threshold."""
+    global _ou_params
     try:
-        with open(filepath, 'r') as f:
-            params = json.load(f)
-        print(f"  [OU] Loaded: mu={params['mu']:.4f}, sigma_stat={params['sigma_stat']:.4f}")
-        return params
+        from src.strategies.ou_volatility import OUParameters
+        _ou_params = OUParameters.load("research/ou_params.json")
+        print(f"[OU] Loaded: mu={_ou_params.mu:.4f}, sigma_stat={_ou_params.sigma_stat:.4f}")
     except Exception as e:
-        print(f"  [OU] WARNING: Could not load params from {filepath}: {e}")
-        return None
+        print(f"[OU] Warning: {e} - using fixed threshold 0.02")
+        _ou_params = None
 
 
-def compute_zscore_ou(volatility: pd.Series, ou_params: dict) -> pd.Series:
-    """
-    Compute OU-based z-score using pre-calibrated parameters.
-
-    Uses fixed mu and sigma_stat from OU calibration.
-    z = (log(vol) - mu) / sigma_stat
-
-    NOTE: Can drift if market regime changes from calibration period.
-    """
-    if ou_params is None:
-        return pd.Series(0.0, index=volatility.index)
-
-    mu = ou_params['mu']
-    sigma_stat = ou_params['sigma_stat']
-
-    log_vol = np.log(volatility.clip(lower=1e-6))
-    zscore = (log_vol - mu) / sigma_stat
-    return zscore
-
-
-def compute_ou_threshold(volatility: float, ou_params: dict) -> float:
-    """
-    Compute OU-based adaptive threshold from volatility.
-
-    Uses sigmoid mapping on z-score: threshold = base * multiplier
-    where multiplier = k_low + (k_high - k_low) / (1 + exp(-steepness * z))
-
-    MIRRORS LIVE: src/strategies/volatility_regime.py
-    """
-    import math
-    if ou_params is None:
+def compute_ou_threshold(volatility: float) -> float:
+    """Compute OU adaptive threshold from current volatility."""
+    global _ou_params
+    if _ou_params is None:
         return OU_BASE_THRESHOLD
-
     vol = max(volatility, 1e-6)
     log_vol = math.log(vol)
-    z_score = (log_vol - ou_params['mu']) / ou_params['sigma_stat']
-
-    # Sigmoid mapping
+    z_score = (log_vol - _ou_params.mu) / _ou_params.sigma_stat
     z_clamped = max(-10, min(10, z_score * OU_SIGMOID_STEEPNESS))
     sigmoid = 1.0 / (1.0 + math.exp(-z_clamped))
     multiplier = OU_K_LOW + (OU_K_HIGH - OU_K_LOW) * sigmoid
-
     threshold = OU_BASE_THRESHOLD * multiplier
     return max(OU_MIN_THRESHOLD, min(OU_MAX_THRESHOLD, threshold))
 
 
-class EWMAThresholdTracker:
-    """
-    Pure EWMA-based adaptive threshold (MIRRORS LIVE).
-
-    Uses two EWMA windows:
-    - Fast EWMA: tracks current volatility (60s halflife)
-    - Slow EWMA: tracks baseline volatility (300s halflife)
-    - Ratio = fast/slow determines threshold multiplier
-    """
-    import math
-
-    def __init__(self, fast_halflife_sec: float = EWMA_FAST_HALFLIFE,
-                 slow_halflife_sec: float = EWMA_SLOW_HALFLIFE,
-                 tick_interval_sec: float = 1/60):
-        import math
-        self.fast_halflife = fast_halflife_sec
-        self.slow_halflife = slow_halflife_sec
-        self.tick_interval = tick_interval_sec
-
-        # Compute decay factors
-        self.fast_alpha = 1 - math.exp(-math.log(2) * tick_interval_sec / fast_halflife_sec)
-        self.slow_alpha = 1 - math.exp(-math.log(2) * tick_interval_sec / slow_halflife_sec)
-
-        self.fast_var = None
-        self.slow_var = None
-        self.last_price = None
-
-    def update(self, price: float) -> float:
-        """Update with new price, return adaptive threshold."""
-        import math
-        if self.last_price is None:
-            self.last_price = price
-            return EWMA_BASE_THRESHOLD
-
-        ret = (price - self.last_price) / self.last_price
-        ret_sq = ret * ret
-        self.last_price = price
-
-        if self.fast_var is None:
-            self.fast_var = ret_sq
-            self.slow_var = ret_sq
-            return EWMA_BASE_THRESHOLD
-
-        self.fast_var = self.fast_alpha * ret_sq + (1 - self.fast_alpha) * self.fast_var
-        self.slow_var = self.slow_alpha * ret_sq + (1 - self.slow_alpha) * self.slow_var
-
-        slow_vol = math.sqrt(max(self.slow_var, 1e-12))
-        fast_vol = math.sqrt(max(self.fast_var, 1e-12))
-
-        ratio = fast_vol / slow_vol if slow_vol > 1e-8 else 1.0
-        ratio = max(EWMA_MIN_RATIO, min(EWMA_MAX_RATIO, ratio))
-
-        threshold = EWMA_BASE_THRESHOLD * ratio
-        return max(EWMA_MIN_THRESHOLD, min(EWMA_MAX_THRESHOLD, threshold))
+def compute_ou_zscore(volatility: float) -> float:
+    """Compute OU z-score for volatility."""
+    global _ou_params
+    if _ou_params is None:
+        return 0.0
+    vol = max(volatility, 1e-6)
+    log_vol = math.log(vol)
+    z_score = (log_vol - _ou_params.mu) / _ou_params.sigma_stat
+    return z_score
 
 
-def compute_ewma_thresholds(btc_df: pd.DataFrame) -> pd.Series:
-    """Pre-compute EWMA thresholds for all BTC prices."""
-    tracker = EWMAThresholdTracker()
-    thresholds = []
-    for price in btc_df['price'].values:
-        threshold = tracker.update(price)
-        thresholds.append(threshold)
-    return pd.Series(thresholds, index=btc_df.index)
+# =============================================================================
+# DATASET CONFIGURATION
+# =============================================================================
+
+DATASETS = {
+    # ==========================================================================
+    # ALL DATASETS - For comprehensive grid search (Jan 31, 2026)
+    # ==========================================================================
+    "IS+OOS2": {
+        "name": "IS+OOS2 (Jan 16-19)",
+        "btc_file": "research/binance_hf/btc_prices_20260118_060340.csv",
+        "obs_files": [
+            "research/observer/grid_obs_20260116.csv",
+            "research/observer/grid_obs_20260117.csv",
+            "research/observer/grid_obs_20260118.csv",
+            "research/observer/grid_obs_20260119.csv",
+        ],
+        "use_obi": False,
+        "expected_hours": 69.0,
+    },
+    "OOS3+4": {
+        "name": "OOS3+4 (Jan 22-24)",
+        "btc_file": "research/observer/PROTECTED_btc_prices_oos3_oos4_combined.csv",
+        "obs_files": [
+            "research/observer/PROTECTED_grid_obs_oos3_oos4_combined.csv",
+        ],
+        "use_obi": False,
+        "expected_hours": 47.0,
+    },
+    "OOS5": {
+        "name": "OOS5 (Jan 26)",
+        "btc_file": None,  # Will use observer binance_price at 5Hz
+        "obs_files": [
+            "research/observer/PROTECTED_grid_obs_oos5_recovered.csv",
+        ],
+        "use_obi": False,
+        "expected_hours": 41.0,
+    },
+    "OOS7": {
+        "name": "OOS7 (Jan 29-30)",
+        "btc_file": "research/binance_hf/btc_prices_20260129_160523.csv",
+        "obs_files": [
+            "research/observer/grid_obs_20260129.csv",
+            "research/observer/grid_obs_20260130.csv",
+        ],
+        "use_obi": True,  # OBI ON for OOS7
+        "expected_hours": 19.0,
+    },
+}
+
+MIN_COVERAGE_PCT = 80.0
 
 
-def precompute_volatility_data(btc_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Pre-compute volatility, regime, z-scores, and BOTH threshold methods for all Binance data.
+def validate_dataset_coverage() -> bool:
+    """Validate that all datasets have sufficient data coverage."""
+    print("=" * 80)
+    print("DATASET COVERAGE VALIDATION")
+    print("=" * 80)
+    print(f"Minimum required coverage: {MIN_COVERAGE_PCT}%\n")
 
-    Computes:
-    - zscore_ewma: EWMA-based z-score (adaptive, no drift) - USED FOR Z-SCORE FILTER
-    - threshold_ou: OU-based adaptive threshold (sigmoid mapping)
-    - threshold_ewma: EWMA-based adaptive threshold (fast/slow ratio)
+    base_dir = Path("/Users/rananjaybika/polymarket-amm-bot")
+    all_passed = True
 
-    This is done ONCE before the grid search to avoid repeated computation.
-    """
-    print("Pre-computing volatility data...")
+    for ds_key, ds_config in DATASETS.items():
+        expected_hours = ds_config.get('expected_hours', 0)
 
-    df = btc_df.copy()
-    df = df.sort_values('timestamp_ms').reset_index(drop=True)
+        obs_dfs = []
+        for fname in ds_config['obs_files']:
+            fpath = base_dir / fname
+            if fpath.exists():
+                df = pd.read_csv(fpath, usecols=['timestamp_ms'], nrows=None)
+                obs_dfs.append(df)
 
-    # ATR for regime classification (used for LOW regime skip)
-    df['atr'] = calculate_rolling_atr(df['price'])
-    df['regime'] = classify_regime_vectorized(df['atr'])
+        if not obs_dfs:
+            print(f"  {ds_key}: FAIL - No observer files found!")
+            all_passed = False
+            continue
 
-    # EWMA volatility (used for z-score filter)
-    df['ewma_vol'] = compute_ewma_volatility(df['price'])
+        obs_combined = pd.concat(obs_dfs, ignore_index=True)
+        obs_start = obs_combined['timestamp_ms'].min()
+        obs_end = obs_combined['timestamp_ms'].max()
+        obs_hours = (obs_end - obs_start) / 3600000
 
-    # Z-score for filtering (FIXED at EWMA method - mirrors live)
-    df['zscore_ewma'] = compute_zscore_ewma(df['ewma_vol'])
+        if ds_config['btc_file']:
+            btc_path = base_dir / ds_config['btc_file']
+            if btc_path.exists():
+                btc_df = pd.read_csv(btc_path, usecols=['timestamp_ms'])
+                btc_start = btc_df['timestamp_ms'].min()
+                btc_end = btc_df['timestamp_ms'].max()
+                overlap_start = max(obs_start, btc_start)
+                overlap_end = min(obs_end, btc_end)
+                overlap_hours = max(0, (overlap_end - overlap_start) / 3600000)
+            else:
+                overlap_hours = 0
+        else:
+            overlap_hours = obs_hours
 
-    # Load OU params for OU threshold
-    ou_params = load_ou_params()
+        coverage_pct = (overlap_hours / expected_hours * 100) if expected_hours > 0 else 100
+        passed = coverage_pct >= MIN_COVERAGE_PCT
+        status = "PASS" if passed else "FAIL"
+        if not passed:
+            all_passed = False
 
-    # Threshold method 1: OU-based adaptive (MIRRORS LIVE AGGRESSIVE)
-    print("  Computing OU thresholds...")
-    df['threshold_ou'] = df['ewma_vol'].apply(lambda v: compute_ou_threshold(v, ou_params))
+        print(f"  {ds_key}: Expected: {expected_hours:.1f}h | Actual: {overlap_hours:.1f}h | {coverage_pct:.0f}% {status}")
 
-    # Threshold method 2: EWMA-based adaptive (fast/slow ratio)
-    print("  Computing EWMA thresholds...")
-    df['threshold_ewma'] = compute_ewma_thresholds(df)
-
-    # Legacy regime threshold (for reference)
-    df['threshold_regime'] = df['regime'].map(REGIME_THRESHOLDS)
-    df['threshold_regime'] = df['threshold_regime'].fillna(REGIME_THRESHOLDS['MEDIUM'])
-
-    print(f"  Regime distribution: {df['regime'].value_counts().to_dict()}")
-    print(f"  Z-score EWMA range: [{df['zscore_ewma'].min():.2f}, {df['zscore_ewma'].max():.2f}]")
-    print(f"  OU threshold range: [{df['threshold_ou'].min():.4f}, {df['threshold_ou'].max():.4f}]")
-    print(f"  EWMA threshold range: [{df['threshold_ewma'].min():.4f}, {df['threshold_ewma'].max():.4f}]")
-
-    return df
+    print("=" * 80)
+    return all_passed
 
 
 # =============================================================================
@@ -414,477 +340,132 @@ def precompute_volatility_data(btc_df: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 @dataclass
-class GridConfig:
-    """Single grid search configuration (heavily pruned, mirrors live)."""
-    # Core parameters (vary in grid)
-    time_stop_sec: int
-    lookback_ms: int
-    drop_intercept: float
-    target_pair_cost: float
-    cycling: bool                     # Re-enter after hedge completes
-
-    # Filter parameters (vary in grid)
-    threshold_method: str             # "ou" or "ewma" (MIRRORS LIVE)
-    velocity_mode: str                # "all" or "none"
-
-    # Fixed at validated values (not in grid)
-    z_lo: float = FIXED_Z_LO          # 0.0 (validated)
-    z_hi: float = FIXED_Z_HI          # 1.5 (validated)
-    zscore_method: str = FIXED_ZSCORE_METHOD  # "ewma" (no drift)
-    skip_low_regime: bool = FIXED_SKIP_LOW_REGIME  # True (48% = trash)
-
-    @property
-    def lookback_ticks(self) -> int:
-        """Convert lookback ms to ticks at 60Hz."""
-        return max(1, int(self.lookback_ms * 60 / 1000))
-
-    @property
-    def z_zone_label(self) -> str:
-        return f"{self.z_lo}<z<{self.z_hi}"
-
-    def __str__(self) -> str:
-        return (f"TS{self.time_stop_sec}_LB{self.lookback_ms}_DI{self.drop_intercept:.2f}_"
-                f"TP{self.target_pair_cost:.2f}_CY{'Y' if self.cycling else 'N'}_"
-                f"TH{self.threshold_method[:3]}_VE{self.velocity_mode[:3]}")
-
-
-@dataclass
 class TradeResult:
-    """Result from a single trade cycle."""
     market_slug: str
     cycle_num: int
     entry_time_remaining: float
+    signal_score: float
     winner_side: str
-    winner_entry: float
-    loser_fill: float
-    hedge_type: str  # 'passive', 'time_stop', 'resolution'
+    winner_fill_price: float
+    loser_fill_price: float
+    hedge_type: str
     pair_cost: float
-    pnl_net: float
     pnl_gross: float
+    pnl_net: float
     entry_fee: float
     exit_fee: float
     correct_direction: bool
     spike_magnitude: float
-    entry_ts: int
-    hedge_ts: int
+    dataset: str
+    offset_name: str  # Track which offset was used
+    cycle_mode: str = "SINGLE"  # SINGLE or MULTI
+    shares: int = 50  # Shares for this trade
 
 
 @dataclass
-class BacktestResult:
-    """Aggregated results for one configuration."""
-    config: GridConfig
-    total_trades: int
-    total_pnl_net: float
-    total_pnl_gross: float
-    total_entry_fees: float
-    total_exit_fees: float
-    hourly_rate_net: float
-    hourly_rate_gross: float
-    win_rate: float
-    direction_accuracy: float
-    passive_pct: float
-    time_stop_pct: float
-    resolution_pct: float
-    avg_pair_cost: float
-    trades: List[TradeResult] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {
-            'config': str(self.config),
-            # Core parameters (varied)
-            'time_stop': self.config.time_stop_sec,
-            'lookback_ms': self.config.lookback_ms,
-            'drop_intercept': self.config.drop_intercept,
-            'target_pair': self.config.target_pair_cost,
-            'cycling': self.config.cycling,
-            # Filter parameters (varied)
-            'threshold_method': self.config.threshold_method,
-            'velocity_mode': self.config.velocity_mode,
-            # Fixed parameters (for reference)
-            'z_zone': self.config.z_zone_label,
-            'zscore_method': self.config.zscore_method,
-            'skip_low_regime': self.config.skip_low_regime,
-            # Results
-            'trades': self.total_trades,
-            'pnl_net': self.total_pnl_net,
-            'pnl_gross': self.total_pnl_gross,
-            'entry_fees': self.total_entry_fees,
-            'exit_fees': self.total_exit_fees,
-            'pnl_hr_net': self.hourly_rate_net,
-            'pnl_hr_gross': self.hourly_rate_gross,
-            'win_rate': self.win_rate,
-            'dir_acc': self.direction_accuracy,
-            'passive_pct': self.passive_pct,
-            'time_stop_pct': self.time_stop_pct,
-            'resolution_pct': self.resolution_pct,
-            'avg_pair_cost': self.avg_pair_cost,
-        }
+class BacktestCycle:
+    """Track a single cycle in multi-cycle mode."""
+    cycle_id: int
+    entry_ts: int
+    winner_side: str
+    loser_side: str
+    winner_entry: float
+    loser_target: float
+    entry_time_rem: float
+    spike_magnitude: float
+    score: float
+    shares: int
 
 
 # =============================================================================
-# SPIKE DETECTION (supports both REGIME and FIXED thresholds)
+# SPIKE DETECTION - VECTORIZED PRECOMPUTATION
 # =============================================================================
 
-def detect_spikes_for_lookback(btc_vol_df: pd.DataFrame, lookback_ticks: int,
-                                threshold_method: str = "ou") -> pd.DataFrame:
-    """
-    Detect spikes using specified threshold method.
+def precompute_spikes_ou(btc_df: pd.DataFrame, lookback: int = SPIKE_LOOKBACK) -> pd.DataFrame:
+    """Vectorized spike detection with OU ADAPTIVE threshold."""
+    print("    Using OU ADAPTIVE threshold (per TRADING_CONFIGS.py)")
+    df = btc_df.copy()
+    df = df.sort_values('timestamp_ms').reset_index(drop=True)
 
-    MIRRORS LIVE: Uses "ou" or "ewma" threshold methods (not "regime"/"fixed").
-
-    Args:
-        btc_vol_df: DataFrame with pre-computed volatility data (threshold_ou, threshold_ewma, zscore_ewma)
-        lookback_ticks: Number of ticks to look back for spike detection
-        threshold_method: "ou" (OU sigmoid) or "ewma" (fast/slow ratio)
-
-    Returns:
-        DataFrame with ALL spikes including zscore_ewma column.
-        Filtering (z-score, LOW regime) done during simulation based on config.
-    """
-    df = btc_vol_df.copy()
-
-    # Calculate % change over lookback period
-    df['price_prev'] = df['price'].shift(lookback_ticks)
+    df['price_prev'] = df['price'].shift(lookback)
     df['change_pct'] = (df['price'] - df['price_prev']) / df['price_prev'] * 100
-    df['magnitude'] = df['change_pct'].abs()
+    df['spike_magnitude'] = df['change_pct'].abs()
 
-    # Choose threshold based on method (MIRRORS LIVE)
-    if threshold_method == "ou":
-        df['threshold_used'] = df['threshold_ou']
-    elif threshold_method == "ewma":
-        df['threshold_used'] = df['threshold_ewma']
-    else:
-        raise ValueError(f"Unknown threshold_method: {threshold_method}. Use 'ou' or 'ewma'.")
+    returns = df['price'].pct_change() * 100
+    ewma_halflife = 300
+    alpha = 1 - 0.5 ** (1.0 / ewma_halflife)
 
-    # Spike detected if magnitude >= threshold
-    df['spike_detected'] = df['magnitude'] >= df['threshold_used']
+    variance = returns.iloc[:60].var() if len(returns) > 60 else 0.01
+    thresholds = []
+    zscores = []
 
-    # Direction
+    for i, r in enumerate(returns):
+        if pd.isna(r):
+            thresholds.append(OU_BASE_THRESHOLD)
+            zscores.append(0.0)
+            continue
+        variance = alpha * (r ** 2) + (1 - alpha) * variance
+        vol = max(np.sqrt(variance), 1e-6)
+        threshold = compute_ou_threshold(vol)
+        z_score = compute_ou_zscore(vol)
+        thresholds.append(threshold)
+        zscores.append(z_score)
+
+    df['threshold'] = thresholds
+    df['z_score'] = zscores
+    df['spike_detected'] = df['spike_magnitude'] >= df['threshold']
     df['spike_direction'] = None
     df.loc[(df['spike_detected']) & (df['change_pct'] > 0), 'spike_direction'] = 'UP'
     df.loc[(df['spike_detected']) & (df['change_pct'] < 0), 'spike_direction'] = 'DOWN'
-    df['spike_magnitude'] = df['magnitude'].where(df['spike_detected'], 0)
 
-    # Return ALL spikes with zscore_ewma (used for z-score filter)
-    spikes_only = df[df['spike_detected'] == True].copy()
+    spike_count = df['spike_detected'].sum()
+    print(f"    Found {spike_count:,} spikes (OU adaptive)")
 
-    return spikes_only[['timestamp_ms', 'price', 'spike_direction', 'spike_magnitude',
-                        'regime', 'threshold_used', 'zscore_ewma']]
+    return df
 
 
-def precompute_spikes_all_lookbacks(btc_vol_df: pd.DataFrame,
-                                    lookbacks_ms: List[int],
-                                    threshold_methods: List[str]) -> Dict[Tuple[int, str], pd.DataFrame]:
-    """
-    Pre-compute spikes for all lookback + threshold_method combinations.
-
-    This is done ONCE before grid search to avoid repeated computation.
-
-    Returns:
-        Dict mapping (lookback_ms, threshold_method) -> spikes DataFrame
-    """
-    print("\nPre-computing spikes for all lookback + threshold combinations...")
-    spikes_cache = {}
-
-    for lb_ms in lookbacks_ms:
-        lookback_ticks = max(1, int(lb_ms * 60 / 1000))
-        for th_method in threshold_methods:
-            spikes_df = detect_spikes_for_lookback(btc_vol_df, lookback_ticks, th_method)
-            spikes_cache[(lb_ms, th_method)] = spikes_df
-            print(f"  {lb_ms}ms + {th_method}: {len(spikes_df):,} spikes")
-
-    return spikes_cache
-
-
-class SpikeDetector:
-    """60Hz spike detection with adaptive threshold support."""
-
-    def __init__(self, lookback_ticks: int):
-        self.lookback = lookback_ticks
-        self.price_history = deque(maxlen=max(100, lookback_ticks + 10))
-
-    def detect(self, price: float, threshold: float) -> Tuple[Optional[str], float]:
-        """
-        Detect spike from 60Hz price data using given threshold.
-
-        Returns: (direction, magnitude_pct) or (None, 0)
-        """
-        self.price_history.append(price)
-
-        if len(self.price_history) < self.lookback + 1:
-            return None, 0.0
-
-        current = self.price_history[-1]
-        previous = self.price_history[-(self.lookback + 1)]
-
-        if previous <= 0:
-            return None, 0.0
-
-        change_pct = (current - previous) / previous * 100
-        magnitude = abs(change_pct)
-
-        if magnitude >= threshold:
-            direction = "UP" if change_pct > 0 else "DOWN"
-            return direction, magnitude
-
-        return None, 0.0
-
-    def reset(self):
-        self.price_history.clear()
-
-
-def velocity_confirms_spike(spike_dir: str, velocity_bps: float, velocity_mode: str) -> bool:
-    """
-    Check if velocity confirms spike direction.
-
-    Args:
-        spike_dir: "UP" or "DOWN"
-        velocity_bps: Current velocity in basis points
-        velocity_mode: "all" (reject contradicting) or "none" (no filter)
-
-    Returns:
-        True if trade should proceed, False if rejected
-    """
-    if velocity_mode == "none":
-        return True  # No velocity filter
-
-    # velocity_mode == "all": Reject only contradicting velocity
-    if spike_dir == "UP":
-        # REJECT if spike UP but velocity < -0.10 (14% accuracy)
-        return velocity_bps > -VELOCITY_CONFIRM_THRESHOLD
-    elif spike_dir == "DOWN":
-        # REJECT if spike DOWN but velocity > +0.10 (43% accuracy)
-        return velocity_bps < VELOCITY_CONFIRM_THRESHOLD
-    return True
-
-
-def compute_enhanced_score(spike_mag: float, velocity_bps: float,
-                           spike_dir: str, time_remaining: float) -> float:
-    """
-    Compute composite score (matching live strategy).
-
-    Formula: 0.40*spike + 0.30*velocity + 0.20*confirmation + 0.10*urgency
-    """
-    spike_score = min(spike_mag / 0.05, 1.0)
-    velocity_score = min(abs(velocity_bps) / 0.50, 1.0)
-
-    vel_confirms = (spike_dir == "UP" and velocity_bps > 0) or \
-                   (spike_dir == "DOWN" and velocity_bps < 0)
-    confirm_bonus = 1.0 if vel_confirms else 0.0
-
-    urgency = 1.0 - min(time_remaining / 900.0, 1.0)
-
-    score = (0.40 * spike_score +
-             0.30 * velocity_score +
-             0.20 * confirm_bonus +
-             0.10 * urgency)
-
-    return round(score, 3)
-
-
-def obi_confirms_spike(spike_dir: str, up_imbalance, down_imbalance) -> bool:
-    """
-    Check if Order Book Imbalance confirms spike direction.
-
-    OBI CONFIRMATION FILTER (January 28, 2026):
-    When OBI confirms spike direction: 89% accuracy vs 77% when disagrees (+4.1pp)
-
-    Args:
-        spike_dir: "UP" or "DOWN"
-        up_imbalance: OBI for UP token (-1 to +1, positive = buying pressure)
-        down_imbalance: OBI for DOWN token (-1 to +1, positive = buying pressure)
-
-    Returns:
-        True if OBI confirms or is unavailable, False if OBI disagrees
-    """
-    if spike_dir == "UP" and up_imbalance is not None and not np.isnan(up_imbalance):
-        # UP spike needs positive UP imbalance (buying pressure on UP)
-        return up_imbalance > 0
-    elif spike_dir == "DOWN" and down_imbalance is not None and not np.isnan(down_imbalance):
-        # DOWN spike needs positive DOWN imbalance (buying pressure on DOWN)
-        return down_imbalance > 0
-    # If imbalance not available, don't filter
-    return True
-
-
-def calculate_loser_bid(winner_entry: float, spike_magnitude: float,
-                        drop_intercept: float, target_pair_cost: float) -> float:
-    """
-    Calculate loser bid based on spike magnitude and config parameters.
-
-    Formula: expected_drop = DROP_MULTIPLIER * magnitude + drop_intercept
-    loser_bid = loser_ask - expected_drop (bounded by target_pair_cost)
-
-    IMPORTANT: LOWER drop_intercept -> SMALLER expected_drop -> HIGHER loser_bid -> FASTER fills
-    """
-    # FIX: Do NOT divide by 100 - magnitude is already percentage (0.05 = 0.05%)
-    # Matches enhanced_spike.py:526
-    expected_drop = DROP_MULTIPLIER * spike_magnitude + drop_intercept
-    max_loser = target_pair_cost - winner_entry
-    loser_bid = min((1.0 - winner_entry) - expected_drop, max_loser)
-    return max(0.01, min(0.95, loser_bid))
-
+# HELPER FUNCTIONS: imported from src.core
+# (velocity_confirms_spike, obi_confirms_spike, should_take_spike_enhanced, compute_enhanced_score)
 
 # =============================================================================
-# DATA LOADING (from aggressive_main_backtest.py)
+# SIMULATION - Uses TestConfig for both time-stop AND loser offset
 # =============================================================================
 
-def load_data(dataset: str = "is_oos2"):
+def simulate_market(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
+                    slug: str, resolution: str,
+                    use_obi_filter: bool, dataset_name: str,
+                    config: TestConfig) -> List[TradeResult]:
     """
-    Load 60Hz Binance data and observer orderbook data.
-
-    Args:
-        dataset: Which dataset to load
-            - "is_oos2": IS+OOS2 (Jan 16-19, ~82h) - for grid search
-            - "oos34": OOS3+OOS4 (Jan 22-24, ~47h) - for validation
-            - "oos5": OOS5 (Jan 26, ~42h)
-            - "all": All data combined (~229h)
+    Simulate trading with configurable time-stop, loser offset, and cycle mode.
+    Dispatches to single-cycle or multi-cycle based on config.max_cycles.
     """
-    print(f"Loading data (dataset={dataset})...")
-
-    obs_dir = Path("research/observer")
-    if not obs_dir.exists():
-        obs_dir = Path("/Users/rananjaybika/polymarket-amm-bot/research/observer")
-
-    btc_dir = Path("research/binance_hf")
-    if not btc_dir.exists():
-        btc_dir = Path("/Users/rananjaybika/polymarket-amm-bot/research/binance_hf")
-
-    # Select files based on dataset
-    if dataset == "is_oos2":
-        # IS+OOS2: Jan 16-19 (~82h)
-        obs_files = [
-            obs_dir / "grid_obs_20260116.csv",
-            obs_dir / "grid_obs_20260117.csv",
-            obs_dir / "grid_obs_20260118.csv",
-            obs_dir / "grid_obs_20260119.csv",
-        ]
-        btc_files = [btc_dir / "btc_prices_combined.csv"]
-        print("  Dataset: IS+OOS2 (Jan 16-19, ~82h)")
-
-    elif dataset == "oos34":
-        # OOS3+OOS4: Jan 22-24 (~47h)
-        obs_files = [obs_dir / "grid_obs_oos3_oos4_combined.csv"]
-        btc_files = [obs_dir / "btc_prices_oos3_oos4_combined.csv"]
-        print("  Dataset: OOS3+OOS4 (Jan 22-24, ~47h)")
-
-    elif dataset == "oos5":
-        # OOS5: Jan 26 (~42h)
-        obs_files = [obs_dir / "grid_obs_oos5.csv"]
-        btc_files = [btc_dir / "btc_prices_20260124_recovered.csv"]
-        print("  Dataset: OOS5 (Jan 26, ~42h)")
-
-    else:  # "all"
-        # Load ALL files
-        obs_files = list(obs_dir.glob("grid_obs_*.csv"))
-        btc_files = list(btc_dir.glob("btc_prices_*.csv"))
-        print("  Dataset: ALL combined")
-
-    # Load Binance data
-    btc_dfs = []
-    for f in btc_files:
-        if f.exists():
-            df = pd.read_csv(f)
-            btc_dfs.append(df)
-            print(f"  Binance: {len(df):,} rows ({f.name})")
-
-    if not btc_dfs:
-        raise FileNotFoundError(f"No Binance files found for dataset={dataset}")
-
-    btc_df = pd.concat(btc_dfs, ignore_index=True)
-    btc_df = btc_df.drop_duplicates(subset=['timestamp_ms']).sort_values('timestamp_ms')
-    print(f"  Binance TOTAL: {len(btc_df):,} rows")
-
-    # Load observer data
-    obs_dfs = []
-    for f in obs_files:
-        if f.exists():
-            df = pd.read_csv(f, on_bad_lines='skip', low_memory=False)
-            obs_dfs.append(df)
-            print(f"  Observer: {len(df):,} rows ({f.name})")
-
-    if not obs_dfs:
-        raise FileNotFoundError(f"No observer files found for dataset={dataset}")
-
-    obs_df = pd.concat(obs_dfs, ignore_index=True)
-    obs_df = obs_df.drop_duplicates(subset=['timestamp_ms', 'market_slug'])
-    print(f"  Observer TOTAL: {len(obs_df):,} rows")
-
-    # Load resolutions
-    res_path = obs_dir / "market_resolutions_verified.csv"
-    res_df = pd.read_csv(res_path)
-    res_map = dict(zip(res_df['slug'], res_df['winner']))
-
-    # Find overlap period
-    btc_start, btc_end = btc_df['timestamp_ms'].min(), btc_df['timestamp_ms'].max()
-    obs_start, obs_end = obs_df['timestamp_ms'].min(), obs_df['timestamp_ms'].max()
-
-    overlap_start = max(btc_start, obs_start)
-    overlap_end = min(btc_end, obs_end)
-
-    duration_hours = (overlap_end - overlap_start) / 3600000
-    print(f"\nOverlap period: {duration_hours:.2f} hours")
-
-    # Filter to overlap
-    btc_df = btc_df[(btc_df['timestamp_ms'] >= overlap_start) &
-                     (btc_df['timestamp_ms'] <= overlap_end)].copy()
-    obs_df = obs_df[(obs_df['timestamp_ms'] >= overlap_start) &
-                     (obs_df['timestamp_ms'] <= overlap_end)].copy()
-
-    # Add resolutions
-    obs_df['resolution'] = obs_df['market_slug'].map(res_map)
-    obs_df = obs_df[obs_df['resolution'].isin(['UP', 'DOWN'])]
-
-    # Filter valid markets
-    valid_slugs = []
-    for slug, mdf in obs_df.groupby('market_slug'):
-        max_time = mdf['time_remaining_secs'].max()
-        min_time = mdf['time_remaining_secs'].min()
-        duration = max_time - min_time
-        if duration >= MIN_RUNTIME_SECS and max_time >= 840:
-            valid_slugs.append(slug)
-
-    obs_df = obs_df[obs_df['market_slug'].isin(valid_slugs)]
-
-    print(f"Valid markets: {len(valid_slugs)}")
-    print(f"Observer rows: {len(obs_df):,}")
-    print(f"Binance rows: {len(btc_df):,}")
-
-    return btc_df, obs_df, duration_hours, res_map
+    if config.max_cycles > 1:
+        return simulate_market_multicycle(
+            btc_spikes, obs_df, slug, resolution, use_obi_filter, dataset_name, config
+        )
+    return simulate_market_single(
+        btc_spikes, obs_df, slug, resolution, use_obi_filter, dataset_name, config
+    )
 
 
-# =============================================================================
-# BACKTEST SIMULATION (uses pre-computed spikes with z-score filter)
-# =============================================================================
-
-def simulate_market_with_spikes(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
-                                 slug: str, resolution: str, config: GridConfig) -> List[TradeResult]:
-    """
-    Simulate trading on a single market using PRE-COMPUTED spikes.
-
-    Applies filters based on config:
-    1. Z-score filter: config.z_lo < z < config.z_hi
-    2. LOW regime skip: config.skip_low_regime
-    3. Velocity confirmation filter: config.velocity_mode
-    4. High entry skip (>= $0.90)
-    5. Cycling: config.cycling (True = re-enter, False = one trade per market)
-
-    CRITICAL: Uses last_hedge_ts for cycling gap (NOT entry timestamp).
-    """
+def simulate_market_single(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
+                           slug: str, resolution: str,
+                           use_obi_filter: bool, dataset_name: str,
+                           config: TestConfig) -> List[TradeResult]:
+    """Single-cycle simulation (original behavior)."""
     mdf = obs_df[obs_df['market_slug'] == slug].copy()
     mdf = mdf.sort_values('timestamp_ms').reset_index(drop=True)
 
     if len(mdf) == 0:
         return []
 
-    # Get market time range
     market_start = mdf['timestamp_ms'].min()
     market_end = mdf['timestamp_ms'].max()
 
-    # Get spikes in this market's time range
-    market_spikes = spikes_df[
-        (spikes_df['timestamp_ms'] >= market_start) &
-        (spikes_df['timestamp_ms'] <= market_end)
+    market_spikes = btc_spikes[
+        (btc_spikes['timestamp_ms'] >= market_start) &
+        (btc_spikes['timestamp_ms'] <= market_end) &
+        (btc_spikes['spike_detected'] == True)
     ].copy()
 
     if len(market_spikes) == 0:
@@ -892,223 +473,182 @@ def simulate_market_with_spikes(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
 
     trades = []
     cycle_num = 0
-    last_hedge_ts = 0  # CRITICAL: Track hedge fill time, NOT entry time
-    time_stop_ms = config.time_stop_sec * 1000
-    has_traded = False  # For cycling=False mode
+    last_hedge_ts = 0
+    in_position = False
+    position_data = None
+    time_stop_ms = config.time_stop_seconds * 1000
 
-    # Iterate through pre-computed spikes
-    for _, spike_row in market_spikes.iterrows():
+    spike_idx = 0
+    obs_idx = 0
+
+    while spike_idx < len(market_spikes) or in_position:
+
+        # STATE 1: In position - check for hedge
+        if in_position and position_data is not None:
+            entry_ts = position_data['entry_ts']
+
+            while obs_idx < len(mdf):
+                obs_row = mdf.iloc[obs_idx]
+                obs_ts = obs_row['timestamp_ms']
+
+                if obs_ts < entry_ts:
+                    obs_idx += 1
+                    continue
+
+                loser_side = position_data['loser_side']
+                loser_target = position_data['loser_target']
+                winner_entry = position_data['winner_entry']
+                spike_mag = position_data['spike_magnitude']
+                score = position_data['score']
+
+                if loser_side == "UP":
+                    loser_ask = obs_row['up_ask']
+                else:
+                    loser_ask = obs_row['down_ask']
+
+                # Check passive fill
+                if pd.notna(loser_ask) and loser_ask <= loser_target:
+                    pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
+                        winner_entry, loser_target, config.shares_per_cycle,
+                        is_taker_entry=True,
+                        is_taker_exit=False
+                    )
+
+                    trades.append(TradeResult(
+                        market_slug=slug,
+                        cycle_num=cycle_num,
+                        entry_time_remaining=position_data['entry_time_rem'],
+                        signal_score=score,
+                        winner_side=position_data['winner_side'],
+                        winner_fill_price=winner_entry,
+                        loser_fill_price=loser_target,
+                        hedge_type="passive",
+                        pair_cost=winner_entry + loser_target,
+                        pnl_gross=pnl_gross,
+                        pnl_net=pnl_net,
+                        entry_fee=entry_fee,
+                        exit_fee=exit_fee,
+                        correct_direction=(resolution == position_data['winner_side']),
+                        spike_magnitude=spike_mag,
+                        dataset=dataset_name,
+                        offset_name=config.offset_name,
+                        cycle_mode=config.cycle_mode,
+                        shares=config.shares_per_cycle,
+                    ))
+
+                    in_position = False
+                    position_data = None
+                    last_hedge_ts = obs_ts
+                    obs_idx += 1
+                    break
+
+                # Check time-stop (ONLY if NOT in profit)
+                elapsed_ms = obs_ts - entry_ts
+                if elapsed_ms >= time_stop_ms:
+                    winner_side_current = position_data['winner_side']
+                    if winner_side_current == "UP":
+                        winner_bid_current = obs_row['up_bid']
+                    else:
+                        winner_bid_current = obs_row['down_bid']
+
+                    in_profit = pd.notna(winner_bid_current) and winner_bid_current >= winner_entry
+
+                    if not in_profit:
+                        loser_fill = loser_ask if pd.notna(loser_ask) else loser_target * 1.05
+                        pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
+                            winner_entry, loser_fill, config.shares_per_cycle,
+                            is_taker_entry=True,
+                            is_taker_exit=True
+                        )
+
+                        trades.append(TradeResult(
+                            market_slug=slug,
+                            cycle_num=cycle_num,
+                            entry_time_remaining=position_data['entry_time_rem'],
+                            signal_score=score,
+                            winner_side=position_data['winner_side'],
+                            winner_fill_price=winner_entry,
+                            loser_fill_price=loser_fill,
+                            hedge_type="time_stop",
+                            pair_cost=winner_entry + loser_fill,
+                            pnl_gross=pnl_gross,
+                            pnl_net=pnl_net,
+                            entry_fee=entry_fee,
+                            exit_fee=exit_fee,
+                            correct_direction=(resolution == position_data['winner_side']),
+                            spike_magnitude=spike_mag,
+                            dataset=dataset_name,
+                            offset_name=config.offset_name,
+                            cycle_mode=config.cycle_mode,
+                            shares=config.shares_per_cycle,
+                        ))
+
+                        in_position = False
+                        position_data = None
+                        last_hedge_ts = obs_ts
+                        obs_idx += 1
+                        break
+
+                obs_idx += 1
+
+            # If we ran out of observer data while in position
+            if in_position and obs_idx >= len(mdf):
+                winner_side = position_data['winner_side']
+                winner_entry = position_data['winner_entry']
+                shares = config.shares_per_cycle
+
+                entry_fee = polymarket_taker_fee(winner_entry) * winner_entry * shares
+
+                if resolution == winner_side:
+                    pnl_gross = (1.0 - winner_entry) * shares
+                    loser_fill = 0.0
+                else:
+                    pnl_gross = (0.0 - winner_entry) * shares
+                    loser_fill = 1.0
+
+                pnl_net = pnl_gross - entry_fee
+
+                trades.append(TradeResult(
+                    market_slug=slug,
+                    cycle_num=cycle_num,
+                    entry_time_remaining=position_data['entry_time_rem'],
+                    signal_score=position_data['score'],
+                    winner_side=winner_side,
+                    winner_fill_price=winner_entry,
+                    loser_fill_price=loser_fill,
+                    hedge_type="resolution",
+                    pair_cost=winner_entry + loser_fill,
+                    pnl_gross=pnl_gross,
+                    pnl_net=pnl_net,
+                    entry_fee=entry_fee,
+                    exit_fee=0.0,
+                    correct_direction=(resolution == winner_side),
+                    spike_magnitude=position_data['spike_magnitude'],
+                    dataset=dataset_name,
+                    offset_name=config.offset_name,
+                    cycle_mode=config.cycle_mode,
+                    shares=shares,
+                ))
+                break
+
+            continue
+
+        # STATE 2: Not in position - check next spike
+        if spike_idx >= len(market_spikes):
+            break
+
+        spike_row = market_spikes.iloc[spike_idx]
         spike_ts = spike_row['timestamp_ms']
         spike_dir = spike_row['spike_direction']
         spike_mag = spike_row['spike_magnitude']
-        regime = spike_row.get('regime', 'MEDIUM')
 
-        # Z-score filter uses EWMA method (FIXED - mirrors live AGGRESSIVE config)
-        zscore = spike_row.get('zscore_ewma', 0.0)
-
-        # CYCLING CHECK: If cycling=False and already traded, skip
-        if not config.cycling and has_traded:
+        # Enforce cycle gap
+        if (spike_ts - last_hedge_ts) < MIN_CYCLE_GAP_MS:
+            spike_idx += 1
             continue
 
-        # Enforce minimum gap after HEDGE (not entry) - only matters if cycling
-        if config.cycling and (spike_ts - last_hedge_ts) < MIN_CYCLE_GAP_MS:
-            continue
-
-        # LOW REGIME FILTER (based on config)
-        if config.skip_low_regime and regime == 'LOW':
-            continue
-
-        # Z-SCORE FILTER (based on config)
-        if pd.notna(zscore):
-            if config.z_lo is not None and zscore < config.z_lo:
-                continue
-            if config.z_hi is not None and zscore > config.z_hi:
-                continue
-
-        # Find nearest observer row
-        obs_idx = mdf['timestamp_ms'].searchsorted(spike_ts)
-        if obs_idx >= len(mdf):
-            obs_idx = len(mdf) - 1
-
-        obs_row = mdf.iloc[obs_idx]
-        time_rem = obs_row['time_remaining_secs']
-        velocity_bps = obs_row.get('velocity_bps', 0.0) or 0.0
-
-        # Skip if too close to end
-        if time_rem < MIN_TIME_REMAINING:
-            continue
-
-        # Apply velocity confirmation filter (based on config.velocity_mode)
-        if not velocity_confirms_spike(spike_dir, velocity_bps, config.velocity_mode):
-            continue
-
-        # Apply enhanced score filter
-        score = compute_enhanced_score(spike_mag, velocity_bps, spike_dir, time_rem)
-        if score < ENHANCED_SCORE_THRESHOLD:
-            continue
-
-        # OBI CONFIRMATION FILTER (Jan 28, 2026): +4.1pp accuracy improvement
-        # When OBI confirms spike direction: 89% accuracy vs 77% when disagrees
-        up_imbalance = obs_row.get('up_imbalance', None)
-        down_imbalance = obs_row.get('down_imbalance', None)
-        if not obi_confirms_spike(spike_dir, up_imbalance, down_imbalance):
-            continue
-
-        # Check high entry threshold (PRODUCTION: $0.90)
-        winner_side = spike_dir
-        if winner_side == "UP":
-            winner_ask = obs_row['up_ask']
-        else:
-            winner_ask = obs_row['down_ask']
-
-        if winner_ask >= HIGH_ENTRY_THRESHOLD:
-            continue
-
-        # ENTRY SIGNAL - take position
-        cycle_num += 1
-        has_traded = True  # Mark that we've traded (for cycling=False)
-        loser_side = "DOWN" if winner_side == "UP" else "UP"
-        winner_entry = winner_ask
-
-        # Calculate loser bid target using config parameters
-        loser_target = calculate_loser_bid(
-            winner_entry, spike_mag,
-            config.drop_intercept, config.target_pair_cost
-        )
-
-        # Scan forward for hedge fill or time-stop
-        hedge_type = "resolution"
-        loser_fill = 0.0
-        hedge_fill_ts = market_end
-
-        for j in range(obs_idx + 1, len(mdf)):
-            scan_row = mdf.iloc[j]
-            scan_ts = scan_row['timestamp_ms']
-
-            if loser_side == "UP":
-                loser_ask = scan_row['up_ask']
-            else:
-                loser_ask = scan_row['down_ask']
-
-            # Check passive fill (ask crosses through our bid)
-            if loser_ask <= loser_target:
-                loser_fill = loser_target
-                hedge_type = "passive"
-                hedge_fill_ts = scan_ts
-                break
-
-            # Check time-stop (ONLY if NOT in profit - matches live enhanced_spike.py)
-            elapsed_ms = scan_ts - spike_ts
-            if elapsed_ms >= time_stop_ms:
-                # Get current winner bid to check if in profit
-                if winner_side == "UP":
-                    winner_bid_current = scan_row['up_bid']
-                else:
-                    winner_bid_current = scan_row['down_bid']
-
-                # Check if in profit: winner_bid >= entry price
-                in_profit = pd.notna(winner_bid_current) and winner_bid_current >= winner_entry
-
-                if not in_profit:
-                    # NOT in profit - execute time-stop
-                    loser_fill = loser_ask  # Market order at current ask
-                    hedge_type = "time_stop"
-                    hedge_fill_ts = scan_ts
-                    break
-                # else: in profit, keep waiting for passive fill
-
-        # Resolution handling
-        if hedge_type == "resolution":
-            if resolution == winner_side:
-                hedge_type = "passive"  # Direction correct, loser goes to $0
-                loser_fill = loser_target
-            else:
-                loser_fill = 1.0  # Direction wrong, loser goes to $1
-
-        # Calculate PnL with fees
-        is_taker_exit = (hedge_type == "time_stop")
-        pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
-            winner_entry, loser_fill, BASE_SIZE,
-            is_taker_entry=True, is_taker_exit=is_taker_exit
-        )
-
-        trades.append(TradeResult(
-            market_slug=slug,
-            cycle_num=cycle_num,
-            entry_time_remaining=time_rem,
-            winner_side=winner_side,
-            winner_entry=winner_entry,
-            loser_fill=loser_fill,
-            hedge_type=hedge_type,
-            pair_cost=winner_entry + loser_fill,
-            pnl_net=pnl_net,
-            pnl_gross=pnl_gross,
-            entry_fee=entry_fee,
-            exit_fee=exit_fee,
-            correct_direction=(resolution == winner_side),
-            spike_magnitude=spike_mag,
-            entry_ts=spike_ts,
-            hedge_ts=hedge_fill_ts,
-        ))
-
-        # Update last hedge timestamp for cycling
-        last_hedge_ts = hedge_fill_ts
-
-    return trades
-
-
-# Legacy simulation function (not used, kept for reference)
-def simulate_market(btc_df: pd.DataFrame, obs_df: pd.DataFrame,
-                    slug: str, resolution: str, config: GridConfig) -> List[TradeResult]:
-    """
-    LEGACY: Simulate trading with tick-by-tick spike detection.
-    Use simulate_market_with_spikes() instead for better performance.
-    """
-    mdf = obs_df[obs_df['market_slug'] == slug].copy()
-    mdf = mdf.sort_values('timestamp_ms').reset_index(drop=True)
-
-    if len(mdf) == 0:
-        return []
-
-    # Get Binance data for this market's time range
-    market_start = mdf['timestamp_ms'].min()
-    market_end = mdf['timestamp_ms'].max()
-
-    btc_market = btc_df[(btc_df['timestamp_ms'] >= market_start - 1000) &
-                        (btc_df['timestamp_ms'] <= market_end + 1000)].copy()
-    btc_market = btc_market.sort_values('timestamp_ms').reset_index(drop=True)
-
-    if len(btc_market) == 0:
-        return []
-
-    trades = []
-    detector = SpikeDetector(lookback_ticks=config.lookback_ticks)
-
-    cycle_num = 0
-    last_hedge_ts = 0  # CRITICAL: Track hedge fill time, NOT entry time
-    in_position = False
-    position_data = None
-
-    # Process each Binance tick
-    btc_idx = 0
-    obs_idx = 0
-
-    time_stop_ms = config.time_stop_sec * 1000
-
-    while btc_idx < len(btc_market):
-        btc_row = btc_market.iloc[btc_idx]
-        btc_ts = btc_row['timestamp_ms']
-        btc_price = btc_row['price']
-        threshold = btc_row.get('threshold', REGIME_THRESHOLDS['MEDIUM'])
-        regime = btc_row.get('regime', 'MEDIUM')
-
-        # Skip LOW regime (48% accuracy = worse than coin flip)
-        if regime == 'LOW':
-            btc_idx += 1
-            continue
-
-        # Find nearest observer row
-        while obs_idx < len(mdf) - 1 and mdf.iloc[obs_idx + 1]['timestamp_ms'] <= btc_ts:
+        # Find nearest observer row for this spike
+        while obs_idx < len(mdf) - 1 and mdf.iloc[obs_idx + 1]['timestamp_ms'] <= spike_ts:
             obs_idx += 1
 
         if obs_idx >= len(mdf):
@@ -1119,633 +659,675 @@ def simulate_market(btc_df: pd.DataFrame, obs_df: pd.DataFrame,
         velocity_bps = obs_row.get('velocity_bps', 0.0) or 0.0
 
         # Skip if too close to end
-        if time_rem < MIN_TIME_REMAINING:
-            btc_idx += 1
+        if time_rem < MIN_TIME:
+            spike_idx += 1
             continue
 
-        # If in position, check for hedge/time-stop
-        if in_position and position_data is not None:
-            winner_side = position_data['winner_side']
-            loser_side = position_data['loser_side']
-            winner_entry = position_data['winner_entry']
-            loser_target = position_data['loser_target']
-            entry_ts = position_data['entry_ts']
-            spike_mag = position_data['spike_magnitude']
+        # Velocity confirmation
+        if not velocity_confirms_spike(spike_dir, velocity_bps):
+            spike_idx += 1
+            continue
 
-            # Get current prices
+        # Enhanced score
+        score = compute_enhanced_score(spike_mag, velocity_bps, spike_dir, time_rem)
+        if score < ENHANCED_SCORE_THRESHOLD:
+            spike_idx += 1
+            continue
+
+        # Get prices first (needed for enhanced OBI filter)
+        winner_side = spike_dir
+        if winner_side == "UP":
+            winner_ask = obs_row['up_ask']
+            loser_bid = obs_row.get('down_bid', None)
+            loser_ask = obs_row.get('down_ask', None)
+            obi_winner = obs_row.get('up_imbalance', None)
+        else:
+            winner_ask = obs_row['down_ask']
+            loser_bid = obs_row.get('up_bid', None)
+            loser_ask = obs_row.get('up_ask', None)
+            obi_winner = obs_row.get('down_imbalance', None)
+
+        if pd.isna(winner_ask) or winner_ask >= HIGH_ENTRY_THRESHOLD:
+            spike_idx += 1
+            continue
+
+        # Enhanced OBI filter (uses loser spread, time remaining, OBI magnitude)
+        if use_obi_filter:
+            if obi_winner is not None and not np.isnan(obi_winner):
+                # Calculate loser spread
+                loser_spread = 0.05  # Default
+                if pd.notna(loser_bid) and pd.notna(loser_ask):
+                    loser_spread = loser_ask - loser_bid
+
+                should_take, reject_reason = should_take_spike_enhanced(
+                    spike_direction=spike_dir,
+                    obi_winner=obi_winner,
+                    loser_spread=loser_spread,
+                    time_remaining=time_rem,
+                    winner_ask_depth=None,  # Depth not available in observer data
+                )
+                if not should_take:
+                    spike_idx += 1
+                    continue
+
+        # ENTRY - use config's loser bid calculation
+        cycle_num += 1
+        loser_side = "DOWN" if winner_side == "UP" else "UP"
+        winner_entry = winner_ask
+        loser_target = config.calculate_loser_bid(winner_entry, spike_mag)
+
+        in_position = True
+        position_data = {
+            'winner_side': winner_side,
+            'loser_side': loser_side,
+            'winner_entry': winner_entry,
+            'loser_target': loser_target,
+            'entry_ts': spike_ts,
+            'entry_time_rem': time_rem,
+            'spike_magnitude': spike_mag,
+            'score': score,
+        }
+
+        spike_idx += 1
+
+    return trades
+
+
+# =============================================================================
+# MULTI-CYCLE SIMULATION
+# =============================================================================
+
+def simulate_market_multicycle(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
+                                slug: str, resolution: str,
+                                use_obi_filter: bool, dataset_name: str,
+                                config: TestConfig) -> List[TradeResult]:
+    """
+    Multi-cycle simulation: allows multiple concurrent entry/hedge cycles.
+
+    Key difference from single-cycle:
+    - Tracks multiple active cycles (up to config.max_cycles)
+    - New entries allowed while existing cycles pending hedge
+    - Each cycle uses config.shares_per_cycle shares
+    """
+    mdf = obs_df[obs_df['market_slug'] == slug].copy()
+    mdf = mdf.sort_values('timestamp_ms').reset_index(drop=True)
+
+    if len(mdf) == 0:
+        return []
+
+    market_start = mdf['timestamp_ms'].min()
+    market_end = mdf['timestamp_ms'].max()
+
+    market_spikes = btc_spikes[
+        (btc_spikes['timestamp_ms'] >= market_start) &
+        (btc_spikes['timestamp_ms'] <= market_end) &
+        (btc_spikes['spike_detected'] == True)
+    ].copy()
+
+    if len(market_spikes) == 0:
+        return []
+
+    trades = []
+    cycle_num = 0
+    active_cycles: List[BacktestCycle] = []
+    time_stop_ms = config.time_stop_seconds * 1000
+    shares = config.shares_per_cycle
+
+    spike_idx = 0
+    obs_idx = 0
+
+    while spike_idx < len(market_spikes) or active_cycles:
+        # Get current timestamp
+        current_ts = None
+        if spike_idx < len(market_spikes):
+            current_ts = market_spikes.iloc[spike_idx]['timestamp_ms']
+
+        # Find observer row for current time
+        if obs_idx < len(mdf) and current_ts:
+            while obs_idx < len(mdf) - 1 and mdf.iloc[obs_idx + 1]['timestamp_ms'] <= current_ts:
+                obs_idx += 1
+
+        if obs_idx >= len(mdf):
+            break
+
+        obs_row = mdf.iloc[obs_idx]
+        obs_ts = obs_row['timestamp_ms']
+
+        # Process active cycles: check for hedge fills and time-stops
+        completed_cycles = []
+        for cycle in active_cycles:
+            loser_side = cycle.loser_side
             if loser_side == "UP":
                 loser_ask = obs_row['up_ask']
             else:
                 loser_ask = obs_row['down_ask']
 
-            # Check passive fill (ask crosses through our bid)
-            if loser_ask <= loser_target:
-                # PASSIVE HEDGE FILL (maker - no exit fee)
-                loser_fill = loser_target
+            # Check passive fill
+            if pd.notna(loser_ask) and loser_ask <= cycle.loser_target:
                 pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
-                    winner_entry, loser_fill, BASE_SIZE,
-                    is_taker_entry=True, is_taker_exit=False  # Passive hedge = maker
+                    cycle.winner_entry, cycle.loser_target, shares,
+                    is_taker_entry=True, is_taker_exit=False
                 )
-
                 trades.append(TradeResult(
                     market_slug=slug,
-                    cycle_num=cycle_num,
-                    entry_time_remaining=position_data['entry_time_rem'],
-                    winner_side=winner_side,
-                    winner_entry=winner_entry,
-                    loser_fill=loser_fill,
+                    cycle_num=cycle.cycle_id,
+                    entry_time_remaining=cycle.entry_time_rem,
+                    signal_score=cycle.score,
+                    winner_side=cycle.winner_side,
+                    winner_fill_price=cycle.winner_entry,
+                    loser_fill_price=cycle.loser_target,
                     hedge_type="passive",
-                    pair_cost=winner_entry + loser_fill,
-                    pnl_net=pnl_net,
+                    pair_cost=cycle.winner_entry + cycle.loser_target,
                     pnl_gross=pnl_gross,
+                    pnl_net=pnl_net,
                     entry_fee=entry_fee,
                     exit_fee=exit_fee,
-                    correct_direction=(resolution == winner_side),
-                    spike_magnitude=spike_mag,
-                    entry_ts=entry_ts,
-                    hedge_ts=btc_ts,
+                    correct_direction=(resolution == cycle.winner_side),
+                    spike_magnitude=cycle.spike_magnitude,
+                    dataset=dataset_name,
+                    offset_name=config.offset_name,
+                    cycle_mode=config.cycle_mode,
+                    shares=shares,
                 ))
-
-                in_position = False
-                position_data = None
-                last_hedge_ts = btc_ts  # CRITICAL: Use hedge fill time
-                detector.reset()  # Clear history for fresh signals
-                btc_idx += 1
+                completed_cycles.append(cycle)
                 continue
 
-            # Check time-stop (ONLY if NOT in profit - matches live enhanced_spike.py)
-            elapsed_ms = btc_ts - entry_ts
+            # Check time-stop
+            elapsed_ms = obs_ts - cycle.entry_ts
             if elapsed_ms >= time_stop_ms:
-                # Get current winner bid to check if in profit
+                winner_side = cycle.winner_side
                 if winner_side == "UP":
-                    winner_bid_current = obs_row['up_bid']
+                    winner_bid = obs_row['up_bid']
                 else:
-                    winner_bid_current = obs_row['down_bid']
+                    winner_bid = obs_row['down_bid']
 
-                # Check if in profit: winner_bid >= entry price
-                in_profit = pd.notna(winner_bid_current) and winner_bid_current >= winner_entry
+                in_profit = pd.notna(winner_bid) and winner_bid >= cycle.winner_entry
 
                 if not in_profit:
-                    # TIME-STOP EXIT (taker - pay exit fee)
-                    loser_fill = loser_ask  # Market order at current ask
+                    loser_fill = loser_ask if pd.notna(loser_ask) else cycle.loser_target * 1.05
                     pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
-                        winner_entry, loser_fill, BASE_SIZE,
-                        is_taker_entry=True, is_taker_exit=True  # Taker exit
+                        cycle.winner_entry, loser_fill, shares,
+                        is_taker_entry=True, is_taker_exit=True
                     )
-
                     trades.append(TradeResult(
                         market_slug=slug,
-                        cycle_num=cycle_num,
-                        entry_time_remaining=position_data['entry_time_rem'],
-                        winner_side=winner_side,
-                        winner_entry=winner_entry,
-                        loser_fill=loser_fill,
+                        cycle_num=cycle.cycle_id,
+                        entry_time_remaining=cycle.entry_time_rem,
+                        signal_score=cycle.score,
+                        winner_side=cycle.winner_side,
+                        winner_fill_price=cycle.winner_entry,
+                        loser_fill_price=loser_fill,
                         hedge_type="time_stop",
-                        pair_cost=winner_entry + loser_fill,
-                        pnl_net=pnl_net,
+                        pair_cost=cycle.winner_entry + loser_fill,
                         pnl_gross=pnl_gross,
+                        pnl_net=pnl_net,
                         entry_fee=entry_fee,
                         exit_fee=exit_fee,
-                        correct_direction=(resolution == winner_side),
-                        spike_magnitude=spike_mag,
-                        entry_ts=entry_ts,
-                        hedge_ts=btc_ts,
+                        correct_direction=(resolution == cycle.winner_side),
+                        spike_magnitude=cycle.spike_magnitude,
+                        dataset=dataset_name,
+                        offset_name=config.offset_name,
+                        cycle_mode=config.cycle_mode,
+                        shares=shares,
                     ))
+                    completed_cycles.append(cycle)
 
-                    in_position = False
-                    position_data = None
-                    last_hedge_ts = btc_ts  # CRITICAL: Use hedge fill time
-                    detector.reset()
-                    btc_idx += 1
-                    continue
-                # else: in profit, keep waiting for passive fill
+        # Remove completed cycles
+        for c in completed_cycles:
+            active_cycles.remove(c)
 
-            btc_idx += 1
-            continue
+        # Check for new entry if capacity available
+        if len(active_cycles) < config.max_cycles and spike_idx < len(market_spikes):
+            spike_row = market_spikes.iloc[spike_idx]
+            spike_ts = spike_row['timestamp_ms']
+            spike_dir = spike_row['spike_direction']
+            spike_mag = spike_row['spike_magnitude']
 
-        # Not in position - look for entry signal
-        # Enforce minimum gap after HEDGE (not entry) - allows fast cycling
-        if (btc_ts - last_hedge_ts) < MIN_CYCLE_GAP_MS:
-            btc_idx += 1
-            continue
+            time_rem = obs_row['time_remaining_secs']
+            velocity_bps = obs_row.get('velocity_bps', 0.0) or 0.0
 
-        # Detect spike with regime-based threshold
-        spike_dir, spike_mag = detector.detect(btc_price, threshold)
-
-        if spike_dir is not None:
-            # Apply velocity confirmation filter (218% improvement per PLAN)
-            if not velocity_confirms_spike(spike_dir, velocity_bps):
-                btc_idx += 1
-                continue
-
-            # Apply enhanced score filter
-            score = compute_enhanced_score(spike_mag, velocity_bps, spike_dir, time_rem)
-            if score < ENHANCED_SCORE_THRESHOLD:
-                btc_idx += 1
-                continue
-
-            # OBI CONFIRMATION FILTER (Jan 28, 2026): +4.1pp accuracy improvement
-            up_imbalance = obs_row.get('up_imbalance', None)
-            down_imbalance = obs_row.get('down_imbalance', None)
-            if not obi_confirms_spike(spike_dir, up_imbalance, down_imbalance):
-                btc_idx += 1
-                continue
-
-            # Check high entry threshold (PRODUCTION: $0.90)
+            # Get prices first (needed for enhanced OBI)
             winner_side = spike_dir
             if winner_side == "UP":
                 winner_ask = obs_row['up_ask']
+                loser_bid = obs_row.get('down_bid', None)
+                loser_ask = obs_row.get('down_ask', None)
+                obi_winner = obs_row.get('up_imbalance', None)
             else:
                 winner_ask = obs_row['down_ask']
+                loser_bid = obs_row.get('up_bid', None)
+                loser_ask = obs_row.get('up_ask', None)
+                obi_winner = obs_row.get('down_imbalance', None)
 
-            if winner_ask >= HIGH_ENTRY_THRESHOLD:
-                btc_idx += 1
-                continue
+            # Entry filters
+            can_enter = True
+            score = 0.0
+            if time_rem < MIN_TIME:
+                can_enter = False
+            elif not velocity_confirms_spike(spike_dir, velocity_bps):
+                can_enter = False
+            elif pd.isna(winner_ask) or winner_ask >= HIGH_ENTRY_THRESHOLD:
+                can_enter = False
+            else:
+                score = compute_enhanced_score(spike_mag, velocity_bps, spike_dir, time_rem)
+                if score < ENHANCED_SCORE_THRESHOLD:
+                    can_enter = False
+                elif use_obi_filter and obi_winner is not None and not np.isnan(obi_winner):
+                    # Enhanced OBI filter
+                    loser_spread = 0.05
+                    if pd.notna(loser_bid) and pd.notna(loser_ask):
+                        loser_spread = loser_ask - loser_bid
+                    should_take, _ = should_take_spike_enhanced(
+                        spike_direction=spike_dir,
+                        obi_winner=obi_winner,
+                        loser_spread=loser_spread,
+                        time_remaining=time_rem,
+                        winner_ask_depth=None,
+                    )
+                    if not should_take:
+                        can_enter = False
 
-            # ENTRY SIGNAL - take position
-            cycle_num += 1
-            loser_side = "DOWN" if winner_side == "UP" else "UP"
+            if can_enter:
+                cycle_num += 1
+                loser_side = "DOWN" if winner_side == "UP" else "UP"
+                loser_target = config.calculate_loser_bid(winner_ask, spike_mag)
 
-            # Entry at ask (taker)
-            winner_entry = winner_ask
+                active_cycles.append(BacktestCycle(
+                    cycle_id=cycle_num,
+                    entry_ts=spike_ts,
+                    winner_side=winner_side,
+                    loser_side=loser_side,
+                    winner_entry=winner_ask,
+                    loser_target=loser_target,
+                    entry_time_rem=time_rem,
+                    spike_magnitude=spike_mag,
+                    score=score,
+                    shares=shares,
+                ))
 
-            # Calculate loser bid target using config parameters
-            loser_target = calculate_loser_bid(
-                winner_entry, spike_mag,
-                config.drop_intercept, config.target_pair_cost
-            )
+            spike_idx += 1
+        elif spike_idx < len(market_spikes):
+            spike_idx += 1  # Skip spike if at capacity
 
-            in_position = True
-            position_data = {
-                'winner_side': winner_side,
-                'loser_side': loser_side,
-                'winner_entry': winner_entry,
-                'loser_target': loser_target,
-                'entry_ts': btc_ts,
-                'entry_time_rem': time_rem,
-                'spike_magnitude': spike_mag,
-            }
+        obs_idx += 1
 
-        btc_idx += 1
-
-    # Handle unresolved position at market end
-    if in_position and position_data is not None:
-        winner_side = position_data['winner_side']
-        winner_entry = position_data['winner_entry']
-        spike_mag = position_data['spike_magnitude']
-        entry_ts = position_data['entry_ts']
-
-        if resolution == winner_side:
-            # Winner wins - unhedged profit
+    # Handle resolution for any remaining active cycles
+    for cycle in active_cycles:
+        entry_fee = polymarket_taker_fee(cycle.winner_entry) * cycle.winner_entry * shares
+        if resolution == cycle.winner_side:
+            pnl_gross = (1.0 - cycle.winner_entry) * shares
             loser_fill = 0.0
-            pnl_gross = (1.0 - winner_entry) * BASE_SIZE
-            entry_fee = polymarket_taker_fee(winner_entry) * winner_entry * BASE_SIZE
-            exit_fee = 0
-            pnl_net = pnl_gross - entry_fee
         else:
-            # Winner loses - unhedged loss
+            pnl_gross = (0.0 - cycle.winner_entry) * shares
             loser_fill = 1.0
-            pnl_gross = -winner_entry * BASE_SIZE
-            entry_fee = polymarket_taker_fee(winner_entry) * winner_entry * BASE_SIZE
-            exit_fee = 0
-            pnl_net = pnl_gross - entry_fee
+        pnl_net = pnl_gross - entry_fee
 
         trades.append(TradeResult(
             market_slug=slug,
-            cycle_num=cycle_num,
-            entry_time_remaining=position_data['entry_time_rem'],
-            winner_side=winner_side,
-            winner_entry=winner_entry,
-            loser_fill=loser_fill,
+            cycle_num=cycle.cycle_id,
+            entry_time_remaining=cycle.entry_time_rem,
+            signal_score=cycle.score,
+            winner_side=cycle.winner_side,
+            winner_fill_price=cycle.winner_entry,
+            loser_fill_price=loser_fill,
             hedge_type="resolution",
-            pair_cost=winner_entry + loser_fill,
-            pnl_net=pnl_net,
+            pair_cost=cycle.winner_entry + loser_fill,
             pnl_gross=pnl_gross,
+            pnl_net=pnl_net,
             entry_fee=entry_fee,
-            exit_fee=exit_fee,
-            correct_direction=(resolution == winner_side),
-            spike_magnitude=spike_mag,
-            entry_ts=entry_ts,
-            hedge_ts=market_end,
+            exit_fee=0.0,
+            correct_direction=(resolution == cycle.winner_side),
+            spike_magnitude=cycle.spike_magnitude,
+            dataset=dataset_name,
+            offset_name=config.offset_name,
+            cycle_mode=config.cycle_mode,
+            shares=shares,
         ))
 
     return trades
 
 
-def run_backtest(spikes_df: pd.DataFrame, obs_df: pd.DataFrame,
-                 res_map: dict, config: GridConfig, hours: float) -> BacktestResult:
-    """
-    Run backtest for a single configuration across all markets.
+# =============================================================================
+# DATA LOADING
+# =============================================================================
 
-    Uses pre-computed spikes with regime-based thresholds and z-score filter.
-    """
-    all_trades = []
+def load_dataset(dataset_key: str) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Dict[str, str], float]:
+    """Load a dataset."""
+    config = DATASETS[dataset_key]
+    base_dir = Path("/Users/rananjaybika/polymarket-amm-bot")
 
-    for slug in obs_df['market_slug'].unique():
-        resolution = res_map.get(slug, 'UP')
-        trades = simulate_market_with_spikes(spikes_df, obs_df, slug, resolution, config)
-        all_trades.extend(trades)
+    print(f"\n{'='*60}")
+    print(f"Loading {config['name']}")
+    print(f"{'='*60}")
 
-    if not all_trades:
-        return BacktestResult(
-            config=config,
-            total_trades=0,
-            total_pnl_net=0,
-            total_pnl_gross=0,
-            total_entry_fees=0,
-            total_exit_fees=0,
-            hourly_rate_net=0,
-            hourly_rate_gross=0,
-            win_rate=0,
-            direction_accuracy=0,
-            passive_pct=0,
-            time_stop_pct=0,
-            resolution_pct=0,
-            avg_pair_cost=0,
-        )
+    obs_dfs = []
+    for fname in config['obs_files']:
+        fpath = base_dir / fname
+        if fpath.exists():
+            df = pd.read_csv(fpath, on_bad_lines='skip', low_memory=False)
+            obs_dfs.append(df)
+            print(f"  {fpath.name}: {len(df):,} rows")
+        else:
+            print(f"  {fpath.name}: NOT FOUND")
 
-    total_trades = len(all_trades)
-    total_pnl_net = sum(t.pnl_net for t in all_trades)
-    total_pnl_gross = sum(t.pnl_gross for t in all_trades)
-    total_entry_fees = sum(t.entry_fee for t in all_trades)
-    total_exit_fees = sum(t.exit_fee for t in all_trades)
+    if not obs_dfs:
+        return None, None, {}, 0
 
-    hourly_rate_net = total_pnl_net / hours if hours > 0 else 0
-    hourly_rate_gross = total_pnl_gross / hours if hours > 0 else 0
+    obs_df = pd.concat(obs_dfs, ignore_index=True)
+    obs_df = obs_df.drop_duplicates(subset=['timestamp_ms', 'market_slug'])
+    print(f"  Combined observer: {len(obs_df):,} rows")
 
-    wins = sum(1 for t in all_trades if t.pnl_net > 0)
-    win_rate = wins / total_trades
+    btc_df = None
+    if config['btc_file']:
+        btc_path = base_dir / config['btc_file']
+        if btc_path.exists():
+            btc_df = pd.read_csv(btc_path)
+            print(f"  Binance HF: {len(btc_df):,} rows")
+        else:
+            print(f"  Binance HF: NOT FOUND - will use observer binance_price")
 
-    correct = sum(1 for t in all_trades if t.correct_direction)
-    direction_accuracy = correct / total_trades
+    if btc_df is None:
+        if 'binance_price' in obs_df.columns:
+            btc_df = obs_df[['timestamp_ms', 'binance_price']].copy()
+            btc_df = btc_df.rename(columns={'binance_price': 'price'})
+            btc_df = btc_df.dropna()
+            btc_df = btc_df.drop_duplicates(subset='timestamp_ms')
+            print(f"  Using observer binance_price: {len(btc_df):,} rows (5Hz)")
+        else:
+            print(f"  ERROR: No price data available")
+            return None, None, {}, 0
 
-    passive = sum(1 for t in all_trades if t.hedge_type == "passive")
-    time_stop = sum(1 for t in all_trades if t.hedge_type == "time_stop")
-    resolution = sum(1 for t in all_trades if t.hedge_type == "resolution")
+    res_path = base_dir / "research/observer/market_resolutions_verified.csv"
+    res_df = pd.read_csv(res_path)
+    res_map = dict(zip(res_df['slug'], res_df['winner']))
 
-    hedged = [t for t in all_trades if t.hedge_type != "resolution"]
-    avg_pair_cost = np.mean([t.pair_cost for t in hedged]) if hedged else 0
+    btc_start, btc_end = btc_df['timestamp_ms'].min(), btc_df['timestamp_ms'].max()
+    obs_start, obs_end = obs_df['timestamp_ms'].min(), obs_df['timestamp_ms'].max()
 
-    return BacktestResult(
-        config=config,
-        total_trades=total_trades,
-        total_pnl_net=total_pnl_net,
-        total_pnl_gross=total_pnl_gross,
-        total_entry_fees=total_entry_fees,
-        total_exit_fees=total_exit_fees,
-        hourly_rate_net=hourly_rate_net,
-        hourly_rate_gross=hourly_rate_gross,
-        win_rate=win_rate,
-        direction_accuracy=direction_accuracy,
-        passive_pct=passive / total_trades,
-        time_stop_pct=time_stop / total_trades,
-        resolution_pct=resolution / total_trades,
-        avg_pair_cost=avg_pair_cost,
-        trades=all_trades,
-    )
+    overlap_start = max(btc_start, obs_start)
+    overlap_end = min(btc_end, obs_end)
+
+    duration_hours = (overlap_end - overlap_start) / 3600000
+    print(f"  Overlap: {duration_hours:.2f} hours")
+
+    btc_df = btc_df[(btc_df['timestamp_ms'] >= overlap_start) &
+                     (btc_df['timestamp_ms'] <= overlap_end)].copy()
+    obs_df = obs_df[(obs_df['timestamp_ms'] >= overlap_start) &
+                     (obs_df['timestamp_ms'] <= overlap_end)].copy()
+
+    obs_df['resolution'] = obs_df['market_slug'].map(res_map)
+    obs_df = obs_df[obs_df['resolution'].isin(['UP', 'DOWN'])]
+
+    valid_slugs = []
+    for slug, mdf in obs_df.groupby('market_slug'):
+        max_time = mdf['time_remaining_secs'].max()
+        min_time = mdf['time_remaining_secs'].min()
+        duration = max_time - min_time
+        if duration >= MIN_RUNTIME_SECS and max_time >= 840:
+            valid_slugs.append(slug)
+
+    obs_df = obs_df[obs_df['market_slug'].isin(valid_slugs)]
+
+    print(f"  Valid markets: {len(valid_slugs)}")
+
+    return btc_df, obs_df, res_map, duration_hours
 
 
 # =============================================================================
-# GRID SEARCH RUNNER
+# MAIN GRID SEARCH
 # =============================================================================
 
-def generate_configs(quick: bool = False) -> List[GridConfig]:
-    """
-    Generate all configuration combinations (heavily pruned).
+def run_grid_search():
+    """Run grid search across all 9 configurations x 4 datasets."""
 
-    Grid includes 7 varied parameters:
-    - Core: time_stop, lookback, drop_intercept, target_pair, cycling
-    - Filters: threshold_method, velocity_mode
+    if not validate_dataset_coverage():
+        print("\n  ABORTING: Fix dataset coverage issues before running backtest!")
+        return None
 
-    Fixed at validated values (not in grid):
-    - z_score_zone = (0.0, 1.5)
-    - zscore_method = "ewma"
-    - skip_low_regime = True
-
-    Full: 5 × 3 × 3 × 2 × 2 × 2 × 2 = 720 configs
-    """
-    if quick:
-        # Reduced grid for testing
-        time_stops = [60, 120]
-        lookbacks = [1200, 2000]
-        drop_intercepts = [0.06, 0.08]
-        target_pairs = [0.99]
-        cycling_opts = [True]
-        threshold_methods = ["ou"]  # MIRRORS LIVE
-        velocity_modes = ["all"]
-    else:
-        # Full pruned grid
-        time_stops = TIME_STOPS
-        lookbacks = LOOKBACKS_MS
-        drop_intercepts = DROP_INTERCEPTS
-        target_pairs = TARGET_PAIRS
-        cycling_opts = CYCLING_OPTIONS
-        threshold_methods = THRESHOLD_METHODS
-        velocity_modes = VELOCITY_MODES
-
-    configs = []
-
-    for ts, lb, di, tp, cyc, th_method, vel_mode in product(
-        time_stops, lookbacks, drop_intercepts, target_pairs,
-        cycling_opts, threshold_methods, velocity_modes
-    ):
-        configs.append(GridConfig(
-            time_stop_sec=ts,
-            lookback_ms=lb,
-            drop_intercept=di,
-            target_pair_cost=tp,
-            cycling=cyc,
-            threshold_method=th_method,
-            velocity_mode=vel_mode,
-            # Fixed at validated values
-            z_lo=FIXED_Z_LO,
-            z_hi=FIXED_Z_HI,
-            zscore_method=FIXED_ZSCORE_METHOD,
-            skip_low_regime=FIXED_SKIP_LOW_REGIME,
-        ))
-
-    print(f"Generated {len(configs)} configs")
-    return configs
-
-
-def run_grid_search(btc_df: pd.DataFrame, obs_df: pd.DataFrame,
-                    res_map: dict, hours: float, quick: bool = False) -> List[BacktestResult]:
-    """
-    Run grid search across all configurations.
-
-    Follows SCRIPT_RULES.md:
-    - Progress bar (tqdm)
-    - ETA estimate
-    - Checkpoint saves every 10 configs
-    - Print "Running X of Y"
-
-    Pre-computes:
-    1. Volatility data (regime, z-score) - ONCE for all configs
-    2. Spikes for each (lookback, threshold_method) combo - ONCE per combo
-    """
-    configs = generate_configs(quick=quick)
-
-    # Get unique combinations for pre-computation
-    lookbacks_used = list(set(c.lookback_ms for c in configs))
-    threshold_methods_used = list(set(c.threshold_method for c in configs))
-
-    print(f"\nTotal configurations: {len(configs)}")
-    print(f"PRODUCTION CONFIG: {BASE_SIZE} shares, skip >= ${HIGH_ENTRY_THRESHOLD:.2f}")
-    print(f"\nPRE-COMPUTATION:")
-    print(f"  Lookbacks:          {sorted(lookbacks_used)}")
-    print(f"  Threshold methods:  {threshold_methods_used}")
-    print(f"  Fixed z-zone:       ({FIXED_Z_LO}, {FIXED_Z_HI})")
-    print(f"  Fixed zscore:       {FIXED_ZSCORE_METHOD}")
+    print("=" * 80)
+    print("TIME-STOP & LOSER OFFSET OPTIMIZATION TEST")
+    print("=" * 80)
+    print(f"\nConfigurations: {len(CONFIGS)} ({len(OFFSET_PRESETS)} offsets x {len(TIME_STOPS)} time-stops)")
+    print(f"Datasets: {len(DATASETS)} ({', '.join(DATASETS.keys())})")
+    print(f"Total runs: {len(CONFIGS) * len(DATASETS)}")
+    print()
+    print("Offset presets:")
+    for name, (mult, intercept, desc) in OFFSET_PRESETS.items():
+        print(f"  {name}: DROP_MULT={mult}, DROP_INT={intercept} ({desc})")
     print()
 
-    # Step 1: Pre-compute volatility data (ONCE)
-    btc_vol_df = precompute_volatility_data(btc_df)
+    load_ou_params()
 
-    # Step 2: Pre-compute spikes for each (lookback, threshold_method) combo
-    spikes_cache = precompute_spikes_all_lookbacks(btc_vol_df, lookbacks_used, threshold_methods_used)
+    dataset_cache = {}
+    all_results = []
+    checkpoint_path = Path("research/findings/data/timestop_offset_v2_checkpoint.csv")
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Step 3: Run grid search
-    print(f"\nRunning {len(configs)} configurations (7D pruned grid)...")
-    results = []
+    total_iterations = len(CONFIGS) * len(DATASETS)
+    iteration = 0
     start_time = time.time()
-    checkpoint_path = Path("research/volume_grid_checkpoint.csv")
 
-    for i, config in tqdm(enumerate(configs), total=len(configs), desc="Grid Search (720 configs)"):
-        # Use pre-computed spikes for this (lookback, threshold_method) combo
-        cache_key = (config.lookback_ms, config.threshold_method)
-        spikes_df = spikes_cache[cache_key]
-        result = run_backtest(spikes_df, obs_df, res_map, config, hours)
-        results.append(result)
+    for config in CONFIGS:
+        for dataset_key in DATASETS.keys():
+            iteration += 1
+            print(f"\n[{iteration}/{total_iterations}] {config.name} on {dataset_key}")
 
-        # Checkpoint every 10 configs
-        if (i + 1) % 10 == 0:
-            checkpoint_df = pd.DataFrame([r.to_dict() for r in results])
-            checkpoint_df.to_csv(checkpoint_path, index=False)
+            if dataset_key not in dataset_cache:
+                ds_config = DATASETS[dataset_key]
+                btc_df, obs_df, res_map, hours = load_dataset(dataset_key)
+                if btc_df is not None:
+                    btc_spikes = precompute_spikes_ou(btc_df)
+                    dataset_cache[dataset_key] = (btc_spikes, obs_df, res_map, hours, ds_config['use_obi'])
+                else:
+                    continue
+            else:
+                btc_spikes, obs_df, res_map, hours, use_obi = dataset_cache[dataset_key]
+                ds_config = DATASETS[dataset_key]
+
+            all_trades = []
+            slugs = obs_df['market_slug'].unique()
+
+            for slug in tqdm(slugs, desc=f"  Markets", leave=False):
+                resolution = res_map.get(slug)
+                if resolution not in ['UP', 'DOWN']:
+                    continue
+
+                trades = simulate_market(
+                    btc_spikes, obs_df, slug, resolution, ds_config['use_obi'], dataset_key, config
+                )
+                all_trades.extend(trades)
+
+            if all_trades:
+                total_pnl_net = sum(t.pnl_net for t in all_trades)
+                total_trades = len(all_trades)
+                win_rate = sum(1 for t in all_trades if t.correct_direction) / total_trades * 100
+                avg_pair_cost = np.mean([t.pair_cost for t in all_trades])
+                passive_pct = sum(1 for t in all_trades if t.hedge_type == "passive") / total_trades * 100
+                hourly_rate = total_pnl_net / hours if hours > 0 else 0
+
+                result = {
+                    'config': config.name,
+                    'time_stop': config.time_stop_seconds,
+                    'drop_multiplier': config.drop_multiplier,
+                    'drop_intercept': config.drop_intercept,
+                    'offset_name': config.offset_name,
+                    'cycle_mode': config.cycle_mode,
+                    'max_cycles': config.max_cycles,
+                    'shares_per_cycle': config.shares_per_cycle,
+                    'dataset': dataset_key,
+                    'hours': hours,
+                    'trades': total_trades,
+                    'pnl_net': total_pnl_net,
+                    'hourly_rate': hourly_rate,
+                    'win_rate': win_rate,
+                    'avg_pair_cost': avg_pair_cost,
+                    'passive_pct': passive_pct,
+                }
+                all_results.append(result)
+
+                print(f"    [{config.cycle_mode}] Trades: {total_trades}, $/hr: ${hourly_rate:.2f}, Win%: {win_rate:.1f}%")
+
+        # Checkpoint save after each config
+        if all_results:
+            pd.DataFrame(all_results).to_csv(checkpoint_path, index=False)
 
     elapsed = time.time() - start_time
-    print(f"\nCompleted in {elapsed / 60:.1f} minutes ({elapsed / len(configs):.2f}s per config)")
+    print(f"\n\nCompleted in {elapsed / 60:.1f} minutes")
 
-    return results
+    return all_results
 
 
-# =============================================================================
-# OUTPUT
-# =============================================================================
-
-def print_results(results: List[BacktestResult], hours: float):
+def print_results(results: List[dict]):
     """Print comprehensive results summary."""
+    df = pd.DataFrame(results)
+
+    print("\n" + "=" * 100)
+    print("TIME-STOP & LOSER OFFSET TEST RESULTS")
+    print("=" * 100)
+
+    # Per-dataset breakdown
+    for dataset in DATASETS.keys():
+        ds_df = df[df['dataset'] == dataset]
+        if len(ds_df) == 0:
+            continue
+
+        hours = ds_df['hours'].iloc[0]
+        print(f"\n{'='*80}")
+        print(f"Dataset: {dataset} ({hours:.1f}h, OBI {'ON' if DATASETS[dataset]['use_obi'] else 'OFF'})")
+        print(f"{'='*80}")
+        print()
+        print(f"{'Config':<20} {'Trades':>8} {'$/hr':>10} {'Win%':>8} {'Passive%':>10} {'Avg Pair':>10}")
+        print("-" * 80)
+
+        ds_df_sorted = ds_df.sort_values('hourly_rate', ascending=False)
+        for _, row in ds_df_sorted.iterrows():
+            print(f"{row['config']:<20} {row['trades']:>8} ${row['hourly_rate']:>9.2f} "
+                  f"{row['win_rate']:>7.1f}% {row['passive_pct']:>9.1f}% ${row['avg_pair_cost']:>9.4f}")
+
+    # Combined results
+    print("\n" + "=" * 100)
+    print("COMBINED RESULTS (All Datasets)")
+    print("=" * 100)
+
+    combined = df.groupby('config').agg({
+        'trades': 'sum',
+        'pnl_net': 'sum',
+        'hours': 'sum',
+        'win_rate': 'mean',
+        'passive_pct': 'mean',
+        'avg_pair_cost': 'mean',
+    }).reset_index()
+
+    combined['hourly_rate'] = combined['pnl_net'] / combined['hours']
+    combined = combined.sort_values('hourly_rate', ascending=False)
+
     print()
-    print("=" * 100)
-    print("VOLUME STRATEGY GRID SEARCH RESULTS (720 configs)")
-    print("=" * 100)
-    print(f"\nData: {hours:.2f} hours")
-    print(f"Production Config: {BASE_SIZE} shares, skip >= ${HIGH_ENTRY_THRESHOLD:.2f}")
-    print(f"Configurations tested: {len(results)} (expected: 720)")
+    print(f"{'Config':<20} {'Trades':>8} {'$/hr':>10} {'Win%':>8} {'Passive%':>10} {'Winner':>8}")
+    print("-" * 80)
 
-    # Sort by hourly rate (net)
-    results.sort(key=lambda x: x.hourly_rate_net, reverse=True)
+    best_rate = combined['hourly_rate'].max()
+    for _, row in combined.iterrows():
+        winner = "  *" if row['hourly_rate'] == best_rate else ""
+        print(f"{row['config']:<20} {row['trades']:>8} ${row['hourly_rate']:>9.2f} "
+              f"{row['win_rate']:>7.1f}% {row['passive_pct']:>9.1f}% {winner:>8}")
 
-    # Top 20 configurations
-    print()
-    print("=" * 100)
-    print("TOP 20 CONFIGURATIONS (by $/hr net)")
-    print("=" * 100)
-    print()
-    print(f"{'#':<3} {'Config':<30} {'Trades':>7} {'$/hr':>8} {'Gross':>8} {'Fees':>7} "
-          f"{'Win%':>6} {'Pass%':>6} {'TS%':>5}")
-    print("-" * 100)
-
-    for i, r in enumerate(results[:20], 1):
-        total_fees = r.total_entry_fees + r.total_exit_fees
-        print(f"{i:<3} {str(r.config):<30} {r.total_trades:>7} ${r.hourly_rate_net:>7.2f} "
-              f"${r.hourly_rate_gross:>7.2f} ${total_fees:>6.2f} "
-              f"{r.win_rate*100:>5.1f}% {r.passive_pct*100:>5.1f}% {r.time_stop_pct*100:>4.1f}%")
-
-    # Parameter sensitivity
-    print()
-    print("=" * 100)
-    print("PARAMETER SENSITIVITY ANALYSIS")
+    # Offset sensitivity
+    print("\n" + "=" * 100)
+    print("OFFSET SENSITIVITY ANALYSIS")
     print("=" * 100)
 
-    # Time-stop
-    print("\nTime-Stop (CORE - volume vs quality):")
+    print("\nBy Offset Type:")
+    for offset_name in OFFSET_PRESETS.keys():
+        offset_df = df[df['offset_name'] == offset_name]
+        if len(offset_df) > 0:
+            total_pnl = offset_df['pnl_net'].sum()
+            total_hours = offset_df['hours'].sum()
+            avg_rate = total_pnl / total_hours
+            avg_passive = offset_df['passive_pct'].mean()
+            mult, intercept, desc = OFFSET_PRESETS[offset_name]
+            print(f"  {offset_name:<8}: ${avg_rate:.2f}/hr, {avg_passive:.1f}% passive (mult={mult}, int={intercept})")
+
+    # Time-stop sensitivity
+    print("\nBy Time-Stop:")
     for ts in TIME_STOPS:
-        matching = [r for r in results if r.config.time_stop_sec == ts]
-        if matching:
-            avg_rate = np.mean([r.hourly_rate_net for r in matching])
-            avg_trades = np.mean([r.total_trades for r in matching])
-            avg_passive = np.mean([r.passive_pct for r in matching])
-            print(f"  {ts:>3}s: ${avg_rate:.2f}/hr, {avg_trades:.0f} trades, {avg_passive*100:.1f}% passive")
+        ts_df = df[df['time_stop'] == ts]
+        if len(ts_df) > 0:
+            total_pnl = ts_df['pnl_net'].sum()
+            total_hours = ts_df['hours'].sum()
+            avg_rate = total_pnl / total_hours
+            avg_passive = ts_df['passive_pct'].mean()
+            print(f"  {int(ts):>4}s: ${avg_rate:.2f}/hr, {avg_passive:.1f}% passive")
 
-    # Lookback
-    print("\nLookback (signal detection window):")
-    for lb in LOOKBACKS_MS:
-        matching = [r for r in results if r.config.lookback_ms == lb]
-        if matching:
-            avg_rate = np.mean([r.hourly_rate_net for r in matching])
-            avg_trades = np.mean([r.total_trades for r in matching])
-            print(f"  {lb:>4}ms: ${avg_rate:.2f}/hr, {avg_trades:.0f} trades")
+    # Cycle-mode sensitivity
+    print("\nBy Cycle Mode:")
+    for mode_name, (max_cycles, shares_per, desc) in CYCLE_MODES.items():
+        mode_df = df[df['cycle_mode'] == mode_name]
+        if len(mode_df) > 0:
+            total_pnl = mode_df['pnl_net'].sum()
+            total_hours = mode_df['hours'].sum()
+            total_trades = mode_df['trades'].sum()
+            avg_rate = total_pnl / total_hours
+            avg_win = mode_df['win_rate'].mean()
+            print(f"  {mode_name:<8}: ${avg_rate:.2f}/hr, {total_trades} trades, {avg_win:.1f}% win ({desc})")
 
-    # DROP_INTERCEPT
-    print("\nDROP_INTERCEPT (LOWER = FASTER hedge fills):")
-    for di in DROP_INTERCEPTS:
-        matching = [r for r in results if r.config.drop_intercept == di]
-        if matching:
-            avg_rate = np.mean([r.hourly_rate_net for r in matching])
-            avg_passive = np.mean([r.passive_pct for r in matching])
-            print(f"  {di:.2f}: ${avg_rate:.2f}/hr, {avg_passive*100:.1f}% passive")
-
-    # TARGET_PAIR_COST
-    print("\nTARGET_PAIR_COST (LOWER = earlier profit taking):")
-    for tp in TARGET_PAIRS:
-        matching = [r for r in results if r.config.target_pair_cost == tp]
-        if matching:
-            avg_rate = np.mean([r.hourly_rate_net for r in matching])
-            avg_pair = np.mean([r.avg_pair_cost for r in matching])
-            print(f"  {tp:.2f}: ${avg_rate:.2f}/hr, avg pair ${avg_pair:.3f}")
-
-    # Cycling
-    print("\nCycling (re-enter after hedge):")
-    for cyc in CYCLING_OPTIONS:
-        matching = [r for r in results if r.config.cycling == cyc]
-        if matching:
-            avg_rate = np.mean([r.hourly_rate_net for r in matching])
-            avg_trades = np.mean([r.total_trades for r in matching])
-            print(f"  {str(cyc):>5}: ${avg_rate:.2f}/hr, {avg_trades:.0f} trades")
-
-    # Threshold Method
-    print("\nThreshold Method (spike detection):")
-    for th in THRESHOLD_METHODS:
-        matching = [r for r in results if r.config.threshold_method == th]
-        if matching:
-            avg_rate = np.mean([r.hourly_rate_net for r in matching])
-            avg_trades = np.mean([r.total_trades for r in matching])
-            print(f"  {th:>8}: ${avg_rate:.2f}/hr, {avg_trades:.0f} trades")
-
-    # Velocity Mode
-    print("\nVelocity Mode (confirmation filter):")
-    for vel in VELOCITY_MODES:
-        matching = [r for r in results if r.config.velocity_mode == vel]
-        if matching:
-            avg_rate = np.mean([r.hourly_rate_net for r in matching])
-            avg_dir_acc = np.mean([r.direction_accuracy for r in matching])
-            print(f"  {vel:>6}: ${avg_rate:.2f}/hr, {avg_dir_acc*100:.1f}% dir accuracy")
-
-    # Best config details
+    # Key comparison
+    print("\n" + "=" * 100)
+    print("KEY COMPARISON: SINGLE vs MULTI-CYCLE")
+    print("=" * 100)
+    print("\nQuestion: Does multi-cycle improve hourly rate?")
     print()
-    print("=" * 100)
-    print("BEST CONFIGURATION DETAILS")
-    print("=" * 100)
 
-    best = results[0]
-    total_fees = best.total_entry_fees + best.total_exit_fees
+    # Compare SINGLE vs MULTI for each offset+timestop combo
+    for offset_name in OFFSET_PRESETS.keys():
+        for ts in TIME_STOPS:
+            single_name = f"{offset_name}_TS{int(ts)}_SINGLE"
+            multi_name = f"{offset_name}_TS{int(ts)}_MULTI"
 
-    print(f"\nConfiguration: {best.config}")
-    print(f"\nCore Parameters (varied):")
-    print(f"  Time-Stop:      {best.config.time_stop_sec}s")
-    print(f"  Lookback:       {best.config.lookback_ms}ms ({best.config.lookback_ticks} ticks)")
-    print(f"  DROP_INTERCEPT: {best.config.drop_intercept:.2f}")
-    print(f"  TARGET_PAIR:    {best.config.target_pair_cost:.2f}")
-    print(f"  Cycling:        {best.config.cycling}")
+            single_df = df[df['config'] == single_name]
+            multi_df = df[df['config'] == multi_name]
 
-    print(f"\nFilter Parameters (varied):")
-    print(f"  Threshold:      {best.config.threshold_method}")
-    print(f"  Velocity Mode:  {best.config.velocity_mode}")
+            if len(single_df) > 0 and len(multi_df) > 0:
+                single_rate = single_df['pnl_net'].sum() / single_df['hours'].sum()
+                multi_rate = multi_df['pnl_net'].sum() / multi_df['hours'].sum()
+                single_trades = single_df['trades'].sum()
+                multi_trades = multi_df['trades'].sum()
+                diff = multi_rate - single_rate
+                trade_increase = (multi_trades / single_trades - 1) * 100 if single_trades > 0 else 0
+                winner = "MULTI*" if multi_rate > single_rate else "SINGLE"
+                print(f"  {offset_name}_TS{int(ts)}: SINGLE ${single_rate:.2f}/hr ({single_trades} trades) | "
+                      f"MULTI ${multi_rate:.2f}/hr ({multi_trades} trades, +{trade_increase:.0f}%) → {winner}")
 
-    print(f"\nFixed Parameters (validated):")
-    print(f"  Z-Score Zone:   {best.config.z_zone_label}")
-    print(f"  Z-Score Method: {best.config.zscore_method}")
-    print(f"  Skip LOW:       {best.config.skip_low_regime}")
-
-    print(f"\nPerformance:")
-    print(f"  Total PnL (net):   ${best.total_pnl_net:.2f}")
-    print(f"  Total PnL (gross): ${best.total_pnl_gross:.2f}")
-    print(f"  Total Fees:        ${total_fees:.2f}")
-    print(f"  Hourly Rate (net): ${best.hourly_rate_net:.2f}/hr")
-    print(f"  Total Trades:      {best.total_trades}")
-    print(f"  Win Rate:          {best.win_rate*100:.1f}%")
-    print(f"  Direction Acc:     {best.direction_accuracy*100:.1f}%")
-
-    print(f"\nHedge Breakdown:")
-    print(f"  Passive:     {best.passive_pct*100:.1f}%")
-    print(f"  Time-Stop:   {best.time_stop_pct*100:.1f}%")
-    print(f"  Resolution:  {best.resolution_pct*100:.1f}%")
-
-
-def save_results(results: List[BacktestResult], output_path: str):
-    """Save results to CSV."""
-    rows = [r.to_dict() for r in results]
-    df = pd.DataFrame(rows)
-    df = df.sort_values('pnl_hr_net', ascending=False)
+    # Save final results
+    output_path = Path("research/findings/data/timestop_offset_v2_results.csv")
     df.to_csv(output_path, index=False)
     print(f"\nResults saved to: {output_path}")
 
 
-# =============================================================================
-# MAIN
-# =============================================================================
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Volume Strategy Grid Search",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument("--quick", action="store_true",
-                        help="Run quick test with reduced grid (8 configs)")
-    parser.add_argument("--dataset", type=str, default="is_oos2",
-                        choices=["is_oos2", "oos34", "oos5", "all"],
-                        help="Dataset: is_oos2 (Jan 16-19, ~82h), oos34 (Jan 22-24, ~47h), oos5 (Jan 26), all")
-    parser.add_argument("--output", type=str,
-                        default="research/volume_grid_results.csv",
-                        help="Output CSV file path")
-    return parser.parse_args()
-
-
 def main():
-    args = parse_args()
-
-    print("=" * 100)
-    print("VOLUME STRATEGY GRID SEARCH (HEAVILY PRUNED)")
-    print("=" * 100)
+    print("=" * 80)
+    print("AGGRESSIVE GRID SEARCH - Offset × Time-Stop × Cycle-Mode")
+    print("Config from TRADING_CONFIGS.py - OU ADAPTIVE threshold")
+    print("=" * 80)
     print()
-    print("VARIED PARAMETERS (7 dimensions):")
-    print(f"  Time-stops:      {TIME_STOPS} ({len(TIME_STOPS)})")
-    print(f"  Lookbacks (ms):  {LOOKBACKS_MS} ({len(LOOKBACKS_MS)})")
-    print(f"  DROP_INTERCEPT:  {DROP_INTERCEPTS} ({len(DROP_INTERCEPTS)})")
-    print(f"  TARGET_PAIR:     {TARGET_PAIRS} ({len(TARGET_PAIRS)})")
-    print(f"  Cycling:         {CYCLING_OPTIONS} ({len(CYCLING_OPTIONS)})")
-    print(f"  Threshold:       {THRESHOLD_METHODS} ({len(THRESHOLD_METHODS)})")
-    print(f"  Velocity Mode:   {VELOCITY_MODES} ({len(VELOCITY_MODES)})")
+    print("Grid dimensions:")
     print()
-    print("FIXED AT VALIDATED VALUES:")
-    print(f"  Z-Score Zone:    ({FIXED_Z_LO}, {FIXED_Z_HI})")
-    print(f"  Z-Score Method:  {FIXED_ZSCORE_METHOD}")
-    print(f"  Skip LOW Regime: {FIXED_SKIP_LOW_REGIME}")
+    print("1. Offset presets:")
+    for name, (mult, intercept, desc) in OFFSET_PRESETS.items():
+        print(f"   {name}: DROP_MULT={mult}, DROP_INT={intercept} ({desc})")
     print()
-    total_configs = (len(TIME_STOPS) * len(LOOKBACKS_MS) * len(DROP_INTERCEPTS) *
-                     len(TARGET_PAIRS) * len(CYCLING_OPTIONS) *
-                     len(THRESHOLD_METHODS) * len(VELOCITY_MODES))
-    print(f"TOTAL CONFIGURATIONS: {total_configs}")
+    print(f"2. Time-stops: {[int(t) for t in TIME_STOPS]}s")
     print()
-    print("PRODUCTION CONFIG:")
-    print(f"  BASE_SIZE = {BASE_SIZE} shares")
-    print(f"  HIGH_ENTRY_THRESHOLD = ${HIGH_ENTRY_THRESHOLD:.2f}")
+    print("3. Cycle modes:")
+    for name, (max_cycles, shares, desc) in CYCLE_MODES.items():
+        print(f"   {name}: {max_cycles} cycles × {shares} shares ({desc})")
+    print()
+    print(f"Total configs: {len(CONFIGS)} = {len(OFFSET_PRESETS)} offsets × {len(TIME_STOPS)} time-stops × {len(CYCLE_MODES)} cycle-modes")
     print()
 
-    # Load data
-    btc_df, obs_df, hours, res_map = load_data(dataset=args.dataset)
+    results = run_grid_search()
 
-    # Run grid search
-    results = run_grid_search(btc_df, obs_df, res_map, hours, quick=args.quick)
-
-    # Print results
-    print_results(results, hours)
-
-    # Save results
-    save_results(results, args.output)
-
-    print()
-    print("=" * 100)
+    if results:
+        print_results(results)
 
 
 if __name__ == "__main__":
