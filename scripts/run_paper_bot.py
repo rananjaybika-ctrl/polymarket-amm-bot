@@ -495,7 +495,7 @@ class PaperTradingBot:
         # MAX DAILY LOSS - Stop trading if cumulative loss exceeds this amount
         # Set to 0 to disable the limit
         # When limit is hit, bot stops placing new orders but keeps existing positions
-        max_daily_loss: float = 50.0,  # Stop trading if cumulative loss exceeds $50
+        max_daily_loss: float = AGGRESSIVE_CONFIG.max_session_loss,  # From TRADING_CONFIGS.py
         # Web UI callback
         web_callback: Optional[Callable[[dict], None]] = None,
         # Strategy name for Discord and web UI
@@ -509,7 +509,7 @@ class PaperTradingBot:
         session_end_utc: Optional[datetime] = None,
         # NEW: Spread Capture continuous velocity mode parameters
         # Updated based on optimizer results (Jan 18, 2026)
-        spread_base_size: int = 50,           # Total shares per trade (AGGRESSIVE base_size)
+        spread_base_size: int = AGGRESSIVE_CONFIG.shares_per_cycle,  # From TRADING_CONFIGS.py
         spread_grid_levels: int = 1,          # Single price level (optimizer winner)
         # =============================================================================
         # AGGRESSIVE (Path 1) parameters - SOURCED FROM TRADING_CONFIGS.py
@@ -1216,7 +1216,7 @@ class PaperTradingBot:
             # Set accum_mode to aggressive (uses EnhancedSpikeStrategy)
             accum_mode="aggressive",
             # AGGRESSIVE specific parameters - DEFAULTS FROM TRADING_CONFIGS.py
-            spread_base_size=config.get("base_size", 50),  # Production default
+            spread_base_size=config.get("base_size", AGGRESSIVE_CONFIG.shares_per_cycle),
             spread_enable_cycling=config.get("use_cycling", AGGRESSIVE_CONFIG.use_cycling),
             # Z-score bounds - FROM TRADING_CONFIGS.py
             zscore_lo=config.get("z_lo", AGGRESSIVE_CONFIG.z_lo),
