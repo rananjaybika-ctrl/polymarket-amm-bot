@@ -475,35 +475,29 @@ Instructions here...
 
 ---
 
-### 37. ASSUMED "MISSED SIGNALS" WERE MISSED OPPORTUNITIES
-**What happened:** Multi-cycle mode was implemented because single-cycle "only traded 5% of detected spikes." Assumed the other 95% were missed opportunities worth capturing.
+### 37. MISSED DATASET IN PLAN IMPLEMENTATION
+**What happened:** Plan explicitly said "Run on OOS7+OOS8" but I only implemented OOS7 in DATASETS. User had to catch the missing OOS8.
 
 **Root cause:**
-- Spike detection fires on EVERY TICK above threshold
-- A single BTC move generates HUNDREDS of "spikes" (87% within 0.1s of each other)
-- 99% of consecutive spikes are within 180s AND same direction
-- The 95% "missed" spikes were DUPLICATES, not independent opportunities
+- Copied existing DATASETS structure without reading the plan carefully
+- Plan specified OOS7+OOS8 but I didn't verify all datasets were included
+- Didn't cross-check implementation against plan requirements
 
-**Impact:**
-- Multi-cycle destroyed profitability: 39.8% win rate vs 54.3% single-cycle
-- 10x more trades but 15pp lower win rate
-- Hourly rate: -$26.70/hr (vs +$1.37/hr single)
-- Root cause: re-trading same signal at worse prices
-
-**Key insight:**
-> "The 95% of 'missed' spikes aren't missed opportunities - they're duplicate signals from the same BTC move. SINGLE mode's blocking is correctly ignoring them."
+**Cost:**
+- Had to run OOS8 separately after main run completed
+- User caught the mistake, not me
 
 **FIX:**
-1. Single-cycle's 180s blocking is the SECRET SAUCE, not a limitation
-2. "More trades" ≠ "more profit" - quality > quantity
-3. Spike detection ≠ signal detection (true signals are ~1% of raw spikes)
-4. Investigate data BEFORE assuming optimization is needed
+1. When implementing a plan, explicitly verify ALL specified items are included
+2. Cross-check: if plan says "X + Y", ensure BOTH X AND Y are in the code
+3. Read plan requirements BEFORE copying existing code structures
 
-**Reference:** `research/findings/SINGLE_CYCLE_OPTIMAL_20260131.md`
-**Source:** Jan 31, 2026 - Multi-cycle analysis and abandonment
+**Source:** Feb 1, 2026 - Loss mechanism grid search
 
 ---
 
-**Last updated:** Jan 31, 2026
+**Last updated:** Feb 1, 2026
 **Mistakes documented:** 37
+
+**Note:** Multi-cycle findings moved to `research/findings/SINGLE_CYCLE_OPTIMAL_20260131.md` (research finding, not Claude mistake)
 **Sources:** CODEBASE_AUDIT_JAN17.md, AWS_7HR_OBSERVER_DEEP_ANALYSIS.md, VOL_FILTER_GRID_SEARCH_FINDINGS_JAN22.md, PLAN_FIX_ENTRY_FILL_JAN19.md, SPREAD_CAPTURE_FIX_PLAN.md

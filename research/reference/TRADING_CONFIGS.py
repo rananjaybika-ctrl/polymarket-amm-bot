@@ -93,7 +93,7 @@ class TradingConfig:
 
     # TIME120s_SKIP parameters (Jan 27, 2026)
     skip_high_entry: bool = False  # Skip entries >= high_entry_threshold
-    high_entry_threshold: float = 0.90  # Turkey problem cutoff
+    high_entry_threshold: float = 0.80  # TESTING: $0.80 (revert to $0.90 for production)
     min_time_remaining: float = 60.0  # Minimum seconds before market end
 
     # OBI (Orderbook Imbalance) filter (Jan 28, 2026)
@@ -107,6 +107,11 @@ class TradingConfig:
     enable_multicycle: bool = False  # DEPRECATED - always use single-cycle
     max_cycles: int = 1              # DEPRECATED - always 1 (single-cycle)
     shares_per_cycle: int = 50       # PRODUCTION: 50 shares per trade
+
+    # Session loss limit (Feb 1, 2026)
+    # Circuit breaker: stop trading if cumulative session loss exceeds this amount
+    # Analysis showed $50 never triggered in OOS7/OOS8 but protects against catastrophic sessions
+    max_session_loss: float = 50.0   # $50 hard stop on session losses
 
     @property
     def z_zone_label(self) -> str:
@@ -154,15 +159,18 @@ AGGRESSIVE = TradingConfig(
     z_hi=1.5,
 
     # TIME180s_SKIP parameters (updated from TIME120s, Jan 31, 2026)
-    skip_high_entry=True,        # Skip entries >= $0.90 (unhedgeable)
-    high_entry_threshold=0.90,   # Turkey problem cutoff
+    skip_high_entry=True,        # Skip entries >= threshold (unhedgeable)
+    high_entry_threshold=0.80,   # TESTING: $0.80 (revert to $0.90 for production)
     min_time_remaining=240.0,    # time_stop + 60s buffer = 180 + 60 = 240
 
     # SINGLE-CYCLE ONLY (Jan 31, 2026 - multi-cycle abandoned)
     # Multi-cycle destroyed profitability: 39.8% win rate vs 54.3% single
     enable_multicycle=False,     # DEPRECATED - always False
     max_cycles=1,                # DEPRECATED - always 1
-    shares_per_cycle=50,         # PRODUCTION: 50 shares per trade
+    shares_per_cycle=10,         # TESTING: 10 shares (revert to 50 for production)
+
+    # Session loss limit (Feb 1, 2026) - circuit breaker
+    max_session_loss=10.0,       # TESTING: $10 limit (revert to $50 for production)
 
     # Expected performance (at 50 shares, TIME120s_SKIP cross-validation)
     expected_pnl=90.00,          # ~$9.00/hr * 10h example

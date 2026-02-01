@@ -108,6 +108,11 @@ class BalanceManager:
         # Track daily loss
         self._daily_realized_loss = 0.0
 
+        # Session loss tracking (Feb 1, 2026)
+        # Tracks cumulative PnL within a trading session
+        self.session_realized_pnl = 0.0
+        self.max_session_loss = 50.0  # User decision: $50 hard stop
+
     async def get_available_capital(self) -> float:
         """
         Get USDC available for new trades.
@@ -391,6 +396,51 @@ class BalanceManager:
         self._daily_realized_loss = 0.0
         logger.info("Daily loss counter reset")
 
+    # =========================================================================
+    # SESSION LOSS TRACKING (Feb 1, 2026)
+    # =========================================================================
+
+    def record_trade_pnl(self, pnl: float) -> bool:
+        """
+        Record trade PnL and check session limit.
+
+        Args:
+            pnl: Trade PnL (positive = profit, negative = loss)
+
+        Returns:
+            True if within limits and trading should continue,
+            False if session loss limit reached and trading should stop
+        """
+        self.session_realized_pnl += pnl
+
+        # Also update daily loss if it's a loss
+        if pnl < 0:
+            self.record_realized_loss(-pnl)  # record_realized_loss expects positive number
+
+        # Check session limit
+        if self.session_realized_pnl <= -self.max_session_loss:
+            logger.warning(
+                f"SESSION LOSS LIMIT REACHED: ${-self.session_realized_pnl:.2f} "
+                f"(limit: ${self.max_session_loss:.2f}) - STOPPING TRADING"
+            )
+            return False
+
+        return True
+
+    def reset_session(self) -> None:
+        """Reset session PnL counter (call at start of new trading session)."""
+        old_pnl = self.session_realized_pnl
+        self.session_realized_pnl = 0.0
+        logger.info(f"Session reset (previous session PnL: ${old_pnl:.2f})")
+
+    def is_within_session_limit(self) -> bool:
+        """Check if within session loss limit."""
+        return self.session_realized_pnl > -self.max_session_loss
+
+    def get_session_pnl(self) -> float:
+        """Get current session realized PnL."""
+        return self.session_realized_pnl
+
     def is_within_daily_limit(self) -> bool:
         """Check if within daily loss limit."""
         return self._daily_realized_loss < self.max_daily_loss
@@ -421,6 +471,10 @@ class BalanceManager:
             "daily_loss": self._daily_realized_loss,
             "within_daily_limit": self.is_within_daily_limit(),
             "remaining_daily_budget": self.get_remaining_daily_budget(),
+            # Session tracking (Feb 1, 2026)
+            "session_pnl": self.session_realized_pnl,
+            "within_session_limit": self.is_within_session_limit(),
+            "max_session_loss": self.max_session_loss,
         }
 
     def __repr__(self) -> str:

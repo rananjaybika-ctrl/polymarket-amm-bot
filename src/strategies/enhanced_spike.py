@@ -163,7 +163,7 @@ DEFAULT_TARGET_SHARES = 50       # Updated from optimizer: 50 > 30 > 15
 DEFAULT_MIN_PROFIT = 0.005
 DEFAULT_MAX_SHARE_PRICE = 0.95
 DEFAULT_ENABLE_CYCLING = True
-DEFAULT_HIGH_ENTRY_THRESHOLD = 0.90  # Skip entries >= this (unhedgeable)
+DEFAULT_HIGH_ENTRY_THRESHOLD = 0.80  # TESTING: Skip entries >= $0.80 (revert to 0.90 for production)
 
 # Zone filtering (LEGACY - spike threshold is the new filter)
 DEFAULT_MIN_VELOCITY_BPS = 0.50
@@ -178,8 +178,9 @@ DEFAULT_ZSCORE_LO = 0.0         # Skip low volatility periods (z < 0)
 DEFAULT_ZSCORE_HI = 1.5         # Skip high volatility periods (z > 1.5)
 DEFAULT_ZSCORE_METHOD = "ewma"  # Best method for $/hr
 
-# Timing (reduced from 120s based on backtest results)
-MIN_TIME_REMAINING = 60
+# Timing - Min time remaining before resolution to allow new entries
+# SOURCE OF TRUTH: TRADING_CONFIGS.py min_time_remaining=240.0 (Feb 1, 2026)
+MIN_TIME_REMAINING = 240
 QUOTE_REFRESH_INTERVAL = 0.5
 
 

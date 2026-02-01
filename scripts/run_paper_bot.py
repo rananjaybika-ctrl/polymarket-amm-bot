@@ -495,7 +495,7 @@ class PaperTradingBot:
         # MAX DAILY LOSS - Stop trading if cumulative loss exceeds this amount
         # Set to 0 to disable the limit
         # When limit is hit, bot stops placing new orders but keeps existing positions
-        max_daily_loss: float = 10.0,  # Stop trading if cumulative loss exceeds $10
+        max_daily_loss: float = 50.0,  # Stop trading if cumulative loss exceeds $50
         # Web UI callback
         web_callback: Optional[Callable[[dict], None]] = None,
         # Strategy name for Discord and web UI
@@ -1227,8 +1227,8 @@ class PaperTradingBot:
             high_entry_threshold=config.get("high_entry_threshold", AGGRESSIVE_CONFIG.high_entry_threshold),
             # Spike detection lookback - FROM TRADING_CONFIGS.py
             spread_spike_lookback=config.get("lookback_ticks", AGGRESSIVE_CONFIG.lookback_ticks),
-            # Max daily loss protection
-            max_daily_loss=config.get("max_daily_loss", 0.0),
+            # Max daily loss protection - FROM TRADING_CONFIGS.py
+            max_daily_loss=config.get("max_daily_loss", AGGRESSIVE_CONFIG.max_session_loss),
             # Output
             csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_aggressive.csv",
             live_display=True,
@@ -1331,8 +1331,8 @@ class PaperTradingBot:
             vw_hedge_trigger_pct=config.get("vw_hedge_trigger_pct", 0.15),
             vw_max_hedge_price=config.get("vw_max_hedge_price", 0.85),
             accum_target_shares=config.get("target_shares", 50),
-            # Max daily loss protection
-            max_daily_loss=config.get("max_daily_loss", 0.0),
+            # Max daily loss protection - FROM TRADING_CONFIGS.py
+            max_daily_loss=config.get("max_daily_loss", AGGRESSIVE_CONFIG.max_session_loss),
             # Output
             csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_volume_weighted.csv",
             live_display=True,
@@ -5364,10 +5364,22 @@ class PaperTradingBot:
             self._session_merged_pnl += total_pnl
             self._session_merge_count += 1
             self._total_pairs += pairs_to_merge
+
+            # Update cumulative PnL for loss limit tracking
+            self.cumulative_pnl += total_pnl
             logger.info(
                 f"[AUTO_MERGE] 📝 Paper mode - recorded {pnl_sign}${total_pnl:.4f} "
-                f"(session total: ${self._session_merged_pnl:.4f})"
+                f"(session total: ${self._session_merged_pnl:.4f}, cumulative: ${self.cumulative_pnl:.2f})"
             )
+
+            # Check session loss limit
+            if self.max_daily_loss > 0 and self.cumulative_pnl <= -self.max_daily_loss:
+                self.loss_limit_reached = True
+                logger.warning("=" * 50)
+                logger.warning(f"SESSION LOSS LIMIT REACHED: ${abs(self.cumulative_pnl):.2f} >= ${self.max_daily_loss:.2f}")
+                logger.warning("Bot will stop placing new orders")
+                logger.warning("=" * 50)
+
             self._send_web_update()
             return True
 
@@ -5397,11 +5409,22 @@ class PaperTradingBot:
                 self._session_merge_count += 1
                 self._total_pairs += pairs_to_merge
 
+                # Update cumulative PnL for loss limit tracking
+                self.cumulative_pnl += total_pnl
+
                 logger.info(
                     f"[AUTO_MERGE] ✅ Merged {pairs_to_merge} pairs! "
                     f"PnL: {pnl_sign}${total_pnl:.4f} | TX: {tx_hash[:20]}..."
                 )
-                logger.info(f"[AUTO_MERGE] Session total: ${self._session_merged_pnl:.4f}")
+                logger.info(f"[AUTO_MERGE] Session total: ${self._session_merged_pnl:.4f}, cumulative: ${self.cumulative_pnl:.2f}")
+
+                # Check session loss limit
+                if self.max_daily_loss > 0 and self.cumulative_pnl <= -self.max_daily_loss:
+                    self.loss_limit_reached = True
+                    logger.warning("=" * 50)
+                    logger.warning(f"SESSION LOSS LIMIT REACHED: ${abs(self.cumulative_pnl):.2f} >= ${self.max_daily_loss:.2f}")
+                    logger.warning("Bot will stop placing new orders")
+                    logger.warning("=" * 50)
 
                 # Sync position after merge to reflect new state
                 if hasattr(self._engine, 'sync_position'):
