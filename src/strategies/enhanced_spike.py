@@ -2118,12 +2118,14 @@ class EnhancedSpikeStrategy:
         pair_cost = s.pair_cost
         base_profit = 1.00 - pair_cost
 
+        # Fee handling: Entry is TAKER (we take best ask), Hedge is MAKER (passive bid)
+        # This matches backtest logic in src/core.calculate_pnl_with_fees
         net_profit = FeeConfig.calculate_net_profit(
             entry_price=s.up_avg_price,
             hedge_price=s.down_avg_price,
             size=matchable,
-            entry_is_maker=True,
-            hedge_is_maker=True,
+            entry_is_maker=False,  # Entry is TAKER - pays ~0.83% fee at mid prices
+            hedge_is_maker=True,   # Hedge is MAKER - gets rebate (or no fee)
         )
 
         self._completed_pairs.append({
