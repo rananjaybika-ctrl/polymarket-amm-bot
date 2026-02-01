@@ -10,37 +10,42 @@ Legacy: research/optimizers/aggressive_grid_search_v1_legacy.py
 
 Grid dimensions:
 1. Time-Stop: 30s, 180s, 240s
-2. Loser Offset: TIGHTER, TIGHT, CURRENT
-3. Multi-Cycle: SINGLE (1×50), MULTI (2×20)
+2. Loser Offset: TIGHT, CURRENT
+3. Cycle Mode: SINGLE only (multi-cycle DEPRECATED)
 
-Grid: 3 offsets × 3 time-stops × 2 cycle-modes = 18 configurations
+Grid: 2 offsets × 3 time-stops × 1 cycle-mode = 6 configurations
 
 Loser bid formula:
     expected_drop = DROP_MULTIPLIER * spike_magnitude + DROP_INTERCEPT
     loser_bid = (1.0 - winner_entry) - expected_drop
 
 Offset presets:
-    TIGHTER: DROP_MULT=0.15, DROP_INT=0.03 (very aggressive, fastest fill)
     TIGHT:   DROP_MULT=0.30, DROP_INT=0.05 (aggressive, faster fill)
     CURRENT: DROP_MULT=0.50, DROP_INT=0.08 (baseline)
 
-Cycle modes:
-    SINGLE: 1 cycle × 50 shares (original behavior)
-    MULTI:  2 cycles × 20 shares (captures more opportunities)
+Cycle mode (Jan 31, 2026 - SINGLE ONLY):
+    SINGLE: 1 cycle × 50 shares (LIVE-READY, production config)
+
+    MULTI-CYCLE ABANDONED (Jan 31, 2026):
+    Multi-cycle destroyed profitability even with direction consistency fix.
+    - SINGLE: 54.3% win rate, +$1.37/hr (LIVE-READY)
+    - MULTI: 39.8% win rate, -$26.70/hr (10x trades, 15pp lower win rate)
+    Root cause: Stacking same-direction trades catches weak follow-on spikes.
 
 Features:
 - Fee model with gross/net PnL separation
 - Dataset coverage validation
 - Checkpoint saves after each config
-- Offset + time-stop + multi-cycle sensitivity analysis
+- Offset + time-stop + cycle-mode sensitivity analysis
 - OU adaptive threshold (per TRADING_CONFIGS.py)
-- OBI filter (ON for OOS7, OFF for others)
+- Binary OBI filter (simple: obi > 0 = confirm, obi <= 0 = reject)
+- Direction consistency check for multi-cycle modes
 
-Datasets (176h total):
-- IS+OOS2 (OBI OFF) - 69h
-- OOS3+4 (OBI OFF) - 47h
-- OOS5 (OBI OFF) - 41h
-- OOS7 (OBI ON) - 19h
+Datasets (~130h total):
+- IS+OOS2 - 23h (partial)
+- OOS3+4 - 47h
+- OOS5 - 41h
+- OOS7 - 19h
 
 Usage:
     python research/optimizers/aggressive_grid_search.py
@@ -73,6 +78,11 @@ from src.core import (
     compute_enhanced_score,
     calculate_loser_bid as calculate_loser_bid_core,
     BacktestCycle,
+    # Multi-cycle direction modes
+    DIRECTION_MODE_SINGLE,
+    DIRECTION_MODE_BUILD,
+    DIRECTION_MODE_CLEAR,
+    can_enter_direction,
 )
 
 # =============================================================================
@@ -122,11 +132,12 @@ class TestConfig:
     time_stop_seconds: float
     drop_multiplier: float
     drop_intercept: float
-    offset_name: str  # TIGHTER, TIGHT, CURRENT
+    offset_name: str  # TIGHT, CURRENT
     # Multi-cycle parameters
     max_cycles: int = 1      # 1 = single-cycle, 2+ = multi-cycle
     shares_per_cycle: int = 50  # Shares per cycle
-    cycle_mode: str = "SINGLE"  # SINGLE or MULTI
+    cycle_mode: str = "SINGLE"  # SINGLE, MULTI_BUILD, MULTI_CLEAR
+    direction_mode: str = DIRECTION_MODE_SINGLE  # Direction consistency mode
 
     @property
     def total_shares(self) -> int:
@@ -147,7 +158,6 @@ class TestConfig:
 
 # Offset parameters: (DROP_MULTIPLIER, DROP_INTERCEPT, description)
 OFFSET_PRESETS = {
-    "TIGHTER": (0.15, 0.03, "Very aggressive, fastest fill"),
     "TIGHT": (0.30, 0.05, "Aggressive, faster fill"),
     "CURRENT": (0.50, 0.08, "Current baseline"),
 }
@@ -155,17 +165,25 @@ OFFSET_PRESETS = {
 # Time-stops to test
 TIME_STOPS = [30.0, 180.0, 240.0]
 
-# Cycle modes: (max_cycles, shares_per_cycle, description)
+# Cycle modes: (max_cycles, shares_per_cycle, direction_mode, description)
+# SINGLE-CYCLE ONLY - Multi-cycle DEPRECATED (Jan 31, 2026)
+#
+# MULTI-CYCLE ABANDONED: Destroyed profitability even with direction fix.
+#   - SINGLE: 54.3% win rate, +$1.37/hr (LIVE-READY)
+#   - MULTI: 39.8% win rate, -$26.70/hr (10x trades, 15pp lower win rate)
+# Root cause: Stacking same-direction trades catches weak follow-on spikes.
 CYCLE_MODES = {
-    "SINGLE": (1, 50, "Original: 1 cycle × 50 shares"),
-    "MULTI": (2, 20, "Multi-cycle: 2 cycles × 20 shares"),
+    "SINGLE": (1, 50, DIRECTION_MODE_SINGLE, "1 cycle × 50 shares (PRODUCTION)"),
+    # DEPRECATED - kept for reference only:
+    # "MULTI_BUILD": (2, 25, DIRECTION_MODE_BUILD, "DEPRECATED - destroyed profitability"),
+    # "MULTI_CLEAR": (2, 25, DIRECTION_MODE_CLEAR, "DEPRECATED - destroyed profitability"),
 }
 
-# Generate all configs: 3 offsets × 3 time-stops × 2 cycle-modes = 18 configs
+# Generate all configs: 2 offsets × 3 time-stops × 1 cycle-mode = 6 configs
 CONFIGS = []
 for offset_name, (mult, intercept, offset_desc) in OFFSET_PRESETS.items():
     for ts in TIME_STOPS:
-        for cycle_mode, (max_cycles, shares_per, cycle_desc) in CYCLE_MODES.items():
+        for cycle_mode, (max_cycles, shares_per, dir_mode, cycle_desc) in CYCLE_MODES.items():
             name = f"{offset_name}_TS{int(ts)}_{cycle_mode}"
             CONFIGS.append(TestConfig(
                 name=name,
@@ -176,6 +194,7 @@ for offset_name, (mult, intercept, offset_desc) in OFFSET_PRESETS.items():
                 max_cycles=max_cycles,
                 shares_per_cycle=shares_per,
                 cycle_mode=cycle_mode,
+                direction_mode=dir_mode,
             ))
 
 print(f"Generated {len(CONFIGS)} configs: {len(OFFSET_PRESETS)} offsets × {len(TIME_STOPS)} time-stops × {len(CYCLE_MODES)} cycle-modes")
@@ -243,8 +262,8 @@ DATASETS = {
             "research/observer/grid_obs_20260118.csv",
             "research/observer/grid_obs_20260119.csv",
         ],
-        "use_obi": False,
-        "expected_hours": 69.0,
+        "use_obi": True,  # Auto: uses OBI if columns exist, skips if not
+        "expected_hours": 23.0,  # Reduced from 69h - partial data available
     },
     "OOS3+4": {
         "name": "OOS3+4 (Jan 22-24)",
@@ -252,7 +271,7 @@ DATASETS = {
         "obs_files": [
             "research/observer/PROTECTED_grid_obs_oos3_oos4_combined.csv",
         ],
-        "use_obi": False,
+        "use_obi": True,  # Auto: uses OBI if columns exist, skips if not
         "expected_hours": 47.0,
     },
     "OOS5": {
@@ -261,7 +280,7 @@ DATASETS = {
         "obs_files": [
             "research/observer/PROTECTED_grid_obs_oos5_recovered.csv",
         ],
-        "use_obi": False,
+        "use_obi": True,  # Auto: uses OBI if columns exist, skips if not
         "expected_hours": 41.0,
     },
     "OOS7": {
@@ -913,7 +932,7 @@ def simulate_market_multicycle(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                 if score < ENHANCED_SCORE_THRESHOLD:
                     can_enter = False
                 elif use_obi_filter and obi_winner is not None and not np.isnan(obi_winner):
-                    # Enhanced OBI filter
+                    # Binary OBI filter (simple check - does orderbook confirm spike?)
                     loser_spread = 0.05
                     if pd.notna(loser_bid) and pd.notna(loser_ask):
                         loser_spread = loser_ask - loser_bid
@@ -926,6 +945,17 @@ def simulate_market_multicycle(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                     )
                     if not should_take:
                         can_enter = False
+
+            # Direction consistency check (CRITICAL FIX - Jan 31, 2026)
+            # Prevents conflicting positions (long UP while also long DOWN)
+            if can_enter:
+                can_enter_dir, dir_reason = can_enter_direction(
+                    spike_direction=spike_dir,
+                    active_cycles=active_cycles,
+                    direction_mode=config.direction_mode,
+                )
+                if not can_enter_dir:
+                    can_enter = False
 
             if can_enter:
                 cycle_num += 1
@@ -1260,7 +1290,7 @@ def print_results(results: List[dict]):
 
     # Cycle-mode sensitivity
     print("\nBy Cycle Mode:")
-    for mode_name, (max_cycles, shares_per, desc) in CYCLE_MODES.items():
+    for mode_name, (max_cycles, shares_per, dir_mode, desc) in CYCLE_MODES.items():
         mode_df = df[df['cycle_mode'] == mode_name]
         if len(mode_df) > 0:
             total_pnl = mode_df['pnl_net'].sum()
@@ -1268,7 +1298,7 @@ def print_results(results: List[dict]):
             total_trades = mode_df['trades'].sum()
             avg_rate = total_pnl / total_hours
             avg_win = mode_df['win_rate'].mean()
-            print(f"  {mode_name:<8}: ${avg_rate:.2f}/hr, {total_trades} trades, {avg_win:.1f}% win ({desc})")
+            print(f"  {mode_name:<12}: ${avg_rate:.2f}/hr, {total_trades} trades, {avg_win:.1f}% win ({desc})")
 
     # Key comparison
     print("\n" + "=" * 100)
@@ -1318,8 +1348,8 @@ def main():
     print(f"2. Time-stops: {[int(t) for t in TIME_STOPS]}s")
     print()
     print("3. Cycle modes:")
-    for name, (max_cycles, shares, desc) in CYCLE_MODES.items():
-        print(f"   {name}: {max_cycles} cycles × {shares} shares ({desc})")
+    for name, (max_cycles, shares, dir_mode, desc) in CYCLE_MODES.items():
+        print(f"   {name}: {max_cycles} cycles × {shares} shares, mode={dir_mode} ({desc})")
     print()
     print(f"Total configs: {len(CONFIGS)} = {len(OFFSET_PRESETS)} offsets × {len(TIME_STOPS)} time-stops × {len(CYCLE_MODES)} cycle-modes")
     print()

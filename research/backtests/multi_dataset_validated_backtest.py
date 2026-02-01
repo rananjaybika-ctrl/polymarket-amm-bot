@@ -169,6 +169,15 @@ DATASETS = {
         ],
         "use_obi": True,  # OBI ON for OOS7
     },
+    "OOS8": {
+        "name": "OOS8 (Jan 31 - Feb 1)",
+        "btc_file": "research/binance_hf/btc_prices_20260131_055231.csv",
+        "obs_files": [
+            "research/observer/grid_obs_20260131.csv",
+            "research/observer/grid_obs_20260201.csv",
+        ],
+        "use_obi": True,  # OBI ON for OOS8
+    },
 }
 
 # Note: TradeResult dataclass imported from src/core

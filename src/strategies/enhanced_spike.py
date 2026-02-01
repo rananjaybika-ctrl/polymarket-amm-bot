@@ -227,19 +227,18 @@ class CycleStatus(Enum):
 # MULTI-CYCLE TRADING DATA STRUCTURES (Jan 31, 2026)
 # =============================================================================
 #
-# PURPOSE: Allow multiple concurrent entry/hedge cycles to capture more opportunities.
-# Research showed 4,066 good spikes missed in 19 hours due to position blocking.
-# Expected improvement: +89% more good trades (242 → 457 in 19 hours)
+# DEPRECATED (Jan 31, 2026): Multi-cycle destroyed profitability.
+# - SINGLE: 54.3% win rate, +$1.37/hr (LIVE-READY)
+# - MULTI: 39.8% win rate, -$26.70/hr (10x trades, 15pp lower win rate)
+# Root cause: Stacking same-direction trades catches weak follow-on spikes.
 #
-# TO REVERT TO SINGLE-CYCLE MODE:
-# 1. In TRADING_CONFIGS.py, set enable_multicycle=False in AGGRESSIVE config
-# 2. The MultiCycleManager will automatically limit to max_cycles=1
-# 3. No code changes needed - just config toggle
+# PRODUCTION CONFIG (SINGLE-CYCLE ONLY):
+# - enable_multicycle=False in TRADING_CONFIGS.py
+# - max_cycles=1, shares_per_cycle=50
+# - MultiCycleManager automatically limits to 1 cycle when disabled
 #
-# ALTERNATIVE: To completely remove multi-cycle code:
-# 1. Delete MultiCycleManager class, CycleOrder, TradingCycle, CycleStatus
-# 2. Revert EnhancedSpikeStrategy to use self.state directly (as before)
-# 3. Remove cycle_manager from __init__ and get_quotes()/on_fill()
+# The multi-cycle code is kept for backwards compatibility but SHOULD NOT be
+# used in production. See research/findings/MULTICYCLE_ANALYSIS.md for details.
 # =============================================================================
 
 @dataclass
@@ -293,31 +292,33 @@ class MultiCycleManager:
     """
     Manages multiple parallel trading cycles with robust order tracking.
 
+    DEPRECATED (Jan 31, 2026): Multi-cycle destroyed profitability.
+    - SINGLE: 54.3% win rate, +$1.37/hr (LIVE-READY)
+    - MULTI: 39.8% win rate, -$26.70/hr (ABANDONED)
+
+    Root cause: Stacking same-direction trades catches weak follow-on spikes.
+    PRODUCTION: Use enable_multicycle=False (single-cycle only).
+
     KEY DESIGN PRINCIPLES:
     1. Every order has a unique ID
     2. Order ID → Cycle ID mapping for instant lookup
     3. Fallback matching by (side, price proximity, timing)
-    4. Toggleable via enable_multicycle flag
+    4. Toggleable via enable_multicycle flag (should be False in production)
     5. Logs ambiguous matches for debugging
 
-    Usage:
-        manager = MultiCycleManager(max_cycles=2, shares_per_cycle=20)
+    Usage (PRODUCTION - single-cycle):
+        manager = MultiCycleManager(max_cycles=1, shares_per_cycle=50, enable_multicycle=False)
 
-        # Create new cycle on spike
-        cycle = manager.create_cycle("UP", 0.05, winner_ask=0.45, loser_bid=0.52)
-
-        # Route fills
-        result = manager.on_fill("UP", 0.45, 20, order_id="entry_xxx")
-        if result:
-            cycle, fill_type = result  # fill_type is "entry" or "hedge"
+    Usage (DEPRECATED - multi-cycle):
+        manager = MultiCycleManager(max_cycles=2, shares_per_cycle=25, enable_multicycle=True)
     """
 
     def __init__(
         self,
-        max_cycles: int = 2,
-        shares_per_cycle: int = 20,
+        max_cycles: int = 1,              # PRODUCTION: 1 (single-cycle)
+        shares_per_cycle: int = 50,       # PRODUCTION: 50 shares
         time_stop_seconds: float = 180.0,
-        enable_multicycle: bool = True,
+        enable_multicycle: bool = False,  # DEPRECATED: always False
     ):
         self.max_cycles = max_cycles if enable_multicycle else 1
         self.shares_per_cycle = shares_per_cycle
@@ -814,11 +815,12 @@ class EnhancedSpikeStrategy:
         skip_high_entry: bool = False,
         high_entry_threshold: float = DEFAULT_HIGH_ENTRY_THRESHOLD,
         min_time_remaining: float = 60.0,  # Configurable (was hardcoded MIN_TIME_REMAINING)
-        # MULTI-CYCLE TRADING (Jan 31, 2026)
-        # Set enable_multicycle=False to revert to single-cycle mode
-        enable_multicycle: bool = True,
-        max_cycles: int = 2,
-        shares_per_cycle: int = 20,
+        # MULTI-CYCLE DEPRECATED (Jan 31, 2026)
+        # Multi-cycle destroyed profitability: 39.8% win rate vs 54.3% single
+        # PRODUCTION: enable_multicycle=False, max_cycles=1, shares_per_cycle=50
+        enable_multicycle: bool = False,  # DEPRECATED - always False
+        max_cycles: int = 1,              # DEPRECATED - always 1
+        shares_per_cycle: int = 50,       # PRODUCTION: 50 shares per trade
         # LEGACY parameters (aliases for backward compatibility)
         entry_size: Optional[int] = None,
         entry_offset: float = DEFAULT_ENTRY_OFFSET,

@@ -200,4 +200,40 @@ last_hedge_ts = hedge_fill_ts  # Set on HEDGE FILL - CORRECT!
 
 ---
 
-*Last Updated: January 26, 2026*
+---
+
+## UPDATE: Time-Stop & Loser Offset Optimization (January 31, 2026)
+
+**Study:** `research/findings/TIMESTOP_OFFSET_STUDY_20260131.md`
+
+### Key Findings
+
+On OOS7 (60Hz + OBI ON) - best proxy for production:
+
+| Rank | Config | $/hr | Notes |
+|------|--------|------|-------|
+| #1 | **CURRENT_TS180** | $13.31 | Baseline, validated |
+| #2 | TIGHT_TS180 | $13.92 | Higher but needs validation |
+
+### Config Changes
+
+| Parameter | Old | New | Reason |
+|-----------|-----|-----|--------|
+| time_stop_seconds | 120s | **180s** | Better on OOS7 data |
+| min_time_remaining | 180s | **240s** | time_stop + 60s buffer |
+
+### Deployment Plan
+
+1. **Testing Phase** (after paper trading ends):
+   - `TARGET_SHARES = 10`
+   - `HIGH_ENTRY_THRESHOLD = 0.80`
+   - `time_stop_seconds = 180`
+
+2. **Production Phase** (after 24-48h validation):
+   - `TARGET_SHARES = 50`
+   - `HIGH_ENTRY_THRESHOLD = 0.90`
+   - `time_stop_seconds = 180`
+
+---
+
+*Last Updated: January 31, 2026*

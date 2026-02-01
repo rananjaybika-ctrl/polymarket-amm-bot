@@ -421,3 +421,50 @@ Polymarket min order = $1. For 10 shares: min hedge price = **$0.10**
 ---
 
 *Analysis completed: January 27, 2026*
+
+---
+
+## UPDATE: Time-Stop & Loser Offset Study (January 31, 2026)
+
+**Reference:** `research/findings/TIMESTOP_OFFSET_STUDY_20260131.md`
+
+### New Testing Results
+
+Tested TIGHTER/TIGHT/CURRENT/WIDE offsets × TS30/TS180/TS240/TS300 on multiple datasets.
+
+**Key Finding:** On OOS7 (60Hz + OBI ON), which best matches production:
+
+| Rank | Config | $/hr | Trades | Win% |
+|------|--------|------|--------|------|
+| #1 | **CURRENT_TS180** | $13.31 | 246 | 53.3% |
+| #2 | TIGHT_TS180 | $13.92 | 303 | 55.8% |
+
+**CURRENT_TS180 is the recommended baseline** - validated, safer.
+**TIGHT_TS180 needs further validation** before switching.
+
+### Config Update: TIME120s → TIME180s
+
+Based on this study, **180s time-stop outperforms 120s** on recent OOS data:
+- TS180 provides better balance of cycling speed and trade quality
+- TS30 has too many forced exits before trades mature
+- TS240/TS300 have diminishing returns
+
+### Recommended Live Config
+
+```python
+# After paper trading validation
+AGGRESSIVE = TradingConfig(
+    time_stop_seconds=180.0,      # UPDATED from 120s
+    min_time_remaining=240.0,     # time_stop + 60s buffer
+    high_entry_threshold=0.90,    # skip >= $0.90 (50sh)
+    # ... other params unchanged
+)
+```
+
+### Testing Phase Config (10 shares)
+
+```python
+TARGET_SHARES = 10
+HIGH_ENTRY_THRESHOLD = 0.80      # lower for 10sh minimum hedge
+time_stop_seconds = 180.0
+```

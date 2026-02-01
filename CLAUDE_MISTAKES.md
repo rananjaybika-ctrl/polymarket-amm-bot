@@ -435,6 +435,75 @@ User had to point out that observer files have binance_price column and that OOS
 
 ---
 
+### 36. USED WRONG FORMAT FOR SLASH COMMANDS
+**What happened:** User asked to create `/cm` slash command. I created `.claude/commands/cm.md` with wrong format (first YAML frontmatter, then no frontmatter). Command failed 4 times with "Unknown skill" error.
+
+**Root cause:**
+- Claude Code now uses **Skills** format, not old commands format
+- Skills require: `.claude/skills/<name>/SKILL.md` (case-sensitive)
+- Old format `.claude/commands/<name>.md` still works but I didn't know the correct structure
+- Had to web search to find the correct format
+
+**Correct structure:**
+```
+.claude/skills/cm/
+└── SKILL.md    # MUST be named SKILL.md (case-sensitive)
+```
+
+**SKILL.md format:**
+```yaml
+---
+name: cm
+description: What it does
+---
+
+Instructions here...
+```
+
+**Cost:**
+- 4 failed attempts
+- User frustration
+- Had to research my own documentation
+
+**FIX:**
+1. Skills go in `.claude/skills/<skill-name>/SKILL.md`
+2. File MUST be named `SKILL.md` (case-sensitive)
+3. YAML frontmatter with `name` and `description` required
+4. When creating custom commands, web search Claude Code docs first
+
+**Source:** Jan 31, 2026 - /cm command creation
+
+---
+
+### 37. ASSUMED "MISSED SIGNALS" WERE MISSED OPPORTUNITIES
+**What happened:** Multi-cycle mode was implemented because single-cycle "only traded 5% of detected spikes." Assumed the other 95% were missed opportunities worth capturing.
+
+**Root cause:**
+- Spike detection fires on EVERY TICK above threshold
+- A single BTC move generates HUNDREDS of "spikes" (87% within 0.1s of each other)
+- 99% of consecutive spikes are within 180s AND same direction
+- The 95% "missed" spikes were DUPLICATES, not independent opportunities
+
+**Impact:**
+- Multi-cycle destroyed profitability: 39.8% win rate vs 54.3% single-cycle
+- 10x more trades but 15pp lower win rate
+- Hourly rate: -$26.70/hr (vs +$1.37/hr single)
+- Root cause: re-trading same signal at worse prices
+
+**Key insight:**
+> "The 95% of 'missed' spikes aren't missed opportunities - they're duplicate signals from the same BTC move. SINGLE mode's blocking is correctly ignoring them."
+
+**FIX:**
+1. Single-cycle's 180s blocking is the SECRET SAUCE, not a limitation
+2. "More trades" ≠ "more profit" - quality > quantity
+3. Spike detection ≠ signal detection (true signals are ~1% of raw spikes)
+4. Investigate data BEFORE assuming optimization is needed
+
+**Reference:** `research/findings/SINGLE_CYCLE_OPTIMAL_20260131.md`
+**Source:** Jan 31, 2026 - Multi-cycle analysis and abandonment
+
+---
+
 **Last updated:** Jan 31, 2026
-**Mistakes documented:** 35
+**Mistakes documented:** 37
 **Sources:** CODEBASE_AUDIT_JAN17.md, AWS_7HR_OBSERVER_DEEP_ANALYSIS.md, VOL_FILTER_GRID_SEARCH_FINDINGS_JAN22.md, PLAN_FIX_ENTRY_FILL_JAN19.md, SPREAD_CAPTURE_FIX_PLAN.md

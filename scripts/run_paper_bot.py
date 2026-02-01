@@ -815,9 +815,9 @@ class PaperTradingBot:
                 high_entry_threshold=self.high_entry_threshold,
                 min_time_remaining=AGGRESSIVE_CONFIG.min_time_remaining,  # FROM TRADING_CONFIGS.py
                 ou_adaptive_threshold=ou_adaptive,  # USE OU ADAPTIVE (per TRADING_CONFIGS.py threshold_method="ou")
-                # MULTI-CYCLE TRADING (Jan 31, 2026) - FROM TRADING_CONFIGS.py
-                # To revert: set enable_multicycle=False in TRADING_CONFIGS.py
-                enable_multicycle=AGGRESSIVE_CONFIG.enable_multicycle,
+                # MULTI-CYCLE DEPRECATED (Jan 31, 2026) - Single-cycle only
+                # Multi-cycle destroyed profitability (39.8% vs 54.3% win rate)
+                enable_multicycle=AGGRESSIVE_CONFIG.enable_multicycle,  # Should be False
                 max_cycles=AGGRESSIVE_CONFIG.max_cycles,
                 shares_per_cycle=AGGRESSIVE_CONFIG.shares_per_cycle,
             )

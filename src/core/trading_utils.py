@@ -21,6 +21,12 @@ Usage:
         # Calculations
         calculate_loser_bid,
 
+        # Multi-cycle direction modes
+        DIRECTION_MODE_SINGLE,
+        DIRECTION_MODE_BUILD,
+        DIRECTION_MODE_CLEAR,
+        can_enter_direction,
+
         # Data classes
         TradeResult,
         BacktestCycle,
@@ -185,50 +191,30 @@ def should_take_spike_enhanced(
     winner_ask_depth: Optional[float] = None,
 ) -> Tuple[bool, str]:
     """
-    ML-validated spike filter with enhanced OBI and market structure checks.
+    Simple binary OBI check - does orderbook confirm spike direction?
 
-    Based on research findings (Jan 31, 2026 - ML_SPIKE_QUALITY_ANALYSIS.md):
-    - OBI confirmation: 49% vs 31% good spike rate (+18pp)
-    - Strong-sell OBI (< -0.3): only 19.3% good vs 49% when confirms
-    - Wider loser spread: correlation +0.19 with good spikes
-    - More time remaining: correlation +0.24 with good spikes
-    - Lower depth: correlation -0.24 with good spikes (easier to move)
+    REVERTED (Jan 31, 2026): Removed spread/time/depth filters.
+    Those filters rejected 93% of trades based on weak correlations (+0.19).
+    Simple binary OBI check is sufficient:
+    - OBI confirms spike: 49% good spike rate
+    - OBI disagrees: 31% good spike rate
+    - Improvement: +18 percentage points
 
     Args:
         spike_direction: "UP" or "DOWN"
         obi_winner: Orderbook imbalance for winner side (-1 to +1)
-        loser_spread: Bid-ask spread on loser side (default 0.05)
-        time_remaining: Seconds until market resolution (default 600)
-        winner_ask_depth: Dollar depth at winner ask (optional)
+        loser_spread: IGNORED (kept for API compatibility)
+        time_remaining: IGNORED (kept for API compatibility)
+        winner_ask_depth: IGNORED (kept for API compatibility)
 
     Returns:
         Tuple of (should_take, reason)
-        - should_take: True if spike passes all filters
-        - reason: Explanation string
-
-    Reference: research/findings/ML_SPIKE_QUALITY_ANALYSIS.md
     """
-    # CRITICAL: OBI confirmation (49% vs 31% good spike rate)
+    # Simple binary OBI check: does orderbook agree with spike?
     if obi_winner <= 0:
         return False, f"OBI disagrees (obi={obi_winner:.3f})"
 
-    # Strong-sell OBI = only 19.3% good (vs 49% when confirms)
-    if obi_winner < -0.3:
-        return False, f"OBI strong sell (obi={obi_winner:.3f})"
-
-    # Wider loser spread = more room for drop (correlation +0.19)
-    if loser_spread < 0.02:
-        return False, f"Loser spread too tight ({loser_spread:.3f})"
-
-    # More time = better chance of drop (correlation +0.24)
-    if time_remaining < 300:
-        return False, f"Too close to expiry ({time_remaining:.0f}s)"
-
-    # Low depth = easier to move price (correlation -0.24)
-    if winner_ask_depth is not None and winner_ask_depth > 5000:
-        return False, f"Winner depth too high (${winner_ask_depth:.0f})"
-
-    return True, "All filters passed"
+    return True, "OBI confirms"
 
 
 def compute_enhanced_score(spike_mag: float, velocity_bps: float,
@@ -380,3 +366,73 @@ def calculate_loser_bid(
     max_loser = target_pair_cost - winner_entry
     loser_bid = min((1.0 - winner_entry) - expected_drop, max_loser)
     return max(0.01, min(0.95, loser_bid))
+
+
+# =============================================================================
+# MULTI-CYCLE DIRECTION MODES - DEPRECATED Jan 31, 2026
+# =============================================================================
+#
+# ABANDONED: Multi-cycle destroyed profitability even with direction consistency fix.
+# - SINGLE mode: 54.3% win rate, +$1.37/hr
+# - MULTI modes: 39.8% win rate, -$26.70/hr (10x trades, 15pp lower win rate)
+#
+# Root cause: Stacking same-direction trades catches weak follow-on spikes that
+# dilute edge. The first spike is a strong signal; subsequent spikes are noise.
+#
+# LIVE TRADING: Use SINGLE-CYCLE ONLY (enable_multicycle=False in TRADING_CONFIGS.py)
+# =============================================================================
+
+# Direction mode constants - DEPRECATED, only SINGLE is live-ready
+DIRECTION_MODE_SINGLE = "single"  # LIVE-READY: 1 cycle at a time
+DIRECTION_MODE_BUILD = "build"    # DEPRECATED: destroyed profitability
+DIRECTION_MODE_CLEAR = "clear"    # DEPRECATED: destroyed profitability
+
+
+def can_enter_direction(
+    spike_direction: str,
+    active_cycles: list,
+    direction_mode: str = DIRECTION_MODE_SINGLE,
+) -> Tuple[bool, str]:
+    """
+    DEPRECATED - Multi-cycle abandoned Jan 31, 2026.
+
+    Check if new entry is allowed based on direction mode and active cycles.
+
+    WARNING: Multi-cycle modes (BUILD, CLEAR) destroyed profitability:
+        - SINGLE: 54.3% win rate, +$1.37/hr (LIVE-READY)
+        - MULTI: 39.8% win rate, -$26.70/hr (ABANDONED)
+
+    This function is kept for backwards compatibility but should NOT be used
+    in production. Live trading uses SINGLE-CYCLE ONLY via TRADING_CONFIGS.py.
+
+    Args:
+        spike_direction: "UP" or "DOWN" - direction of new spike
+        active_cycles: List of active BacktestCycle objects (must have winner_side attr)
+        direction_mode: "single", "build", or "clear" (only "single" is live-ready)
+
+    Returns:
+        Tuple of (can_enter, reason)
+            - can_enter: True if entry is allowed
+            - reason: Human-readable explanation for logging
+    """
+    if direction_mode == DIRECTION_MODE_SINGLE:
+        return True, "Single-cycle mode"
+
+    if not active_cycles:
+        return True, "No active cycles"
+
+    # Get direction from first active cycle (all should be same direction)
+    existing_direction = active_cycles[0].winner_side
+
+    if spike_direction == existing_direction:
+        return True, f"Same direction as existing ({existing_direction})"
+
+    # Opposite direction - behavior depends on mode
+    if direction_mode == DIRECTION_MODE_BUILD:
+        return False, f"BUILD mode: Skipping {spike_direction} while holding {existing_direction}"
+
+    elif direction_mode == DIRECTION_MODE_CLEAR:
+        return False, f"CLEAR mode: Waiting for {len(active_cycles)} {existing_direction} cycle(s) to close"
+
+    # Unknown mode - allow by default (shouldn't happen)
+    return True, f"Unknown mode '{direction_mode}' - allowing"

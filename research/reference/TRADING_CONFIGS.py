@@ -100,12 +100,13 @@ class TradingConfig:
     # When OBI confirms spike: 89% accuracy vs 77% when disagrees (+4.1pp improvement)
     use_obi_filter: bool = True  # Skip entries when orderbook disagrees with spike
 
-    # Multi-cycle trading (Jan 31, 2026)
-    # Allows multiple concurrent entry/hedge cycles to capture more opportunities
-    # 4,066 good spikes missed in 19 hours due to position blocking
-    enable_multicycle: bool = True   # Toggle ON/OFF
-    max_cycles: int = 2              # Max concurrent cycles (2 cycles × 20 shares = 40 total)
-    shares_per_cycle: int = 20       # Shares per cycle
+    # Multi-cycle trading - DEPRECATED Jan 31, 2026
+    # ABANDONED: Multi-cycle destroyed profitability (39.8% win rate vs 54.3% single)
+    # Even with direction consistency fix, stacking same-direction trades dilutes edge.
+    # See: research/findings/MULTICYCLE_ANALYSIS.md
+    enable_multicycle: bool = False  # DEPRECATED - always use single-cycle
+    max_cycles: int = 1              # DEPRECATED - always 1 (single-cycle)
+    shares_per_cycle: int = 50       # PRODUCTION: 50 shares per trade
 
     @property
     def z_zone_label(self) -> str:
@@ -123,14 +124,14 @@ class TradingConfig:
 # VALIDATED CONFIGURATIONS (Jan 24, 2026)
 # =============================================================================
 
-# TIME120s_SKIP + OBI VALIDATED (Jan 28, 2026): ~$9.00/hr avg across 157.4h cross-validation
-# +24% hourly rate vs TIME180s, skip rule eliminates turkey problem losses
-# OBI filter adds +4.1pp accuracy when orderbook confirms spike direction
+# TIME180s_SKIP + OBI VALIDATED (Jan 31, 2026): ~$9.00/hr avg across 157.4h cross-validation
+# +24% hourly rate vs TIME120s, skip rule eliminates turkey problem losses
+# OBI filter adds +4.1pp accuracy when orderbook confirms spike direction (binary check: obi > 0)
 #
-# MULTI-CYCLE TRADING (Jan 31, 2026):
-# - Added enable_multicycle, max_cycles, shares_per_cycle
-# - Expected +89% more good trades (242 → 457 in 19 hours)
-# - TO REVERT: Set enable_multicycle=False (falls back to single-cycle mode)
+# MULTI-CYCLE ABANDONED (Jan 31, 2026):
+# - Multi-cycle destroyed profitability: 39.8% win rate vs 54.3% single-cycle
+# - Even with direction consistency fix, stacking same-direction trades dilutes edge
+# - SINGLE-CYCLE ONLY: enable_multicycle=False, max_cycles=1, shares_per_cycle=50
 AGGRESSIVE = TradingConfig(
     name="AGGRESSIVE",
 
@@ -157,11 +158,11 @@ AGGRESSIVE = TradingConfig(
     high_entry_threshold=0.90,   # Turkey problem cutoff
     min_time_remaining=240.0,    # time_stop + 60s buffer = 180 + 60 = 240
 
-    # MULTI-CYCLE TRADING (Jan 31, 2026)
-    # TO REVERT TO SINGLE-CYCLE: Set enable_multicycle=False
-    enable_multicycle=True,      # Toggle multi-cycle ON/OFF
-    max_cycles=2,                # Max concurrent cycles
-    shares_per_cycle=20,         # Shares per cycle (total = 2 × 20 = 40)
+    # SINGLE-CYCLE ONLY (Jan 31, 2026 - multi-cycle abandoned)
+    # Multi-cycle destroyed profitability: 39.8% win rate vs 54.3% single
+    enable_multicycle=False,     # DEPRECATED - always False
+    max_cycles=1,                # DEPRECATED - always 1
+    shares_per_cycle=50,         # PRODUCTION: 50 shares per trade
 
     # Expected performance (at 50 shares, TIME120s_SKIP cross-validation)
     expected_pnl=90.00,          # ~$9.00/hr * 10h example

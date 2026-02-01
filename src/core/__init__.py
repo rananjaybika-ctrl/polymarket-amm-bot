@@ -48,6 +48,13 @@ from src.core.trading_utils import (
     # Calculations
     calculate_loser_bid,
 
+    # Multi-cycle direction modes - DEPRECATED Jan 31, 2026
+    # Only DIRECTION_MODE_SINGLE is live-ready. Multi-cycle destroyed profitability.
+    DIRECTION_MODE_SINGLE,
+    DIRECTION_MODE_BUILD,  # DEPRECATED
+    DIRECTION_MODE_CLEAR,  # DEPRECATED
+    can_enter_direction,   # DEPRECATED (only for backwards compatibility)
+
     # Data classes
     TradeResult,
     BacktestCycle,
@@ -70,6 +77,13 @@ __all__ = [
 
     # Calculations
     'calculate_loser_bid',
+
+    # Multi-cycle direction modes - DEPRECATED Jan 31, 2026
+    # Only DIRECTION_MODE_SINGLE is live-ready
+    'DIRECTION_MODE_SINGLE',
+    'DIRECTION_MODE_BUILD',  # DEPRECATED
+    'DIRECTION_MODE_CLEAR',  # DEPRECATED
+    'can_enter_direction',   # DEPRECATED
 
     # Data classes
     'TradeResult',
