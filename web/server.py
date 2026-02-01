@@ -75,6 +75,9 @@ from src.services.health_monitor import (
 from src.services.auto_redeemer import AutoRedeemer
 from src.config import Config
 
+# TRADING_CONFIGS.py is the SINGLE SOURCE OF TRUTH for all trading parameters
+from research.reference.TRADING_CONFIGS import AGGRESSIVE as AGGRESSIVE_CONFIG
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -231,6 +234,8 @@ class AggressiveBotConfig(BaseModel):
 
     Spike detection with velocity confirmation, OU adaptive threshold,
     and time-stop exit logic. Uses EnhancedSpikeStrategy.
+
+    ALL DEFAULTS sourced from TRADING_CONFIGS.py (single source of truth).
     """
     mode: str  # "paper" or "live"
     market: str = "btc-15m"
@@ -238,17 +243,17 @@ class AggressiveBotConfig(BaseModel):
     end_datetime: str
     starting_balance: float = 170.0
 
-    # Path 1 parameters
-    threshold_method: str = "ou"          # "ou" for adaptive, "fixed" for static
-    zscore_method: str = "ewma"           # Z-score tracking method
-    lookback_ms: int = 1200               # Spike lookback in milliseconds
-    time_stop_seconds: float = 120.0      # Time-stop exit (2 minutes) - validated Jan 27
-    use_cycling: bool = True              # Keep trading after hedge achieved, merge, continue
-    z_lo: float = 0.0                     # Z-score lower bound for entry
-    z_hi: float = 1.5                     # Z-score upper bound for entry
-    base_size: int = 10                   # Order size per trade (10 for testing phase)
-    high_entry_threshold: float = 0.80    # Skip entries at or above this price
-    max_daily_loss: float = 0.0           # Stop trading if loss exceeds (0=disabled)
+    # Path 1 parameters - ALL FROM TRADING_CONFIGS.py
+    threshold_method: str = AGGRESSIVE_CONFIG.threshold_method
+    zscore_method: str = AGGRESSIVE_CONFIG.zscore_method
+    lookback_ms: int = AGGRESSIVE_CONFIG.lookback_ms
+    time_stop_seconds: float = AGGRESSIVE_CONFIG.time_stop_seconds
+    use_cycling: bool = AGGRESSIVE_CONFIG.use_cycling
+    z_lo: float = AGGRESSIVE_CONFIG.z_lo
+    z_hi: float = AGGRESSIVE_CONFIG.z_hi
+    base_size: int = AGGRESSIVE_CONFIG.shares_per_cycle
+    high_entry_threshold: float = AGGRESSIVE_CONFIG.high_entry_threshold
+    max_daily_loss: float = AGGRESSIVE_CONFIG.max_session_loss
 
 
 class ContrarianBotConfig(BaseModel):
