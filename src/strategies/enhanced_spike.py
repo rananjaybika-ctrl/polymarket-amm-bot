@@ -828,6 +828,11 @@ class EnhancedSpikeStrategy:
         hedge_offset: float = DEFAULT_HEDGE_OFFSET,
         emergency_imbalance_threshold: Optional[int] = None,
         min_velocity_bps: float = DEFAULT_MIN_VELOCITY_BPS,  # LEGACY - ignored in spike mode
+        # SHARED BUFFER: Use BinanceClient's 60Hz price buffer (Feb 2, 2026)
+        # When set, strategy shares BinanceClient's spike_price_history instead of
+        # maintaining its own buffer that fills at the slower 5-second trading loop rate.
+        # This fixes the warmup issue where move=0.0000% for ~6 minutes after start.
+        binance_client: Optional[Any] = None,  # Type hint is Any to avoid circular import
     ):
         # Handle LEGACY parameter aliases
         if entry_size is not None:
@@ -839,7 +844,8 @@ class EnhancedSpikeStrategy:
         self.spike_lookback = spike_lookback
         self.spike_threshold = spike_threshold
         self.target_pair_cost = target_pair_cost
-        self._binance_price_history: List[float] = []
+        self._binance_price_history: List[float] = []  # Local buffer (slow, fallback)
+        self._binance_client = binance_client  # Shared 60Hz buffer (fast, preferred)
 
         # OU adaptive threshold (replaces fixed threshold when set)
         self.ou_adaptive_threshold = ou_adaptive_threshold
@@ -851,6 +857,8 @@ class EnhancedSpikeStrategy:
         self.zscore_lo = zscore_lo
         self.zscore_hi = zscore_hi
         self._zscore_skip_count = 0  # Count trades skipped by z-score filter
+        self._vol_log_interval = 30.0  # Log volatility every 30 seconds
+        self._last_vol_log_time = 0.0  # Last time we logged volatility
 
         # Core parameters
         self.base_size = max(MIN_SHARES, base_size)
@@ -935,19 +943,24 @@ class EnhancedSpikeStrategy:
             (direction, magnitude_pct) - direction is "UP" or "DOWN" or None
             magnitude_pct is the absolute percentage change
         """
-        # Add to history
-        self._binance_price_history.append(binance_price)
-
-        # Trim history
-        if len(self._binance_price_history) > SPIKE_HISTORY_SIZE:
-            self._binance_price_history = self._binance_price_history[-SPIKE_HISTORY_SIZE:]
+        # Use shared BinanceClient buffer if available (60Hz, fast warmup)
+        # Otherwise fall back to local buffer (5s rate, slow warmup)
+        if self._binance_client is not None and hasattr(self._binance_client, 'spike_price_history'):
+            price_history = self._binance_client.spike_price_history
+            # BinanceClient updates its buffer on every tick, so we just read it
+        else:
+            # Fallback: use local buffer (slower, but works without BinanceClient)
+            self._binance_price_history.append(binance_price)
+            if len(self._binance_price_history) > SPIKE_HISTORY_SIZE:
+                self._binance_price_history = self._binance_price_history[-SPIKE_HISTORY_SIZE:]
+            price_history = self._binance_price_history
 
         # Need enough history
-        if len(self._binance_price_history) < self.spike_lookback + 1:
+        if len(price_history) < self.spike_lookback + 1:
             return None, 0
 
-        current = self._binance_price_history[-1]
-        previous = self._binance_price_history[-self.spike_lookback - 1]
+        current = price_history[-1]
+        previous = price_history[-self.spike_lookback - 1]
 
         if previous <= 0:
             return None, 0
@@ -1549,6 +1562,47 @@ class EnhancedSpikeStrategy:
                         )
                     return []
 
+        # =========================================================
+        # PERIODIC VOLATILITY LOGGING (Feb 1, 2026)
+        # Log volatility metrics every 30 seconds for diagnostics
+        # =========================================================
+        if binance_price is not None:
+            current_time = time.time()
+            if current_time - self._last_vol_log_time >= self._vol_log_interval:
+                self._last_vol_log_time = current_time
+
+                # Calculate current price move (same as detect_spike)
+                # Use shared BinanceClient buffer if available (60Hz, fast warmup)
+                move_pct = 0.0
+                if self._binance_client is not None and hasattr(self._binance_client, 'spike_price_history'):
+                    price_history = self._binance_client.spike_price_history
+                else:
+                    price_history = self._binance_price_history
+
+                if len(price_history) >= self.spike_lookback + 1:
+                    current = price_history[-1]
+                    previous = price_history[-self.spike_lookback - 1]
+                    if previous > 0:
+                        move_pct = abs((current - previous) / previous * 100)
+
+                # Get current threshold
+                threshold = self.get_current_threshold()
+
+                # Get z-score info
+                z_info = ""
+                if self.zscore_tracker is not None:
+                    regime = self.zscore_tracker.get_regime()
+                    z_info = f", z={current_zscore:.2f} ({regime})"
+
+                # Log volatility status (with buffer debug)
+                buffer_info = f"buf={len(price_history)}/{self.spike_lookback+1}"
+                shared = "shared" if self._binance_client is not None else "local"
+                logger.info(
+                    f"[VOL] move={move_pct:.4f}% vs threshold={threshold:.4f}% "
+                    f"({'ABOVE' if move_pct >= threshold else 'below'}){z_info}, "
+                    f"BTC=${binance_price:,.2f} [{buffer_info} {shared}]"
+                )
+
         if binance_price is not None:
             raw_spike_direction, spike_magnitude = self.detect_spike(binance_price)
 
@@ -1742,7 +1796,8 @@ class EnhancedSpikeStrategy:
                     )
                     if cycle:
                         # Generate entry quote using cycle's shares
-                        entry_price = min(winner_bid + 0.01, winner_ask - 0.01)
+                        # TAKER entry at ask - matches backtest logic (Feb 1, 2026 fix)
+                        entry_price = winner_ask
                         entry_price = round(entry_price, 2)
                         entry_price = max(0.01, min(self.max_share_price, entry_price))
 
@@ -1839,12 +1894,15 @@ class EnhancedSpikeStrategy:
                 )
                 return []
 
-            # Use aggressive entry (at or near ask) when spike detected
+            # Use TAKER entry at ask price - matches backtest logic
+            # FIX Feb 1, 2026: Changed from maker (bid+0.01) to taker (ask)
+            # Maker orders below ask rarely fill. Backtest assumes taker at ask.
+            # Note: 500ms taker delay applies, but backtest is validated with this.
             if spike_direction is not None:
-                # In spike mode, be more aggressive - bid at bid + 0.01, capped at ask - 0.01
-                entry_price = min(winner_bid + 0.01, winner_ask - 0.01)
+                # TAKER entry: buy at ask to ensure fill
+                entry_price = winner_ask
             else:
-                # Legacy velocity-based entry
+                # Legacy velocity-based entry (rarely used now)
                 up_offset, down_offset = self.calculate_offsets(velocity_bps)
                 offset = up_offset if winner_side == "UP" else down_offset
                 entry_price = winner_bid - offset

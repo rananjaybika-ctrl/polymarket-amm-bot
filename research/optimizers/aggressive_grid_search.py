@@ -51,7 +51,7 @@ Usage:
     python research/optimizers/aggressive_grid_search.py
 
 For quick single-config validation, use:
-    python research/backtests/multi_dataset_validated_backtest.py
+    python research/backtests/aggressive_main_backtest.py
 """
 
 import pandas as pd
@@ -138,6 +138,9 @@ class TestConfig:
     shares_per_cycle: int = 50  # Shares per cycle
     cycle_mode: str = "SINGLE"  # SINGLE, MULTI_BUILD, MULTI_CLEAR
     direction_mode: str = DIRECTION_MODE_SINGLE  # Direction consistency mode
+    # Loss mechanism parameters (Feb 1, 2026)
+    stop_loss_pct: Optional[float] = None  # None = disabled, 0.15/0.20/0.30 = exit if drop >= X%
+    max_market_losses: Optional[int] = None  # None = disabled, 2/3 = stop trading after N losses in market
 
     @property
     def total_shares(self) -> int:
@@ -157,13 +160,23 @@ class TestConfig:
 # =============================================================================
 
 # Offset parameters: (DROP_MULTIPLIER, DROP_INTERCEPT, description)
+# TIGHT removed (Feb 1, 2026) - focus on CURRENT baseline only
 OFFSET_PRESETS = {
-    "TIGHT": (0.30, 0.05, "Aggressive, faster fill"),
     "CURRENT": (0.50, 0.08, "Current baseline"),
 }
 
 # Time-stops to test
-TIME_STOPS = [30.0, 180.0, 240.0]
+# 0 = no time-stop (rely on stop-loss or passive fill only)
+TIME_STOPS = [0.0, 30.0, 180.0]
+
+# Stop-loss percentages to test (Feb 1, 2026)
+# None = disabled, percentage = exit if winner drops >= X%
+STOP_LOSS_PCTS = [None, 0.15, 0.20, 0.30]
+
+# Market loss limits to test (Feb 1, 2026)
+# None = disabled, N = stop trading in market after N total losses
+# Analysis showed: 2 total losses saves $91.66 (18.3% improvement)
+MAX_MARKET_LOSSES = [None, 2, 3]
 
 # Cycle modes: (max_cycles, shares_per_cycle, direction_mode, description)
 # SINGLE-CYCLE ONLY - Multi-cycle DEPRECATED (Jan 31, 2026)
@@ -179,25 +192,41 @@ CYCLE_MODES = {
     # "MULTI_CLEAR": (2, 25, DIRECTION_MODE_CLEAR, "DEPRECATED - destroyed profitability"),
 }
 
-# Generate all configs: 2 offsets × 3 time-stops × 1 cycle-mode = 6 configs
+# Generate all configs: 2 offsets × 3 time-stops × 4 stop-losses × 3 market-limits = ~70 configs
+# (minus invalid configs where TS=0 AND SL=None AND MML=None)
 CONFIGS = []
 for offset_name, (mult, intercept, offset_desc) in OFFSET_PRESETS.items():
     for ts in TIME_STOPS:
-        for cycle_mode, (max_cycles, shares_per, dir_mode, cycle_desc) in CYCLE_MODES.items():
-            name = f"{offset_name}_TS{int(ts)}_{cycle_mode}"
-            CONFIGS.append(TestConfig(
-                name=name,
-                time_stop_seconds=ts,
-                drop_multiplier=mult,
-                drop_intercept=intercept,
-                offset_name=offset_name,
-                max_cycles=max_cycles,
-                shares_per_cycle=shares_per,
-                cycle_mode=cycle_mode,
-                direction_mode=dir_mode,
-            ))
+        for sl_pct in STOP_LOSS_PCTS:
+            for mml in MAX_MARKET_LOSSES:
+                # Skip invalid: no time-stop AND no stop-loss AND no market limit
+                # (would never exit losing positions)
+                if ts == 0 and sl_pct is None and mml is None:
+                    continue
 
-print(f"Generated {len(CONFIGS)} configs: {len(OFFSET_PRESETS)} offsets × {len(TIME_STOPS)} time-stops × {len(CYCLE_MODES)} cycle-modes")
+                # Build descriptive name
+                sl_label = f"SL{int(sl_pct*100)}" if sl_pct else "NOSL"
+                mml_label = f"MML{mml}" if mml else "NOMML"
+                name = f"{offset_name}_TS{int(ts)}_{sl_label}_{mml_label}"
+
+                # Use SINGLE cycle mode only (multi-cycle deprecated)
+                max_cycles, shares_per, dir_mode, _ = CYCLE_MODES["SINGLE"]
+
+                CONFIGS.append(TestConfig(
+                    name=name,
+                    time_stop_seconds=ts,
+                    drop_multiplier=mult,
+                    drop_intercept=intercept,
+                    offset_name=offset_name,
+                    max_cycles=max_cycles,
+                    shares_per_cycle=shares_per,
+                    cycle_mode="SINGLE",
+                    direction_mode=dir_mode,
+                    stop_loss_pct=sl_pct,
+                    max_market_losses=mml,
+                ))
+
+print(f"Generated {len(CONFIGS)} configs: {len(OFFSET_PRESETS)} offsets × {len(TIME_STOPS)} time-stops × {len(STOP_LOSS_PCTS)} stop-losses × {len(MAX_MARKET_LOSSES)} market-limits")
 
 
 # =============================================================================
@@ -293,6 +322,15 @@ DATASETS = {
         "use_obi": True,  # OBI ON for OOS7
         "expected_hours": 19.0,
     },
+    "OOS8": {
+        "name": "OOS8 (Jan 31)",
+        "btc_file": "research/binance_hf/btc_prices_20260131_055231.csv",
+        "obs_files": [
+            "research/observer/grid_obs_20260131.csv",
+        ],
+        "use_obi": True,  # OBI ON for OOS8
+        "expected_hours": 24.0,  # Estimate
+    },
 }
 
 MIN_COVERAGE_PCT = 80.0
@@ -367,7 +405,7 @@ class TradeResult:
     winner_side: str
     winner_fill_price: float
     loser_fill_price: float
-    hedge_type: str
+    hedge_type: str  # "passive", "time_stop", "stop_loss", "resolution"
     pair_cost: float
     pnl_gross: float
     pnl_net: float
@@ -379,6 +417,10 @@ class TradeResult:
     offset_name: str  # Track which offset was used
     cycle_mode: str = "SINGLE"  # SINGLE or MULTI
     shares: int = 50  # Shares for this trade
+    # Loss mechanism tracking (Feb 1, 2026)
+    stop_loss_pct: Optional[float] = None  # Config stop-loss % used
+    max_market_losses: Optional[int] = None  # Config market loss limit used
+    skipped_by_mml: bool = False  # True if this trade was skipped due to market loss limit
 
 
 @dataclass
@@ -497,6 +539,10 @@ def simulate_market_single(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
     position_data = None
     time_stop_ms = config.time_stop_seconds * 1000
 
+    # Market loss counter (Feb 1, 2026) - tracks losses in THIS market
+    market_loss_count = 0
+    market_blocked = False  # Set True when max_market_losses reached
+
     spike_idx = 0
     obs_idx = 0
 
@@ -553,7 +599,13 @@ def simulate_market_single(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                         offset_name=config.offset_name,
                         cycle_mode=config.cycle_mode,
                         shares=config.shares_per_cycle,
+                        stop_loss_pct=config.stop_loss_pct,
+                        max_market_losses=config.max_market_losses,
                     ))
+
+                    # Increment loss counter if negative PnL
+                    if pnl_net < 0:
+                        market_loss_count += 1
 
                     in_position = False
                     position_data = None
@@ -561,9 +613,60 @@ def simulate_market_single(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                     obs_idx += 1
                     break
 
+                # Check STOP-LOSS FIRST (before time-stop) - Feb 1, 2026
+                if config.stop_loss_pct is not None:
+                    winner_side_current = position_data['winner_side']
+                    if winner_side_current == "UP":
+                        winner_bid_current = obs_row['up_bid']
+                    else:
+                        winner_bid_current = obs_row['down_bid']
+
+                    if pd.notna(winner_bid_current) and winner_entry > 0:
+                        drop_pct = (winner_entry - winner_bid_current) / winner_entry
+                        if drop_pct >= config.stop_loss_pct:
+                            # Stop-loss triggered - exit immediately
+                            loser_fill = loser_ask if pd.notna(loser_ask) else loser_target * 1.05
+                            pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
+                                winner_entry, loser_fill, config.shares_per_cycle,
+                                is_taker_entry=True, is_taker_exit=True
+                            )
+                            trades.append(TradeResult(
+                                market_slug=slug,
+                                cycle_num=cycle_num,
+                                entry_time_remaining=position_data['entry_time_rem'],
+                                signal_score=score,
+                                winner_side=position_data['winner_side'],
+                                winner_fill_price=winner_entry,
+                                loser_fill_price=loser_fill,
+                                hedge_type="stop_loss",
+                                pair_cost=winner_entry + loser_fill,
+                                pnl_gross=pnl_gross,
+                                pnl_net=pnl_net,
+                                entry_fee=entry_fee,
+                                exit_fee=exit_fee,
+                                correct_direction=(resolution == position_data['winner_side']),
+                                spike_magnitude=spike_mag,
+                                dataset=dataset_name,
+                                offset_name=config.offset_name,
+                                cycle_mode=config.cycle_mode,
+                                shares=config.shares_per_cycle,
+                                stop_loss_pct=config.stop_loss_pct,
+                                max_market_losses=config.max_market_losses,
+                            ))
+
+                            # Increment loss counter (stop-loss always a loss)
+                            if pnl_net < 0:
+                                market_loss_count += 1
+
+                            in_position = False
+                            position_data = None
+                            last_hedge_ts = obs_ts
+                            obs_idx += 1
+                            break
+
                 # Check time-stop (ONLY if NOT in profit)
                 elapsed_ms = obs_ts - entry_ts
-                if elapsed_ms >= time_stop_ms:
+                if time_stop_ms > 0 and elapsed_ms >= time_stop_ms:
                     winner_side_current = position_data['winner_side']
                     if winner_side_current == "UP":
                         winner_bid_current = obs_row['up_bid']
@@ -600,7 +703,13 @@ def simulate_market_single(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                             offset_name=config.offset_name,
                             cycle_mode=config.cycle_mode,
                             shares=config.shares_per_cycle,
+                            stop_loss_pct=config.stop_loss_pct,
+                            max_market_losses=config.max_market_losses,
                         ))
+
+                        # Increment loss counter if negative PnL
+                        if pnl_net < 0:
+                            market_loss_count += 1
 
                         in_position = False
                         position_data = None
@@ -647,7 +756,10 @@ def simulate_market_single(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                     offset_name=config.offset_name,
                     cycle_mode=config.cycle_mode,
                     shares=shares,
+                    stop_loss_pct=config.stop_loss_pct,
+                    max_market_losses=config.max_market_losses,
                 ))
+                # Note: No need to increment market_loss_count for resolution - market is ending
                 break
 
             continue
@@ -728,6 +840,15 @@ def simulate_market_single(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                 if not should_take:
                     spike_idx += 1
                     continue
+
+        # MARKET LOSS LIMIT check (Feb 1, 2026) - stop trading if too many losses
+        if config.max_market_losses is not None:
+            if market_loss_count >= config.max_market_losses:
+                # Market is blocked - skip all remaining spikes
+                if not market_blocked:
+                    market_blocked = True
+                spike_idx += 1
+                continue
 
         # ENTRY - use config's loser bid calculation
         cycle_num += 1
@@ -847,13 +968,15 @@ def simulate_market_multicycle(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                     offset_name=config.offset_name,
                     cycle_mode=config.cycle_mode,
                     shares=shares,
+                    stop_loss_pct=config.stop_loss_pct,
+                    max_market_losses=config.max_market_losses,
                 ))
                 completed_cycles.append(cycle)
                 continue
 
             # Check time-stop
             elapsed_ms = obs_ts - cycle.entry_ts
-            if elapsed_ms >= time_stop_ms:
+            if time_stop_ms > 0 and elapsed_ms >= time_stop_ms:
                 winner_side = cycle.winner_side
                 if winner_side == "UP":
                     winner_bid = obs_row['up_bid']
@@ -888,6 +1011,8 @@ def simulate_market_multicycle(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                         offset_name=config.offset_name,
                         cycle_mode=config.cycle_mode,
                         shares=shares,
+                        stop_loss_pct=config.stop_loss_pct,
+                        max_market_losses=config.max_market_losses,
                     ))
                     completed_cycles.append(cycle)
 
@@ -1012,6 +1137,8 @@ def simulate_market_multicycle(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
             offset_name=config.offset_name,
             cycle_mode=config.cycle_mode,
             shares=shares,
+            stop_loss_pct=config.stop_loss_pct,
+            max_market_losses=config.max_market_losses,
         ))
 
     return trades

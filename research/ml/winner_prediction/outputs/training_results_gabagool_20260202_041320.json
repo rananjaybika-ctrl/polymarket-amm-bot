@@ -1,0 +1,140 @@
+{
+  "XGBoost": {
+    "train_accuracy": 0.8771585708241991,
+    "val_accuracy": 0.7357962908448631,
+    "val_auc": 0.8498731673089427,
+    "val_f1": 0.7181661171298477,
+    "top_features": [
+      {
+        "feature": "bid_price_diff",
+        "importance": 1098.02001953125
+      },
+      {
+        "feature": "down_mid",
+        "importance": 827.982666015625
+      },
+      {
+        "feature": "ask_price_diff",
+        "importance": 407.14898681640625
+      },
+      {
+        "feature": "up_ask_from_fair",
+        "importance": 257.0116882324219
+      },
+      {
+        "feature": "ask_price_diff_pct",
+        "importance": 187.56126403808594
+      },
+      {
+        "feature": "down_ask_from_fair",
+        "importance": 120.26575469970703
+      },
+      {
+        "feature": "velocity_cv",
+        "importance": 24.27279281616211
+      },
+      {
+        "feature": "velocity_magnitude_mean",
+        "importance": 20.36626434326172
+      },
+      {
+        "feature": "log_time_remaining",
+        "importance": 19.553688049316406
+      },
+      {
+        "feature": "up_is_expensive",
+        "importance": 18.637502670288086
+      },
+      {
+        "feature": "time_urgency",
+        "importance": 17.79596710205078
+      },
+      {
+        "feature": "up_imbalance",
+        "importance": 17.771331787109375
+      },
+      {
+        "feature": "down_obi",
+        "importance": 17.28937530517578
+      },
+      {
+        "feature": "velocity_magnitude_std",
+        "importance": 17.24849510192871
+      },
+      {
+        "feature": "btc_pct_change_75",
+        "importance": 16.033447265625
+      },
+      {
+        "feature": "time_normalized",
+        "importance": 14.855070114135742
+      },
+      {
+        "feature": "btc_momentum_ema_5",
+        "importance": 14.70080280303955
+      },
+      {
+        "feature": "velocity_x_urgency",
+        "importance": 14.21387004852295
+      },
+      {
+        "feature": "momentum_expensive_agreement",
+        "importance": 13.30321979522705
+      },
+      {
+        "feature": "momentum_consistency",
+        "importance": 13.129178047180176
+      },
+      {
+        "feature": "time_urgency_sq",
+        "importance": 13.060317039489746
+      },
+      {
+        "feature": "btc_momentum_75",
+        "importance": 12.617013931274414
+      },
+      {
+        "feature": "spike_magnitude",
+        "importance": 12.345333099365234
+      },
+      {
+        "feature": "signal_consensus",
+        "importance": 12.284235000610352
+      },
+      {
+        "feature": "up_obi",
+        "importance": 12.028239250183105
+      },
+      {
+        "feature": "btc_momentum_ema_75",
+        "importance": 11.77993392944336
+      },
+      {
+        "feature": "obi_diff",
+        "importance": 11.074549674987793
+      },
+      {
+        "feature": "velocity_sign_mean",
+        "importance": 9.650680541992188
+      },
+      {
+        "feature": "btc_pct_change_25",
+        "importance": 9.241670608520508
+      },
+      {
+        "feature": "velocity_positive_ratio",
+        "importance": 8.546712875366211
+      }
+    ],
+    "confusion_matrix": [
+      [
+        2712,
+        1492
+      ],
+      [
+        303,
+        2287
+      ]
+    ]
+  }
+}

@@ -1,0 +1,314 @@
+{
+  "Logistic Regression": {
+    "train_accuracy": 0.7786664615857879,
+    "val_accuracy": 0.7343151693667157,
+    "val_auc": 0.8246843039306364,
+    "val_f1": 0.6923601637107776,
+    "top_features": [
+      {
+        "feature": "log_time_remaining",
+        "importance": 0.2944941489535395,
+        "coefficient": -0.2944941489535395
+      },
+      {
+        "feature": "ask_price_diff_pct",
+        "importance": 0.2932547009516794,
+        "coefficient": 0.2932547009516794
+      },
+      {
+        "feature": "velocity_positive_ratio",
+        "importance": 0.263989428102625,
+        "coefficient": 0.263989428102625
+      },
+      {
+        "feature": "time_urgency_sq",
+        "importance": 0.26387031067521594,
+        "coefficient": 0.26387031067521594
+      },
+      {
+        "feature": "up_ask_from_fair",
+        "importance": 0.25773469421961626,
+        "coefficient": 0.25773469421961626
+      },
+      {
+        "feature": "ask_price_diff",
+        "importance": 0.2576037531605895,
+        "coefficient": 0.2576037531605895
+      },
+      {
+        "feature": "down_mid",
+        "importance": 0.25760375316058837,
+        "coefficient": -0.25760375316058837
+      },
+      {
+        "feature": "bid_price_diff",
+        "importance": 0.2576037531605882,
+        "coefficient": 0.2576037531605882
+      },
+      {
+        "feature": "up_mid",
+        "importance": 0.257603753160587,
+        "coefficient": 0.257603753160587
+      },
+      {
+        "feature": "mid_price_diff",
+        "importance": 0.2576037531605867,
+        "coefficient": 0.2576037531605867
+      },
+      {
+        "feature": "down_ask_from_fair",
+        "importance": 0.2574526513914848,
+        "coefficient": -0.2574526513914848
+      },
+      {
+        "feature": "velocity_cv",
+        "importance": 0.21292993198030277,
+        "coefficient": 0.21292993198030277
+      },
+      {
+        "feature": "time_urgency",
+        "importance": 0.19095274175385824,
+        "coefficient": -0.19095274175385824
+      },
+      {
+        "feature": "time_normalized",
+        "importance": 0.19095274175385768,
+        "coefficient": 0.19095274175385768
+      },
+      {
+        "feature": "btc_momentum_ema_25",
+        "importance": 0.1677290693406189,
+        "coefficient": -0.1677290693406189
+      },
+      {
+        "feature": "velocity_sign_mean",
+        "importance": 0.16486103088219767,
+        "coefficient": -0.16486103088219767
+      },
+      {
+        "feature": "signal_consensus",
+        "importance": 0.13428275490798217,
+        "coefficient": -0.13428275490798217
+      },
+      {
+        "feature": "btc_momentum_ema_75",
+        "importance": 0.11660605575312162,
+        "coefficient": 0.11660605575312162
+      },
+      {
+        "feature": "phase_lt_600s",
+        "importance": 0.10427077127771006,
+        "coefficient": -0.10427077127771006
+      },
+      {
+        "feature": "btc_momentum_ema_5",
+        "importance": 0.10146163257267167,
+        "coefficient": -0.10146163257267167
+      },
+      {
+        "feature": "btc_pct_change_25",
+        "importance": 0.09686637660262508,
+        "coefficient": 0.09686637660262508
+      },
+      {
+        "feature": "signal_agreement",
+        "importance": 0.07853588636469923,
+        "coefficient": 0.07853588636469923
+      },
+      {
+        "feature": "phase_lt_60s",
+        "importance": 0.07002559193799217,
+        "coefficient": -0.07002559193799217
+      },
+      {
+        "feature": "btc_momentum_sign_25",
+        "importance": 0.06841472985268482,
+        "coefficient": 0.06841472985268482
+      },
+      {
+        "feature": "btc_momentum_25",
+        "importance": 0.06813392576044723,
+        "coefficient": 0.06813392576044723
+      },
+      {
+        "feature": "velocity_magnitude_mean",
+        "importance": 0.05631003039031869,
+        "coefficient": 0.05631003039031869
+      },
+      {
+        "feature": "btc_momentum_75",
+        "importance": 0.05277212985852811,
+        "coefficient": -0.05277212985852811
+      },
+      {
+        "feature": "phase_lt_300s",
+        "importance": 0.050865825848550664,
+        "coefficient": -0.050865825848550664
+      },
+      {
+        "feature": "momentum_expensive_agreement",
+        "importance": 0.04742532193008875,
+        "coefficient": 0.04742532193008875
+      },
+      {
+        "feature": "up_imbalance",
+        "importance": 0.04362423140886012,
+        "coefficient": 0.04362423140886012
+      }
+    ],
+    "confusion_matrix": [
+      [
+        1478,
+        403
+      ],
+      [
+        499,
+        1015
+      ]
+    ]
+  },
+  "XGBoost": {
+    "train_accuracy": 0.0,
+    "val_accuracy": 0.0,
+    "val_auc": 0.0,
+    "val_f1": 0.0
+  },
+  "Random Forest": {
+    "train_accuracy": 0.8629547027609014,
+    "val_accuracy": 0.7213549337260677,
+    "val_auc": 0.8164006399249395,
+    "val_f1": 0.6857142857142856,
+    "top_features": [
+      {
+        "feature": "ask_price_diff_pct",
+        "importance": 0.11200141336576454
+      },
+      {
+        "feature": "mid_price_diff",
+        "importance": 0.10208947198219141
+      },
+      {
+        "feature": "up_ask_from_fair",
+        "importance": 0.0994315128282643
+      },
+      {
+        "feature": "ask_price_diff",
+        "importance": 0.09102200067726526
+      },
+      {
+        "feature": "bid_price_diff",
+        "importance": 0.08553874080403538
+      },
+      {
+        "feature": "up_mid",
+        "importance": 0.07929422981248498
+      },
+      {
+        "feature": "down_mid",
+        "importance": 0.07896330953090491
+      },
+      {
+        "feature": "down_ask_from_fair",
+        "importance": 0.0728450720774985
+      },
+      {
+        "feature": "velocity_cv",
+        "importance": 0.0293978201894423
+      },
+      {
+        "feature": "time_urgency_sq",
+        "importance": 0.017324231724188458
+      },
+      {
+        "feature": "time_normalized",
+        "importance": 0.01640980639495874
+      },
+      {
+        "feature": "time_urgency",
+        "importance": 0.016373197225905137
+      },
+      {
+        "feature": "up_is_expensive",
+        "importance": 0.016268517298513835
+      },
+      {
+        "feature": "log_time_remaining",
+        "importance": 0.016183470930473728
+      },
+      {
+        "feature": "velocity_x_urgency",
+        "importance": 0.014503977212604116
+      },
+      {
+        "feature": "velocity_magnitude_mean",
+        "importance": 0.012256824401204585
+      },
+      {
+        "feature": "obi_diff",
+        "importance": 0.012208415545320228
+      },
+      {
+        "feature": "down_obi",
+        "importance": 0.010196776942642276
+      },
+      {
+        "feature": "velocity_magnitude_std",
+        "importance": 0.010171966029944007
+      },
+      {
+        "feature": "up_obi",
+        "importance": 0.009924517287178027
+      },
+      {
+        "feature": "down_imbalance",
+        "importance": 0.0098434618798907
+      },
+      {
+        "feature": "btc_momentum_ema_75",
+        "importance": 0.009701002814717648
+      },
+      {
+        "feature": "up_imbalance",
+        "importance": 0.009299449315365972
+      },
+      {
+        "feature": "signal_consensus",
+        "importance": 0.008173944144474445
+      },
+      {
+        "feature": "btc_pct_change_75",
+        "importance": 0.007733660838089927
+      },
+      {
+        "feature": "btc_momentum_75",
+        "importance": 0.007627415444190525
+      },
+      {
+        "feature": "btc_momentum_ema_5",
+        "importance": 0.005654833770386368
+      },
+      {
+        "feature": "velocity_bps",
+        "importance": 0.005405224845088275
+      },
+      {
+        "feature": "btc_momentum_ema_25",
+        "importance": 0.0047535549855254496
+      },
+      {
+        "feature": "btc_momentum_25",
+        "importance": 0.0037799976418015115
+      }
+    ],
+    "confusion_matrix": [
+      [
+        1417,
+        464
+      ],
+      [
+        482,
+        1032
+      ]
+    ]
+  }
+}

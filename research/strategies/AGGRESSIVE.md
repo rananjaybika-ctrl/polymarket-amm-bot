@@ -1,7 +1,7 @@
 # AGGRESSIVE Strategy (Path 1)
 
-**Status:** VALIDATED - TIME120s_SKIP + OBI Filter
-**Last Updated:** January 28, 2026
+**Status:** VALIDATED - TIME180s_SKIP + OBI Filter
+**Last Updated:** February 1, 2026
 
 ---
 
@@ -11,7 +11,7 @@
 
 ---
 
-## Configuration (Canonical) - TIME120s_SKIP + OBI
+## Configuration (Canonical) - TIME180s_SKIP + OBI
 
 ```python
 AGGRESSIVE = TradingConfig(
@@ -21,8 +21,8 @@ AGGRESSIVE = TradingConfig(
     lookback_ticks=72,              # 1200ms at 60Hz
     lookback_ms=1200,
     stop_loss_pct=None,             # NO price-based stop
-    time_stop_seconds=120.0,        # Exit after 120s (optimized from 180s)
-    min_time_remaining=180.0,       # time_stop + 60s buffer (prevents resolution exits)
+    time_stop_seconds=180.0,        # Exit after 180s (Jan 31, 2026 update)
+    min_time_remaining=240.0,       # time_stop + 60s buffer (prevents resolution exits)
     use_cycling=True,               # Re-enter after exit
     z_lo=0.0,                       # Z-zone lower bound
     z_hi=1.5,                       # Z-zone upper bound (skip z > 1.5)
@@ -43,8 +43,8 @@ AGGRESSIVE = TradingConfig(
 | Threshold Method | OU | Adaptive sigmoid mapping on z-score |
 | Z-Score Method | **EWMA** | Adapts to regime shifts (OU drifts) |
 | Lookback | 1200ms | 72 ticks at 60Hz |
-| Stop | **120s TIME** | +24% hourly rate vs 180s |
-| Min Time | 180s | time_stop + 60s (prevents resolution exits) |
+| Stop | **180s TIME** | Time-stop exit (Jan 31, 2026) |
+| Min Time | 240s | time_stop + 60s (prevents resolution exits) |
 | Cycling | ON | Re-enter after each exit |
 | Z-Zone | 0 < z < 1.5 | Skip very low and high volatility |
 | Skip High Entry | **>= $0.90** | Cannot hedge (Polymarket $1 min) |
@@ -97,7 +97,7 @@ AGGRESSIVE = TradingConfig(
 
 ### Exit Logic
 1. **Passive fill**: Hedge bid gets hit -> exit with profit
-2. **Time-stop (180s)**: If not filled AND not in profit after 180s -> take market exit
+2. **Time-stop (180s)**: If not filled AND not in profit after 180s -> take market exit (Jan 31, 2026)
 3. **Resolution**: If still holding at market resolution -> settle based on outcome
 
 ### Why Time-Stop Instead of Price-Stop
@@ -227,10 +227,10 @@ if not tracker.should_trade():
     return  # Skip - z-score out of bounds
 ```
 
-### Time-Stop Logic (120s)
+### Time-Stop Logic (180s)
 
 ```python
-if elapsed_seconds >= 120.0:  # Optimized from 180s
+if elapsed_seconds >= 180.0:  # Updated Jan 31, 2026
     # Only exit if NOT in profit
     in_profit = current_winner_bid >= winner_entry
     if not in_profit:
@@ -262,7 +262,7 @@ if elapsed_seconds >= 120.0:  # Optimized from 180s
 
 ## Files Reference
 
-### Architecture (Jan 31, 2026)
+### Architecture (Feb 1, 2026)
 
 **Two Sources of Truth:**
 1. `src/core/` - Shared LOGIC (fee model, filters, calculations)
@@ -279,7 +279,8 @@ if elapsed_seconds >= 120.0:  # Optimized from 180s
 | `research/optimizers/aggressive_grid_search.py` | **MAIN GRID SEARCH** - 18 configs (defines own params) |
 | `research/optimizers/aggressive_grid_search_v1_legacy.py` | Legacy grid search (720 configs, deprecated) |
 | **Backtests** | |
-| `research/backtests/multi_dataset_validated_backtest.py` | Quick single-config validation (imports from src/core) |
+| `research/backtests/aggressive_main_backtest.py` | **MAIN BACKTEST** - Quick single-config validation (imports from src/core) |
+| `research/backtests/LEGACY_aggressive_backtest.py` | Legacy backtest (deprecated, no src/core imports) |
 | **Live Trading** | |
 | `src/strategies/enhanced_spike.py` | Live strategy (imports from src/core + TRADING_CONFIGS) |
 | `src/services/volatility_tracker.py` | LiveZScoreTracker |

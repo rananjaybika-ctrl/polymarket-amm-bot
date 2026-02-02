@@ -142,9 +142,14 @@ class BinanceClient:
         self._spike_threshold = spike_threshold or self.DEFAULT_SPIKE_THRESHOLD
         self._spike_callbacks: List[SpikeCallback] = []
         self._spike_price_history: List[float] = []
-        self._spike_history_size = 50  # Keep last 50 prices
+        self._spike_history_size = 150  # Keep last 150 prices (enough for 72-tick lookback + buffer)
         self._last_spike_callback_time: float = 0.0
         self._spike_callback_cooldown_secs: float = 0.5  # Faster cooldown for spikes
+
+        # Buffer diagnostics (Feb 2, 2026) - track fill rate for debugging
+        self._tick_count: int = 0  # Total ticks received since connect
+        self._last_diagnostic_tick_count: int = 0  # Tick count at last diagnostic log
+        self._last_diagnostic_time: float = 0.0  # Time of last diagnostic log
 
     async def connect(self) -> None:
         """Connect to Binance WebSocket stream and start receiving prices."""
@@ -215,11 +220,24 @@ class BinanceClient:
                     self._current_price = price
                     self._price_history.append(PricePoint(timestamp=now, price=price))
 
+                    # ONLY update spike price history when price CHANGES (Feb 2, 2026)
+                    # Binance bookTicker sends ~180 msg/sec but most are duplicates
+                    # We only want unique price changes for spike detection
+                    # This ensures 72 ticks = ~72 actual price movements
+                    last_price = self._spike_price_history[-1] if self._spike_price_history else None
+                    if last_price is None or price != last_price:
+                        self._spike_price_history.append(price)
+                        if len(self._spike_price_history) > self._spike_history_size:
+                            self._spike_price_history = self._spike_price_history[-self._spike_history_size:]
+
+                    # Increment tick counter for diagnostics (counts all ticks, not just unique)
+                    self._tick_count += 1
+
                     # EVENT-DRIVEN: Check velocity on every tick (LEGACY)
                     if self._velocity_callbacks and self._strike_price > 0:
                         self._check_velocity_and_fire()
 
-                    # EVENT-DRIVEN: Check spike on every tick (NEW - faster)
+                    # EVENT-DRIVEN: Check spike on every tick (fires callbacks)
                     if self._spike_callbacks:
                         self._check_spike_and_fire(price)
 
@@ -674,12 +692,8 @@ class BinanceClient:
         Returns:
             (direction, magnitude_pct) or (None, 0) if no spike
         """
-        # Add to history
-        self._spike_price_history.append(price)
-
-        # Trim history
-        if len(self._spike_price_history) > self._spike_history_size:
-            self._spike_price_history = self._spike_price_history[-self._spike_history_size:]
+        # Note: Buffer is filled by WebSocket handler, not here (Feb 2, 2026)
+        # This avoids duplicate appends when callbacks are registered
 
         # Need enough history
         if len(self._spike_price_history) < self._spike_lookback + 1:
@@ -699,6 +713,48 @@ class BinanceClient:
             return direction, magnitude
 
         return None, 0
+
+    @property
+    def spike_price_history(self) -> List[float]:
+        """
+        Expose the spike price history buffer for external use.
+
+        This allows strategies to share the 60Hz price buffer instead of
+        maintaining their own buffer that only fills at the slower trading loop rate.
+
+        Returns:
+            List of recent BTC prices updated at WebSocket rate (~60Hz)
+        """
+        return self._spike_price_history
+
+    def get_buffer_diagnostics(self) -> dict:
+        """
+        Get buffer diagnostics for debugging (Feb 2, 2026).
+
+        Returns:
+            dict with buffer_size, tick_count, ticks_per_sec, expected_ticks_per_sec
+        """
+        import time
+        now = time.time()
+
+        # Calculate tick rate since last check
+        elapsed = now - self._last_diagnostic_time if self._last_diagnostic_time > 0 else 0
+        ticks_since_last = self._tick_count - self._last_diagnostic_tick_count
+
+        ticks_per_sec = ticks_since_last / elapsed if elapsed > 0 else 0
+
+        # Update diagnostic tracking
+        self._last_diagnostic_tick_count = self._tick_count
+        self._last_diagnostic_time = now
+
+        return {
+            "buffer_size": len(self._spike_price_history),
+            "buffer_capacity": self._spike_history_size,
+            "tick_count": self._tick_count,
+            "ticks_per_sec": round(ticks_per_sec, 1),
+            "expected_ticks_per_sec": 60,  # bookTicker is ~60Hz
+            "is_healthy": ticks_per_sec >= 30 if elapsed > 5 else True,  # At least 50% of expected
+        }
 
     def _check_spike_and_fire(self, price: float) -> None:
         """

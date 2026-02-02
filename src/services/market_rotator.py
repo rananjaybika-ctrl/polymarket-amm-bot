@@ -343,19 +343,30 @@ class MarketRotator:
 
         Returns:
             True if current market is expired or not accepting orders
+
+        FIX Feb 1, 2026: Delay rotation until merge window ends (time_remaining < -20).
+        This prevents race condition where rotation triggers at time_remaining=0,
+        losing the 20-second post-market-end merge opportunity.
         """
         if not self._session_active or not self._current_market:
             return False
 
+        time_left = self._current_market.time_remaining()
+
         # Check if current market expired
+        # FIX: Don't rotate until AFTER merge window ends (time_remaining < -20)
+        # Merge window is -20s to +10s, so we wait until -20s to rotate
         if self._current_market.is_expired():
-            logger.debug(f"Market {self._current_market.slug} expired")
+            if time_left > -20:
+                # Still in merge window, don't rotate yet
+                logger.debug(f"Market {self._current_market.slug} expired but in merge window ({time_left:.0f}s) - waiting")
+                return False
+            logger.debug(f"Market {self._current_market.slug} expired and merge window closed ({time_left:.0f}s)")
             return True
 
         # Only rotate on accepting_orders=False if < 60 seconds remaining
         # Polymarket API sets accepting_orders=False 7-10 min early - ignore until near end
         if not self._current_market.accepting_orders:
-            time_left = self._current_market.time_remaining()
             if time_left < 60:
                 logger.debug(f"Market {self._current_market.slug} not accepting orders and {time_left:.0f}s remaining")
                 return True
@@ -365,16 +376,25 @@ class MarketRotator:
         return False
 
     def get_rotation_reason(self) -> Optional[RotationReason]:
-        """Get the reason rotation is needed, or None if not needed."""
+        """Get the reason rotation is needed, or None if not needed.
+
+        FIX Feb 1, 2026: Consistent with should_rotate() - only return
+        MARKET_EXPIRED after merge window closes (time_remaining < -20).
+        """
         if not self._current_market:
             return None
 
+        time_left = self._current_market.time_remaining()
+
+        # FIX: Only count as expired after merge window closes
         if self._current_market.is_expired():
-            return RotationReason.MARKET_EXPIRED
+            if time_left < -20:  # Merge window closed
+                return RotationReason.MARKET_EXPIRED
+            return None  # Still in merge window
 
         # Only count as not accepting if < 60s remaining
         if not self._current_market.accepting_orders:
-            if self._current_market.time_remaining() < 60:
+            if time_left < 60:
                 return RotationReason.MARKET_NOT_ACCEPTING
 
         return None

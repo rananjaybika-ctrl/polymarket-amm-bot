@@ -215,6 +215,13 @@ Before running ANY backtest or simulation:
 - [ ] Don't be dismissive with short responses after mistakes
 - [ ] Own mistakes directly, no deflection
 
+## MANDATORY CHECKLIST FOR LISTS AND TASK TRACKING
+
+- [ ] When revising a list, review ALL items first (not just the one being changed)
+- [ ] Count items before and after: "Original had N, revised has M - why?"
+- [ ] If correcting one item, explicitly verify other items remain unchanged
+- [ ] Don't let focused corrections cause collateral deletions
+
 ---
 
 ## MANDATORY CHECKLIST FOR STRATEGY CODE
@@ -496,8 +503,61 @@ Instructions here...
 
 ---
 
-**Last updated:** Feb 1, 2026
-**Mistakes documented:** 37
+### 38. DROPPED ITEMS FROM LIST WITHOUT CHECKING THOROUGHLY
+**What happened:** Had 6-item auto-merge flaws list. User corrected one item (delay not required per docs). When I revised the list, I carelessly dropped the race condition flaw entirely - reducing from 5 valid items to 3.
+
+**Root cause:**
+- Focused narrowly on the correction (delay item)
+- Didn't review the full list before presenting the revised version
+- No systematic check: "did I keep all valid items?"
+
+**Cost:**
+- User had to catch the missing item
+- Demonstrated carelessness
+- Had to explain WHY I made the mistake (no good reason)
+
+**FIX:**
+1. When revising ANY list, review ALL items before finalizing
+2. If correcting one item, explicitly verify other items remain
+3. Before presenting revised list, count items: "Original had N, revised has M - why the difference?"
+4. Don't let focused corrections cause collateral deletions
+
+**Source:** Feb 1, 2026 - Auto-merge investigation fixes list
+
+---
+
+---
+
+### 39. DID NOT CHECK CODEBASE FOR SSH/DEPLOY CONFIGURATION BEFORE DEBUGGING
+**What happened:** SSH to AWS failed with "Permission denied (publickey)". I tried `~/.ssh/id_ed25519` multiple times, gave up, and told user "SSH is not working, can you try manually?" - when the deploy.sh script in the repo CLEARLY shows the correct key:
+
+```bash
+AWS_KEY="$HOME/Downloads/polymarket-key.pem"  # Line 11 of deploy.sh
+```
+
+**Root cause:**
+- Assumed SSH key was at standard location (`~/.ssh/`)
+- Didn't check deploy scripts or codebase for SSH configuration
+- Kept retrying same wrong key instead of researching
+
+**Cost:**
+- Multiple failed SSH attempts
+- Wasted user's time
+- Made user point out the obvious (check our own code)
+- Appeared incompetent
+
+**FIX:**
+1. When SSH/deploy fails, **FIRST** check the repo for deploy scripts: `find . -name "deploy*.sh"`
+2. Grep for key paths: `grep -r "\.pem\|ssh.*-i\|AWS_KEY" --include="*.sh"`
+3. Check common config locations: `.env`, `deploy/`, `scripts/`, project root
+4. DON'T keep retrying the same failed approach - research first
+
+**Source:** Feb 2, 2026 - Paper trading debugging session
+
+---
+
+**Last updated:** Feb 2, 2026
+**Mistakes documented:** 39
 
 **Note:** Multi-cycle findings moved to `research/findings/SINGLE_CYCLE_OPTIMAL_20260131.md` (research finding, not Claude mistake)
 **Sources:** CODEBASE_AUDIT_JAN17.md, AWS_7HR_OBSERVER_DEEP_ANALYSIS.md, VOL_FILTER_GRID_SEARCH_FINDINGS_JAN22.md, PLAN_FIX_ENTRY_FILL_JAN19.md, SPREAD_CAPTURE_FIX_PLAN.md

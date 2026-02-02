@@ -1,0 +1,314 @@
+{
+  "Logistic Regression": {
+    "train_accuracy": 0.8379604706606167,
+    "val_accuracy": 0.7508100147275405,
+    "val_auc": 0.862914325775538,
+    "val_f1": 0.7072664359861592,
+    "top_features": [
+      {
+        "feature": "time_urgency_sq",
+        "importance": 0.702863317479081,
+        "coefficient": 0.702863317479081
+      },
+      {
+        "feature": "log_time_remaining",
+        "importance": 0.5414888468548462,
+        "coefficient": -0.5414888468548462
+      },
+      {
+        "feature": "ask_price_diff_pct",
+        "importance": 0.49299619406528916,
+        "coefficient": 0.49299619406528916
+      },
+      {
+        "feature": "up_ask_from_fair",
+        "importance": 0.4757395490715128,
+        "coefficient": 0.4757395490715128
+      },
+      {
+        "feature": "ask_price_diff",
+        "importance": 0.4754178617291813,
+        "coefficient": 0.4754178617291813
+      },
+      {
+        "feature": "down_mid",
+        "importance": 0.4754178617291809,
+        "coefficient": -0.4754178617291809
+      },
+      {
+        "feature": "bid_price_diff",
+        "importance": 0.4754178617291799,
+        "coefficient": 0.4754178617291799
+      },
+      {
+        "feature": "up_mid",
+        "importance": 0.4754178617291796,
+        "coefficient": 0.4754178617291796
+      },
+      {
+        "feature": "mid_price_diff",
+        "importance": 0.475417861729179,
+        "coefficient": 0.475417861729179
+      },
+      {
+        "feature": "down_ask_from_fair",
+        "importance": 0.4750589965485723,
+        "coefficient": -0.4750589965485723
+      },
+      {
+        "feature": "signal_consensus",
+        "importance": 0.3586883696597245,
+        "coefficient": -0.3586883696597245
+      },
+      {
+        "feature": "velocity_sign_mean",
+        "importance": 0.32005150699875856,
+        "coefficient": 0.32005150699875856
+      },
+      {
+        "feature": "velocity_positive_ratio",
+        "importance": 0.2921391406203998,
+        "coefficient": -0.2921391406203998
+      },
+      {
+        "feature": "time_urgency",
+        "importance": 0.2683071894923275,
+        "coefficient": -0.2683071894923275
+      },
+      {
+        "feature": "time_normalized",
+        "importance": 0.268307189492326,
+        "coefficient": 0.268307189492326
+      },
+      {
+        "feature": "phase_lt_60s",
+        "importance": 0.22478672858794904,
+        "coefficient": -0.22478672858794904
+      },
+      {
+        "feature": "phase_lt_600s",
+        "importance": 0.20648098777669677,
+        "coefficient": -0.20648098777669677
+      },
+      {
+        "feature": "btc_momentum_ema_75",
+        "importance": 0.16634337714612926,
+        "coefficient": -0.16634337714612926
+      },
+      {
+        "feature": "up_is_expensive",
+        "importance": 0.14426684094181166,
+        "coefficient": -0.14426684094181166
+      },
+      {
+        "feature": "btc_momentum_sign_25",
+        "importance": 0.13145591042334792,
+        "coefficient": 0.13145591042334792
+      },
+      {
+        "feature": "btc_momentum_ema_5",
+        "importance": 0.12364640766360686,
+        "coefficient": -0.12364640766360686
+      },
+      {
+        "feature": "btc_momentum_ema_25",
+        "importance": 0.12200567303372184,
+        "coefficient": -0.12200567303372184
+      },
+      {
+        "feature": "btc_pct_change_75",
+        "importance": 0.11261537439964564,
+        "coefficient": 0.11261537439964564
+      },
+      {
+        "feature": "btc_pct_change_25",
+        "importance": 0.09722931972519605,
+        "coefficient": 0.09722931972519605
+      },
+      {
+        "feature": "phase_lt_120s",
+        "importance": 0.08170544988281868,
+        "coefficient": 0.08170544988281868
+      },
+      {
+        "feature": "velocity_predicts_up",
+        "importance": 0.06777571270575754,
+        "coefficient": 0.06777571270575754
+      },
+      {
+        "feature": "btc_momentum_sign_75",
+        "importance": 0.06647951408665909,
+        "coefficient": 0.06647951408665909
+      },
+      {
+        "feature": "signal_agreement",
+        "importance": 0.06502954412001032,
+        "coefficient": 0.06502954412001032
+      },
+      {
+        "feature": "spike_magnitude",
+        "importance": 0.05697623413062258,
+        "coefficient": 0.05697623413062258
+      },
+      {
+        "feature": "btc_momentum_25",
+        "importance": 0.056081033217288336,
+        "coefficient": 0.056081033217288336
+      }
+    ],
+    "confusion_matrix": [
+      [
+        1527,
+        574
+      ],
+      [
+        272,
+        1022
+      ]
+    ]
+  },
+  "XGBoost": {
+    "train_accuracy": 0.0,
+    "val_accuracy": 0.0,
+    "val_auc": 0.0,
+    "val_f1": 0.0
+  },
+  "Random Forest": {
+    "train_accuracy": 0.9057909713143121,
+    "val_accuracy": 0.7413843888070693,
+    "val_auc": 0.8532898516714276,
+    "val_f1": 0.7031778228532792,
+    "top_features": [
+      {
+        "feature": "ask_price_diff_pct",
+        "importance": 0.14067249896834338
+      },
+      {
+        "feature": "up_ask_from_fair",
+        "importance": 0.10870193586081962
+      },
+      {
+        "feature": "ask_price_diff",
+        "importance": 0.10744809569900017
+      },
+      {
+        "feature": "bid_price_diff",
+        "importance": 0.10579767149671593
+      },
+      {
+        "feature": "down_ask_from_fair",
+        "importance": 0.09288063387716222
+      },
+      {
+        "feature": "mid_price_diff",
+        "importance": 0.08727023123319551
+      },
+      {
+        "feature": "up_mid",
+        "importance": 0.08711897562057565
+      },
+      {
+        "feature": "down_mid",
+        "importance": 0.06535049434575463
+      },
+      {
+        "feature": "log_time_remaining",
+        "importance": 0.017161729441758426
+      },
+      {
+        "feature": "up_is_expensive",
+        "importance": 0.016632566763414097
+      },
+      {
+        "feature": "time_urgency",
+        "importance": 0.015027914648159585
+      },
+      {
+        "feature": "time_normalized",
+        "importance": 0.014324049205438984
+      },
+      {
+        "feature": "time_urgency_sq",
+        "importance": 0.012812434687753465
+      },
+      {
+        "feature": "velocity_cv",
+        "importance": 0.008380259797609757
+      },
+      {
+        "feature": "velocity_x_urgency",
+        "importance": 0.008186055288453635
+      },
+      {
+        "feature": "signal_consensus",
+        "importance": 0.008112230881106538
+      },
+      {
+        "feature": "btc_momentum_75",
+        "importance": 0.008055244744393517
+      },
+      {
+        "feature": "down_obi",
+        "importance": 0.007603701121156168
+      },
+      {
+        "feature": "velocity_magnitude_mean",
+        "importance": 0.007142726460118168
+      },
+      {
+        "feature": "btc_momentum_ema_75",
+        "importance": 0.006984510435534667
+      },
+      {
+        "feature": "up_obi",
+        "importance": 0.0064636963641871
+      },
+      {
+        "feature": "velocity_magnitude_std",
+        "importance": 0.006388193089820173
+      },
+      {
+        "feature": "down_imbalance",
+        "importance": 0.005746284201044187
+      },
+      {
+        "feature": "btc_pct_change_75",
+        "importance": 0.005522845928723184
+      },
+      {
+        "feature": "up_imbalance",
+        "importance": 0.00501335245469954
+      },
+      {
+        "feature": "obi_diff",
+        "importance": 0.0049363014362282754
+      },
+      {
+        "feature": "btc_momentum_ema_25",
+        "importance": 0.004671098038486815
+      },
+      {
+        "feature": "velocity_bps",
+        "importance": 0.004606288149905956
+      },
+      {
+        "feature": "btc_momentum_ema_5",
+        "importance": 0.0039389031883296
+      },
+      {
+        "feature": "velocity_sign_mean",
+        "importance": 0.0036487596383238535
+      }
+    ],
+    "confusion_matrix": [
+      [
+        1477,
+        624
+      ],
+      [
+        254,
+        1040
+      ]
+    ]
+  }
+}

@@ -917,27 +917,47 @@ class PaperTradingBot:
         - 20 seconds after market end (before rotation)
 
         Only runs in live mode and only once per market.
+
+        FIX Feb 1, 2026: Added debug logging for all skip conditions,
+        lowered minimum pairs from 5 to 1 for small position sizes.
         """
         # Only in live mode
         if self.trading_mode != "live":
+            logger.debug(f"[AUTO-MERGE] Skipped: not live mode (mode={self.trading_mode})")
             return
 
         # Only merge once per market
         if self._merged_this_market:
+            logger.debug("[AUTO-MERGE] Skipped: already merged this market")
             return
 
         # Check if we're in the merge window: -20s to +10s around market end
         if not (-20 <= time_remaining_secs <= 10):
+            logger.debug(f"[AUTO-MERGE] Skipped: outside window (time_remaining={time_remaining_secs:.0f}s, window=-20 to +10)")
             return
 
-        # Get position
-        position = self._engine.get_position(market) if self._engine else None
+        # Get position - use sync_position() for fresh API data in live mode
+        # FIX Feb 1, 2026: Use API call instead of engine state for accurate pair count
+        position = None
+        if self._engine:
+            if hasattr(self._engine, 'sync_position'):
+                try:
+                    position = await self._engine.sync_position(market)
+                    logger.debug(f"[AUTO-MERGE] Synced position from API: UP={position.up_size}, DOWN={position.down_size}")
+                except Exception as e:
+                    logger.warning(f"[AUTO-MERGE] sync_position failed, using engine state: {e}")
+                    position = self._engine.get_position(market)
+            else:
+                position = self._engine.get_position(market)
         if not position:
+            logger.debug(f"[AUTO-MERGE] Skipped: no position for {market.slug}")
             return
 
         # Calculate mergeable pairs
         pairs_to_merge = int(min(position.up_size, position.down_size))
-        if pairs_to_merge < 5:  # Minimum 5 pairs to bother
+        # FIX: Lowered from 5 to 1 - at 10 shares/trade we rarely accumulate 5 pairs
+        if pairs_to_merge < 1:
+            logger.debug(f"[AUTO-MERGE] Skipped: no complete pairs (UP={position.up_size}, DOWN={position.down_size})")
             return
 
         logger.info(
@@ -1547,6 +1567,14 @@ class PaperTradingBot:
         else:
             logger.info(f"Binance connected: BTC=${self._binance_client.current_price:,.2f}")
 
+        # SHARED BUFFER FIX (Feb 2, 2026): Pass BinanceClient to strategy for 60Hz price buffer
+        # This fixes the warmup issue where move=0.0000% for ~6 minutes after start.
+        # Strategy now uses BinanceClient's spike_price_history (updated at 60Hz) instead of
+        # its own buffer (updated at 5s trading loop rate).
+        if self._aggressive_strategy is not None and self._binance_client is not None:
+            self._aggressive_strategy._binance_client = self._binance_client
+            logger.info("[AGGRESSIVE] Linked to BinanceClient for 60Hz price buffer")
+
         # Initialize TrendDetector for quote pulling and direction-aware trading
         # Based on Telegram alpha: MMs monitor Binance to react BEFORE Polymarket updates
         if self._binance_client.is_connected:
@@ -1559,27 +1587,31 @@ class PaperTradingBot:
 
         logger.info(f"Bot initialized with ${self.initial_balance:.2f} balance")
 
-    def _is_binance_healthy(self, max_stale_seconds: float = 5.0) -> bool:
+    def _is_binance_healthy(self, max_stale_seconds: float = 10.0) -> bool:
         """Check if Binance connection is healthy and data is fresh.
 
         Returns False if:
         - BinanceClient not initialized
-        - WebSocket disconnected
-        - Last price update older than max_stale_seconds
+        - Data is stale (older than max_stale_seconds)
+
+        Note: We check data freshness rather than connection status because:
+        - Connection status is briefly False during reconnection
+        - But if data is fresh, the connection is working
+        - This prevents false "unhealthy" during brief reconnects (Feb 2, 2026 fix)
         """
         if not self._binance_client:
             return False
 
-        if not self._binance_client.is_connected:
-            return False
-
-        # Check data freshness
+        # Primary check: is data fresh?
+        # If we have fresh price data, the connection is working regardless of is_connected flag
         if not self._binance_client._price_history:
             return False
 
         last_update = self._binance_client._price_history[-1].timestamp
         age_seconds = (datetime.now(timezone.utc) - last_update).total_seconds()
 
+        # Data freshness is the key indicator
+        # 10s allows for brief reconnection windows without blocking trading
         return age_seconds <= max_stale_seconds
 
     async def _check_existing_positions(self) -> Dict[str, Any]:
@@ -2563,7 +2595,11 @@ class PaperTradingBot:
             self.mode_label = "STANDARD"
         logger.info(f"ACCUMULATION MODE [{self.mode_label}] - High Frequency Trading")
         logger.info("=" * 50)
-        logger.info(f"  - Trade size: {self.accum_trade_size} shares per trade")
+        # Show correct trade size based on mode
+        if self.accum_mode == "aggressive":
+            logger.info(f"  - Trade size: {self.spread_base_size} shares per trade (AGGRESSIVE)")
+        else:
+            logger.info(f"  - Trade size: {self.accum_trade_size} shares per trade")
         logger.info(f"  - Pair cost limit: ${self.accum_pair_cost_limit}")
         if self.accum_mode == "spread_capture":
             logger.info(f"  - Base size: {self.spread_base_size} shares per level")
@@ -2728,6 +2764,15 @@ class PaperTradingBot:
                 elapsed = (datetime.now(timezone.utc) - self._start_time).total_seconds()
                 if int(elapsed) % 300 == 0:  # Every 5 minutes
                     logger.info(f"[{self.strategy_name}] Heartbeat: trades={self._trade_count}, pairs={self._total_pairs}, balance=${self._engine.balance:.2f}")
+
+                # Buffer diagnostics every 30 seconds (Feb 2, 2026)
+                if int(elapsed) % 30 == 0 and self._binance_client:
+                    diag = self._binance_client.get_buffer_diagnostics()
+                    health_status = "HEALTHY" if diag["is_healthy"] else "UNHEALTHY"
+                    logger.info(
+                        f"[BUFFER] {health_status}: {diag['buffer_size']}/{diag['buffer_capacity']} prices, "
+                        f"{diag['ticks_per_sec']:.1f} ticks/sec (expect ~60), total={diag['tick_count']}"
+                    )
 
         except asyncio.CancelledError:
             logger.info(f"[{self.strategy_name}] Bot cancelled")
@@ -4896,7 +4941,11 @@ class PaperTradingBot:
                     "best_ask": best_ask,
                 }
                 if self.trading_mode == "paper":
-                    exec_kwargs["use_pending_orders"] = True  # Enable for zone-based order pulling
+                    is_hedge = quote.get("is_hedge", False)
+                    exec_kwargs["is_hedge"] = is_hedge
+                    # Entry (taker): instant fill at ask
+                    # Hedge (maker): pending order, waits for price-touch
+                    exec_kwargs["use_pending_orders"] = is_hedge
 
                 result = await self._engine.execute_single_side_trade(**exec_kwargs)
 
@@ -5235,7 +5284,11 @@ class PaperTradingBot:
                     "best_ask": best_ask,
                 }
                 if self.trading_mode == "paper":
-                    exec_kwargs["use_pending_orders"] = True
+                    is_hedge = quote.get("is_hedge", False)
+                    exec_kwargs["is_hedge"] = is_hedge
+                    # Entry (taker): instant fill at ask
+                    # Hedge (maker): pending order, waits for price-touch
+                    exec_kwargs["use_pending_orders"] = is_hedge
 
                 result = await self._engine.execute_single_side_trade(**exec_kwargs)
 
@@ -5360,13 +5413,40 @@ class PaperTradingBot:
         )
 
         if self.trading_mode != "live":
-            # Paper mode: just track the PnL, no on-chain merge needed
+            # Paper mode: track the PnL AND reduce paper engine position
             self._session_merged_pnl += total_pnl
             self._session_merge_count += 1
             self._total_pairs += pairs_to_merge
 
             # Update cumulative PnL for loss limit tracking
             self.cumulative_pnl += total_pnl
+
+            # FIX Feb 2, 2026: Reduce paper engine position after merge
+            # Without this, paper engine accumulates positions while strategy resets,
+            # causing entries/hedges to double (paper engine shows 20 when strategy expects 10)
+            pos = self._engine.get_position(market) if self._engine else None
+            if pos:
+                # Reduce both sides by the merged pairs
+                pos.up_balance = max(0, pos.up_balance - pairs_to_merge)
+                pos.down_balance = max(0, pos.down_balance - pairs_to_merge)
+                # Recalculate costs (proportional reduction)
+                if pos.up_balance > 0:
+                    pos.up_total_cost = pos.up_avg_price * pos.up_balance
+                else:
+                    pos.up_total_cost = 0.0
+                    pos.up_avg_price = 0.0
+                if pos.down_balance > 0:
+                    pos.down_total_cost = pos.down_avg_price * pos.down_balance
+                else:
+                    pos.down_total_cost = 0.0
+                    pos.down_avg_price = 0.0
+                # Add merge payout to balance
+                self._engine._balance += pairs_to_merge * 1.00  # $1 per pair merged
+                logger.debug(
+                    f"[AUTO_MERGE] Paper position reduced: UP={pos.up_balance:.0f}, DOWN={pos.down_balance:.0f}, "
+                    f"balance=${self._engine._balance:.2f}"
+                )
+
             logger.info(
                 f"[AUTO_MERGE] 📝 Paper mode - recorded {pnl_sign}${total_pnl:.4f} "
                 f"(session total: ${self._session_merged_pnl:.4f}, cumulative: ${self.cumulative_pnl:.2f})"
@@ -5606,7 +5686,11 @@ class PaperTradingBot:
                     "best_ask": best_ask,
                 }
                 if self.trading_mode == "paper":
-                    exec_kwargs["use_pending_orders"] = True
+                    is_hedge = quote.get("is_hedge", False)
+                    exec_kwargs["is_hedge"] = is_hedge
+                    # Entry (taker): instant fill at ask
+                    # Hedge (maker): pending order, waits for price-touch
+                    exec_kwargs["use_pending_orders"] = is_hedge
 
                 result = await self._engine.execute_single_side_trade(**exec_kwargs)
 

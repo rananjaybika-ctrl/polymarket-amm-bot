@@ -80,6 +80,11 @@ class SimulationConfig:
     market_cross_improvement_min: float = 0.70  # Min 70% of potential improvement
     market_cross_improvement_max: float = 0.95  # Max 95% of potential improvement
 
+    # STRICT PRICE-TOUCH MODE (Feb 2, 2026)
+    # When True, hedge orders only fill when ask <= our bid (price must touch)
+    # This is more accurate than probabilistic fills for cycling simulation
+    strict_hedge_fills: bool = True  # Require price to touch hedge bid
+
     def __post_init__(self):
         if self.random_seed is not None:
             random.seed(self.random_seed)
@@ -601,6 +606,7 @@ class PaperTradingEngine:
         size: float,
         best_ask: Optional[float] = None,
         use_pending_orders: bool = False,
+        is_hedge: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute a single-side paper trade (UP or DOWN only).
@@ -617,6 +623,7 @@ class PaperTradingEngine:
             best_ask: Current best ask price (for fill probability simulation)
             use_pending_orders: If True, add to pending orders for tick-based fills
                                instead of instant fill determination
+            is_hedge: If True, this is a hedge order (uses strict price-touch fills)
 
         Returns:
             Dict with trade result:
@@ -683,6 +690,7 @@ class PaperTradingEngine:
                 "market_slug": market.slug,
                 "side": side_upper,
                 "best_ask": best_ask or price,
+                "is_hedge": is_hedge,  # For strict price-touch fills
             }
 
             logger.info(
@@ -918,6 +926,27 @@ class PaperTradingEngine:
         """Get paper position for a market."""
         return self._positions.get(market.slug)
 
+    async def sync_position(self, market: BTCMarket, force: bool = False) -> Optional[Position]:
+        """
+        Sync position from paper trading state.
+
+        This method exists to provide API compatibility with live_trading.py.
+        In paper mode, the internal position is always authoritative, so this
+        simply returns get_position().
+
+        FIX Feb 2, 2026: Adding this method allows _run_aggressive_cycle's sync
+        logic (lines 5098-5115) to work for paper mode. Without this, the strategy
+        state and paper engine position would drift apart after cycle completion.
+
+        Args:
+            market: The BTCMarket to sync
+            force: Ignored in paper mode (always returns current position)
+
+        Returns:
+            Current paper position for the market
+        """
+        return self.get_position(market)
+
     # =========================================================================
     # PENDING ORDER MANAGEMENT (Quote Pulling Simulation)
     # =========================================================================
@@ -1072,33 +1101,52 @@ class PaperTradingEngine:
             if order_age < self.config.min_fill_delay_ms / 1000.0:
                 continue
 
-            # Calculate cumulative fill probability based on time
-            # P(fill by t) = 1 - (1 - base)^(t/expected_time)
-            base_prob = self.config.fill_probability
-            cumulative_prob = 1 - (1 - base_prob) ** (order_age / expected_fill_time)
-
-            # Adjust for price distance from ask
+            # Get current ask for this side
+            side = pending["side"]
             best_ask = pending.get("best_ask", pending["price"])
-            if pending["price"] < best_ask:
-                # Patient order below ask - use dynamic fill calculation
-                price_diff = best_ask - pending["price"]
-                price_diff_pct = price_diff / best_ask if best_ask > 0 else 0
+            current_ask = current_prices.get(side, best_ask) if current_prices else best_ask
+            is_hedge = pending.get("is_hedge", False)
 
-                # Price movement factor: orders closer to ask fill faster
-                # Also consider if price moved toward our limit
-                if current_prices:
-                    side = pending["side"]
-                    new_ask = current_prices.get(side, best_ask)
-                    if new_ask < best_ask:
-                        # Price moved toward our limit - higher fill chance
-                        cumulative_prob *= 1.3
-                    elif new_ask > best_ask:
-                        # Price moved away - lower fill chance
-                        cumulative_prob *= 0.7
+            # STRICT PRICE-TOUCH MODE for hedge orders (Feb 2, 2026)
+            # Hedge orders only fill when market ask <= our bid (price must touch)
+            if self.config.strict_hedge_fills and is_hedge:
+                if current_ask > pending["price"]:
+                    # Price hasn't touched our bid yet - no fill
+                    logger.debug(
+                        f"[PAPER_HEDGE] {side} waiting: ask=${current_ask:.4f} > bid=${pending['price']:.4f}"
+                    )
+                    continue
+                # Price touched our bid - fill immediately
+                logger.info(
+                    f"[PAPER_HEDGE] {side} TOUCHED: ask=${current_ask:.4f} <= bid=${pending['price']:.4f}"
+                )
+                cumulative_prob = 1.0  # Guaranteed fill when price touches
+            else:
+                # PROBABILISTIC MODE (original logic for entry orders)
+                # Calculate cumulative fill probability based on time
+                # P(fill by t) = 1 - (1 - base)^(t/expected_time)
+                base_prob = self.config.fill_probability
+                cumulative_prob = 1 - (1 - base_prob) ** (order_age / expected_fill_time)
 
-                # Distance penalty
-                distance_factor = max(0.5, 1.0 - (price_diff * 15))
-                cumulative_prob *= distance_factor
+                # Adjust for price distance from ask
+                if pending["price"] < best_ask:
+                    # Patient order below ask - use dynamic fill calculation
+                    price_diff = best_ask - pending["price"]
+                    price_diff_pct = price_diff / best_ask if best_ask > 0 else 0
+
+                    # Price movement factor: orders closer to ask fill faster
+                    # Also consider if price moved toward our limit
+                    if current_prices:
+                        if current_ask < best_ask:
+                            # Price moved toward our limit - higher fill chance
+                            cumulative_prob *= 1.3
+                        elif current_ask > best_ask:
+                            # Price moved away - lower fill chance
+                            cumulative_prob *= 0.7
+
+                    # Distance penalty
+                    distance_factor = max(0.5, 1.0 - (price_diff * 15))
+                    cumulative_prob *= distance_factor
 
             # NOTE: Removed per-tick competition check - it compounded to nearly 0% over many ticks
             # Competition is already modeled in the base fill_probability (55%)
