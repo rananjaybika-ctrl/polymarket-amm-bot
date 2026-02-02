@@ -55,26 +55,37 @@ AGGRESSIVE = TradingConfig(
 
 ## Performance Summary
 
-### Cross-Validation Results
+### Cross-Validation Results (TIME180s_SKIP + OBI)
 
-| Period | Hours | Trades | $/hr @50sh | Dir Acc | Status |
-|--------|-------|--------|------------|---------|--------|
-| IS (Jan 16-19) | 81.7 | 90 | $7.76 | 68.9% | Training |
-| OOS3 (Jan 22-23) | 26.4 | 84 | $17.59 | 70.2% | Validated |
-| OOS4 (Jan 23-24) | 24.2 | 145 | **$16.72** | 72.4% | Validated |
+| Period | Hours | Trades | PnL @50sh | $/hr | Win% | Passive% | Status |
+|--------|-------|--------|-----------|------|------|----------|--------|
+| IS+OOS2 (Jan 16-19) | 23.4 | 90 | $16 | $0.68 | 55.6% | 63.3% | Training |
+| OOS3+4 (Jan 22-24) | 47.1 | 300 | $253 | $5.36 | 56.0% | 70.0% | Validated |
+| OOS5 (Jan 26) | 41.7 | 234 | $24 | $0.58 | 59.8% | 62.4% | Validated |
+| **OOS7 (Jan 29-30)** | **18.95** | **232** | **$261** | **$13.78** | **54.3%** | **71.1%** | **Validated** |
+| **OOS8 (Jan 31)** | **18.12** | **267** | **$166** | **$9.17** | **53.2%** | **72.3%** | **Validated** |
 
-**Key insight:** Direction accuracy is remarkably consistent (68.9% -> 70.2% -> 72.4%) across all periods.
+**Combined OOS7+OOS8:** 37.07 hours, 499 trades, **$427 total**, **$11.53/hr**
 
-### OOS4 Details (24.2 hours, Jan 23-24)
+*Note: IS+OOS2 is older data with OBI OFF and limited 60Hz coverage (23h).
+OOS7/OOS8 are the primary validation sets (60Hz + OBI ON). Don't over-emphasize IS+OOS2 results.*
+
+### Validation Data Sources (Feb 2, 2026)
+- All datasets: `research/findings/data/timestop_offset_v2_results.csv` (CURRENT_TS180_NOSL_NOMML)
+- OOS8: `research/findings/data/oos8_grid_results.csv` (CURRENT_TS180_NOSL_NOMML)
+
+**Key insight:** Direction accuracy clusters around 54-60% across all OOS periods with consistent passive fill rates (62-72%).
+
+### OOS7 Details (18.95 hours, Jan 29-30)
 
 | Metric | Value |
 |--------|-------|
-| Total PnL @50sh | $404.62 |
-| Hourly Rate | $16.72/hr |
-| Direction Accuracy | 72.4% |
-| Trades | 145 |
-| Passive Fill Rate | ~55% |
-| Time-Stop Exits | ~28% |
+| Total PnL @50sh | $261.15 |
+| Hourly Rate | $13.78/hr |
+| Direction Accuracy | 54.3% |
+| Trades | 232 |
+| Passive Fill Rate | 71.1% |
+| Avg Pair Cost | $0.97 |
 
 ### Exit Breakdown (In-Sample)
 
@@ -129,16 +140,17 @@ if skip_high_entry and winner_ask >= 0.90:
 
 **Important:** Skip rule ONLY applies to PHASE 1 (new entries). PHASE 2 (hedging) is NEVER blocked.
 
-### Cross-Validation Results (157.4 hours, 456 markets)
+### Cross-Validation Results (149.4 hours, TIME180s_SKIP + OBI)
 
-| Dataset | Hours | TIME120s_SKIP | TIME180s_SKIP | Winner |
-|---------|-------|---------------|---------------|--------|
-| IS+OOS2 | 69.4 | **$11.98/hr** | $9.65/hr | TIME120s |
-| OOS3+4 | 47.1 | **$9.32/hr** | $8.12/hr | TIME120s |
-| OOS5 | 40.9 | $2.98/hr | $4.39/hr | TIME180s* |
-| **Total** | **157.4** | **~$9.00 avg** | ~$7.80 avg | **TIME120s** |
+| Dataset | Hours | Trades | $/hr | Win% | Status |
+|---------|-------|--------|------|------|--------|
+| IS+OOS2 | 23.4 | 90 | $0.68 | 55.6% | Training |
+| OOS3+4 | 47.1 | 300 | $5.36 | 56.0% | Validated |
+| OOS5 | 41.7 | 234 | $0.58 | 59.8% | Validated |
+| OOS7 | 18.95 | 232 | $13.78 | 54.3% | Validated |
+| OOS8 | 18.12 | 267 | $9.17 | 53.2% | Validated |
 
-*OOS5 anomalous (smaller sample, different market conditions)
+*Source: timestop_offset_v2_results.csv + oos8_grid_results.csv (CURRENT_TS180_NOSL_NOMML)*
 
 ---
 

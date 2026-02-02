@@ -172,11 +172,13 @@ DEFAULT_MIN_VELOCITY_BPS = 0.50
 # Updated Jan 20, 2026: 12% SL optimal - prevents resolution losses, 19.6% trigger rate
 DEFAULT_STOP_LOSS_PCT = 0.12     # 12% stop-loss (was None)
 
-# Z-score volatility filter (from grid search Jan 22, 2026)
-# Best zone: 0 < z < 1.5 (52% improvement over no filter)
-DEFAULT_ZSCORE_LO = 0.0         # Skip low volatility periods (z < 0)
-DEFAULT_ZSCORE_HI = 1.5         # Skip high volatility periods (z > 1.5)
-DEFAULT_ZSCORE_METHOD = "ewma"  # Best method for $/hr
+# Z-score volatility filter - DISABLED Feb 2, 2026
+# Testing showed OU z-scores are strongly negative (mean=-11.26), not in [0, 1.5]
+# Filter blocked 99.7% of trades. Grid search v2 ($5.51/hr) does NOT use z-score filtering.
+# To re-enable: set z_lo and z_hi in TRADING_CONFIGS.py (not None)
+DEFAULT_ZSCORE_LO = None        # None = disabled (was 0.0)
+DEFAULT_ZSCORE_HI = None        # None = disabled (was 1.5)
+DEFAULT_ZSCORE_METHOD = "ewma"  # Best method for $/hr (if re-enabled)
 
 # Timing - Min time remaining before resolution to allow new entries
 # SOURCE OF TRUTH: TRADING_CONFIGS.py min_time_remaining=240.0 (Feb 1, 2026)
@@ -809,8 +811,8 @@ class EnhancedSpikeStrategy:
         # Best zone from grid search: 0 < z < 1.5
         zscore_tracker: Optional["LiveZScoreTracker"] = None,
         zscore_filter_enabled: bool = True,
-        zscore_lo: float = DEFAULT_ZSCORE_LO,
-        zscore_hi: float = DEFAULT_ZSCORE_HI,
+        zscore_lo: Optional[float] = DEFAULT_ZSCORE_LO,
+        zscore_hi: Optional[float] = DEFAULT_ZSCORE_HI,
         # TIME120s_SKIP parameters (Jan 27, 2026 optimization)
         # Skip entries >= $0.90 (unhedgeable due to Polymarket $1 minimum)
         skip_high_entry: bool = False,
@@ -1026,15 +1028,19 @@ class EnhancedSpikeStrategy:
         # Maximum we can pay and still achieve target pair cost
         max_loser = self.target_pair_cost - winner_entry
 
-        # Bid: current ask - expected drop, capped at max
-        loser_bid = min(loser_ask - expected_drop, max_loser)
+        # FIX Feb 2, 2026: Use theoretical loser price (1.0 - winner_entry), NOT actual loser_ask
+        # Backtest uses: loser_bid = min((1.0 - winner_entry) - expected_drop, max_loser)
+        # Live was using: loser_bid = min(loser_ask - expected_drop, max_loser)
+        # When loser_ask > theoretical (due to spread), live would bid HIGHER = worse pair costs
+        theoretical_loser = 1.0 - winner_entry
+        loser_bid = min(theoretical_loser - expected_drop, max_loser)
 
         # Floor at 1 cent
         result = max(loser_bid, 0.01)
 
         logger.debug(
             f"[ENHSPIKE] Magnitude bid: mag={magnitude_pct:.4f}%, expected_drop=${expected_drop:.3f}, "
-            f"loser_ask=${loser_ask:.3f}, winner=${winner_entry:.3f} -> bid=${result:.3f}"
+            f"theoretical_loser=${theoretical_loser:.3f}, winner=${winner_entry:.3f} -> bid=${result:.3f}"
         )
 
         return result
@@ -1175,15 +1181,17 @@ class EnhancedSpikeStrategy:
 
         # CRITICAL: Reject if velocity contradicts spike direction
         # This is the KEY insight from backtest analysis
-        if spike_dir == "UP" and velocity_bps < -0.10:
+        # FIX Feb 2, 2026: Use <= and >= to match core velocity_confirms_spike()
+        # Core returns TRUE if velocity_bps > -threshold, so REJECT when <= -threshold
+        if spike_dir == "UP" and velocity_bps <= -0.10:
             logger.debug(
-                f"[ENHANCED] REJECTED: Spike UP but velocity={velocity_bps:.3f} < -0.10 (contradicts)"
+                f"[ENHANCED] REJECTED: Spike UP but velocity={velocity_bps:.3f} <= -0.10 (contradicts)"
             )
             return False, 0.0, f"Velocity contradicts UP spike (v={velocity_bps:.3f})"
 
-        if spike_dir == "DOWN" and velocity_bps > 0.10:
+        if spike_dir == "DOWN" and velocity_bps >= 0.10:
             logger.debug(
-                f"[ENHANCED] REJECTED: Spike DOWN but velocity={velocity_bps:.3f} > 0.10 (contradicts)"
+                f"[ENHANCED] REJECTED: Spike DOWN but velocity={velocity_bps:.3f} >= 0.10 (contradicts)"
             )
             return False, 0.0, f"Velocity contradicts DOWN spike (v={velocity_bps:.3f})"
 
@@ -1524,9 +1532,11 @@ class EnhancedSpikeStrategy:
 
         s = self.state
 
-        # Don't place new orders if market ending soon
-        if time_remaining < self.min_time_remaining:
-            logger.debug(f"[ENHSPIKE] Skipping: {time_remaining:.0f}s remaining < {self.min_time_remaining:.0f}s min")
+        # Don't place NEW ENTRIES if market ending soon
+        # FIX Feb 2, 2026: Only block new entries, not time-stop hedges for existing positions
+        # Previously this returned [] for ALL orders, preventing time-stop from executing
+        if time_remaining < self.min_time_remaining and s.first_fill_side is None:
+            logger.debug(f"[ENHSPIKE] Skipping NEW ENTRY: {time_remaining:.0f}s remaining < {self.min_time_remaining:.0f}s min")
             return []
 
         # SPIKE DETECTION MODE (preferred when binance_price provided)
@@ -1535,7 +1545,10 @@ class EnhancedSpikeStrategy:
         enhanced_score = 0.0
 
         # Z-SCORE FILTER: Skip trades in suboptimal volatility regimes
-        # Best zone from grid search (Jan 22, 2026): 0 < z < 1.5
+        # DISABLED Feb 2, 2026: Testing showed filter blocked 99.7% of trades
+        # OU z-scores are strongly negative (mean=-11.26), not in [0, 1.5] range
+        # Grid search v2 (canonical $5.51/hr) does NOT use z-score filtering
+        # To re-enable: set z_lo and z_hi in TRADING_CONFIGS.py (not None)
         zscore_tradeable = True
         current_zscore = 0.0
 
@@ -1544,7 +1557,14 @@ class EnhancedSpikeStrategy:
             current_zscore = self.zscore_tracker.update(binance_price)
 
             # Check if z-score is in tradeable zone (only for new entries)
-            if self.zscore_filter_enabled and s.first_fill_side is None:
+            # Skip filter entirely if z_lo or z_hi is None (DISABLED)
+            filter_enabled = (
+                self.zscore_filter_enabled and
+                self.zscore_lo is not None and
+                self.zscore_hi is not None
+            )
+
+            if filter_enabled and s.first_fill_side is None:
                 zscore_tradeable = self.zscore_tracker.should_trade(
                     z_lo=self.zscore_lo,
                     z_hi=self.zscore_hi
@@ -1703,15 +1723,14 @@ class EnhancedSpikeStrategy:
                     )
                 return []
 
-        # Rate limit quote generation
-        if current_time - s.last_quote_time < QUOTE_REFRESH_INTERVAL:
-            return []
+        # =========================================================================
+        # EXIT LOGIC: STOP-LOSS AND TIME-STOP (BEFORE rate limiting!)
+        # FIX Feb 2, 2026: Exit logic must NEVER be blocked by rate limiting.
+        # Previously, rate limit at line 1712 would return [] before reaching
+        # stop-loss and time-stop checks, preventing exits when rate-limited.
+        # =========================================================================
 
-        s.last_quote_time = current_time
-        s.last_velocity = velocity_bps
-        s.phase = EnhancedSpikePhase.QUOTING
-
-        # STOP-LOSS CHECK
+        # STOP-LOSS CHECK (executes regardless of rate limit)
         stop_loss_order = self.get_stop_loss_order(up_bid, up_ask, down_bid, down_ask)
         if stop_loss_order:
             logger.info(
@@ -1719,7 +1738,7 @@ class EnhancedSpikeStrategy:
             )
             return [stop_loss_order]
 
-        # TIME-STOP CHECK (180s default)
+        # TIME-STOP CHECK (executes regardless of rate limit)
         # Exit if position held too long and not in profit
         if s.first_fill_side is not None and s.first_fill_time is not None:
             elapsed = current_time - s.first_fill_time
@@ -1753,6 +1772,16 @@ class EnhancedSpikeStrategy:
                         f"[ENHSPIKE] Time-stop skipped: {elapsed:.0f}s elapsed but in profit "
                         f"(winner bid=${winner_bid:.3f} >= entry=${s.first_fill_price:.3f})"
                     )
+
+        # =========================================================================
+        # RATE LIMIT: Only applies to NEW ENTRY/HEDGE quotes, not exits above
+        # =========================================================================
+        if current_time - s.last_quote_time < QUOTE_REFRESH_INTERVAL:
+            return []
+
+        s.last_quote_time = current_time
+        s.last_velocity = velocity_bps
+        s.phase = EnhancedSpikePhase.QUOTING
 
         # Dynamic hedge target tightening
         if s.locked_hedge_target is not None:
@@ -2486,7 +2515,7 @@ def calculate_magnitude_loser_bid(
 
     Args:
         magnitude_pct: Absolute BTC % change
-        loser_ask: Current loser side ask price
+        loser_ask: Current loser side ask price (kept for API compatibility, NOT used)
         winner_entry: Price we paid for winner
         target_pair: Target pair cost (default $0.99)
         regime: Volatility regime ('LOW', 'MEDIUM', 'HIGH')
@@ -2498,7 +2527,10 @@ def calculate_magnitude_loser_bid(
     expected_drop = DROP_MULTIPLIER * magnitude_pct + DROP_INTERCEPT + regime_bonus
     expected_drop = max(0.02, min(0.20, expected_drop))
     max_loser = target_pair - winner_entry
-    loser_bid = min(loser_ask - expected_drop, max_loser)
+    # FIX Feb 2, 2026: Use theoretical loser (1.0 - winner_entry), NOT loser_ask
+    # Matches backtest formula for consistent pair costs
+    theoretical_loser = 1.0 - winner_entry
+    loser_bid = min(theoretical_loser - expected_drop, max_loser)
     return max(loser_bid, 0.01)
 
 
@@ -2552,10 +2584,11 @@ def should_take_enhanced_signal(
         return False, 0.0, "No spike detected"
 
     # CRITICAL: Reject if velocity contradicts spike direction
-    if spike_dir == "UP" and velocity_bps < -0.10:
+    # FIX Feb 2, 2026: Use <= and >= to match core velocity_confirms_spike()
+    if spike_dir == "UP" and velocity_bps <= -0.10:
         return False, 0.0, f"Velocity contradicts UP spike (v={velocity_bps:.3f})"
 
-    if spike_dir == "DOWN" and velocity_bps > 0.10:
+    if spike_dir == "DOWN" and velocity_bps >= 0.10:
         return False, 0.0, f"Velocity contradicts DOWN spike (v={velocity_bps:.3f})"
 
     # Compute composite score

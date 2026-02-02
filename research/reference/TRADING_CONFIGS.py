@@ -154,9 +154,12 @@ AGGRESSIVE = TradingConfig(
     # Cycling ON for more trades
     use_cycling=True,
 
-    # Z-score filter
-    z_lo=0.0,
-    z_hi=1.5,
+    # Z-score filter - DISABLED (Feb 2, 2026)
+    # Testing showed filter blocked 99.7% of trades due to OU z-score mismatch
+    # OU z-scores are strongly negative (mean=-11.26), not in [0, 1.5] range
+    # Grid search v2 (canonical $5.51/hr) does NOT use z-score filtering
+    z_lo=None,
+    z_hi=None,
 
     # TIME180s_SKIP parameters (updated from TIME120s, Jan 31, 2026)
     skip_high_entry=True,        # Skip entries >= threshold (unhedgeable)
@@ -349,10 +352,12 @@ def print_config_summary():
 #   - Range: 0.015% to 0.10% based on EWMA volatility z-score
 #   - CRITICAL: Fixed 0.02% was WRONG - always use OU adaptive
 #
-# z_lo = 0.0, z_hi = 1.5
-#   - Z-score volatility filter bounds for entry
-#   - Only trade when volatility z-score is between 0.0 and 1.5
-#   - Filters out extreme low/high volatility regimes
+# z_lo = None, z_hi = None (DISABLED Feb 2, 2026)
+#   - Z-score volatility filter is DISABLED
+#   - Testing showed OU z-scores are strongly negative (mean=-11.26)
+#   - Filter [0.0, 1.5] blocked 99.7% of trades (wrong bounds for OU params)
+#   - Grid search v2 (canonical $5.51/hr) does NOT use z-score filtering
+#   - To re-enable: set z_lo and z_hi to actual float values
 #
 # use_cycling = True
 #   - Re-enter same market after hedge fills
