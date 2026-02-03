@@ -129,23 +129,23 @@
                             </div>
                             <div class="config-field">
                                 <label>Time Stop (s)</label>
-                                <input type="number" id="aggressive-time-stop" value="180" min="30" step="30" title="Exit after 180s if not filled (from TRADING_CONFIGS.py)">
+                                <input type="number" id="aggressive-time-stop" value="30" min="10" step="10" title="Exit after 30s if not filled (EWMA_1000+TS30 winner from TRADING_CONFIGS.py)">
                             </div>
                             <div class="config-field">
                                 <label>Z-Lo</label>
-                                <input type="number" id="aggressive-z-lo" value="0.0" step="0.1" min="0" max="2" title="Z-score lower bound for entry">
+                                <input type="number" id="aggressive-z-lo" value="" step="0.1" min="-5" max="2" title="Z-score lower bound (DISABLED - leave empty for EWMA config)">
                             </div>
                             <div class="config-field">
                                 <label>Z-Hi</label>
-                                <input type="number" id="aggressive-z-hi" value="1.5" step="0.1" min="0.5" max="3" title="Z-score upper bound for entry">
+                                <input type="number" id="aggressive-z-hi" value="" step="0.1" min="-5" max="3" title="Z-score upper bound (DISABLED - leave empty for EWMA config)">
                             </div>
                             <div class="config-field">
                                 <label>Target Shares</label>
-                                <input type="number" id="aggressive-base-size" value="10" min="5" step="5" title="Shares per trade (10 for testing)">
+                                <input type="number" id="aggressive-base-size" value="10" min="5" step="5" title="Shares per trade (TESTING: 10, PRODUCTION: 50)">
                             </div>
                             <div class="config-field">
                                 <label>Skip High $</label>
-                                <input type="number" id="aggressive-high-entry" value="0.80" min="0.70" max="0.95" step="0.05" title="Skip entries at or above this price">
+                                <input type="number" id="aggressive-high-entry" value="0.80" min="0.70" max="0.95" step="0.05" title="Skip entries >= this price (TESTING: $0.80, PRODUCTION: $0.90)">
                             </div>
                             <div class="config-field">
                                 <label>Cycling</label>

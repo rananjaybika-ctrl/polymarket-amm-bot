@@ -71,13 +71,25 @@ logger = logging.getLogger(__name__)
 # CONSTANTS
 # =============================================================================
 
-# Spike detection parameters - CANONICAL from TRADING_CONFIGS.py (Jan 27, 2026)
+# Spike detection parameters - CANONICAL from TRADING_CONFIGS.py (Feb 3, 2026)
 # Source of truth: research/reference/TRADING_CONFIGS.py AGGRESSIVE config
 # CANONICAL: lookback_ms=1200, lookback_ticks=72 at 60Hz
 # For live trading with bookTicker (~60Hz avg): 72 ticks ≈ 1200ms
 DEFAULT_SPIKE_LOOKBACK = 72      # 72 ticks ≈ 1200ms at ~60Hz bookTicker (CANONICAL)
 DEFAULT_SPIKE_THRESHOLD = 0.02  # 0.02% minimum spike magnitude
 SPIKE_HISTORY_SIZE = 50         # Keep last 50 prices for spike detection
+
+# Spike detection method (Feb 3, 2026)
+# "FIXED" = fixed lookback window (legacy), "EWMA_1000" = EWMA with 1000ms half-life (winner)
+DEFAULT_SPIKE_METHOD = "EWMA_1000"  # EWMA winner from research
+
+# EWMA alpha values pre-computed for 60Hz data
+# Alpha = 1 - 0.5 ** (1.0 / (halflife_ms / 16.67))
+EWMA_ALPHA = {
+    "EWMA_500": 1 - 0.5 ** (1.0 / (500 / 16.67)),   # ~0.023
+    "EWMA_1000": 1 - 0.5 ** (1.0 / (1000 / 16.67)), # ~0.0115
+    "EWMA_1200": 1 - 0.5 ** (1.0 / (1200 / 16.67)), # ~0.0096
+}
 
 # Magnitude → Loser Bid linear model coefficients (v2: recalibrated Jan 18, 2026)
 # See research/HEDGE_PRICING_FINDINGS.md for analysis details
@@ -181,8 +193,10 @@ DEFAULT_ZSCORE_HI = None        # None = disabled (was 1.5)
 DEFAULT_ZSCORE_METHOD = "ewma"  # Best method for $/hr (if re-enabled)
 
 # Timing - Min time remaining before resolution to allow new entries
-# SOURCE OF TRUTH: TRADING_CONFIGS.py min_time_remaining=240.0 (Feb 1, 2026)
-MIN_TIME_REMAINING = 240
+# DEPRECATED: This constant is NOT USED - min_time_remaining is passed via constructor
+# SOURCE OF TRUTH: TRADING_CONFIGS.py min_time_remaining (currently 90.0 for EWMA+TS30)
+# Formula: min_time_remaining = time_stop_seconds + 60s buffer
+MIN_TIME_REMAINING = 90  # DEPRECATED - kept for backward compat, use constructor param instead
 QUOTE_REFRESH_INTERVAL = 0.5
 
 
@@ -796,6 +810,8 @@ class EnhancedSpikeStrategy:
         spike_lookback: int = DEFAULT_SPIKE_LOOKBACK,
         spike_threshold: float = DEFAULT_SPIKE_THRESHOLD,
         target_pair_cost: float = DEFAULT_TARGET_PAIR_COST,
+        # Spike detection method (Feb 3, 2026): "FIXED" or "EWMA_1000"
+        spike_method: str = DEFAULT_SPIKE_METHOD,
         grid_levels: int = DEFAULT_GRID_LEVELS,
         max_imbalance_pct: float = DEFAULT_MAX_IMBALANCE_PCT,
         max_imbalance_shares: int = DEFAULT_MAX_IMBALANCE_SHARES,
@@ -848,6 +864,13 @@ class EnhancedSpikeStrategy:
         self.target_pair_cost = target_pair_cost
         self._binance_price_history: List[float] = []  # Local buffer (slow, fallback)
         self._binance_client = binance_client  # Shared 60Hz buffer (fast, preferred)
+
+        # Spike detection method (Feb 3, 2026)
+        # "FIXED" = fixed lookback window (legacy)
+        # "EWMA_500/1000/1200" = EWMA with specified half-life (winner: EWMA_1000)
+        self.spike_method = spike_method
+        self._ewma_price: Optional[float] = None  # EWMA state (just one float!)
+        self._ewma_alpha: float = EWMA_ALPHA.get(spike_method, 0.0115)  # Default to EWMA_1000
 
         # OU adaptive threshold (replaces fixed threshold when set)
         self.ou_adaptive_threshold = ou_adaptive_threshold
@@ -917,8 +940,13 @@ class EnhancedSpikeStrategy:
         stop_info = f"{stop_loss_pct:.0%}" if stop_loss_pct else "None"
         skip_info = f", skip_high_entry={skip_high_entry} (>=${high_entry_threshold:.2f})" if skip_high_entry else ""
         multicycle_info = f", multicycle={enable_multicycle} ({max_cycles}x{shares_per_cycle})" if enable_multicycle else ""
+        spike_info = f"spike_method={spike_method}"
+        if spike_method.startswith("EWMA_"):
+            spike_info += f" (alpha={self._ewma_alpha:.4f})"
+        else:
+            spike_info += f", lookback={spike_lookback}"
         logger.info(
-            f"[ENHSPIKE] Initialized: base_size={base_size}, lookback={spike_lookback}, "
+            f"[ENHSPIKE] Initialized: base_size={base_size}, {spike_info}, "
             f"threshold={spike_threshold:.2f}%, target_pair=${target_pair_cost:.2f}, "
             f"stop_loss={stop_info}, time_stop={time_stop_seconds}s, min_time={min_time_remaining}s, "
             f"cycling={enable_cycling}{zscore_info}{skip_info}{multicycle_info}"
@@ -930,10 +958,11 @@ class EnhancedSpikeStrategy:
 
     def detect_spike(self, binance_price: float) -> Tuple[Optional[str], float]:
         """
-        Detect raw Binance price spike over last N ticks.
+        Detect raw Binance price spike using configured method.
 
-        This REPLACES the velocity-based zone detection with faster, more
-        accurate raw spike detection.
+        Supports two detection methods (configurable via spike_method):
+        1. FIXED: Compare current price to price N ticks ago (legacy)
+        2. EWMA_1000: Compare current price to EWMA (winner - reduces redundant signals)
 
         Uses OU-based adaptive threshold if ou_adaptive_threshold is set,
         otherwise falls back to fixed spike_threshold.
@@ -944,6 +973,66 @@ class EnhancedSpikeStrategy:
         Returns:
             (direction, magnitude_pct) - direction is "UP" or "DOWN" or None
             magnitude_pct is the absolute percentage change
+        """
+        # Dispatch to appropriate method
+        if self.spike_method.startswith("EWMA_"):
+            return self._detect_spike_ewma(binance_price)
+        else:
+            return self._detect_spike_fixed(binance_price)
+
+    def _detect_spike_ewma(self, binance_price: float) -> Tuple[Optional[str], float]:
+        """
+        EWMA spike detection (Feb 3, 2026 winner).
+
+        Compares current price to exponentially weighted moving average.
+        Key advantage: After a spike, EWMA adapts, reducing redundant signals
+        from the same price move. One price move → one spike (not 14).
+
+        State: Just ONE float (self._ewma_price) - very lightweight.
+        """
+        # Initialize EWMA on first tick
+        if self._ewma_price is None:
+            self._ewma_price = binance_price
+            return None, 0
+
+        # Update EWMA: O(1) time, O(1) space
+        self._ewma_price = self._ewma_alpha * binance_price + (1 - self._ewma_alpha) * self._ewma_price
+
+        # Calculate deviation from EWMA
+        if self._ewma_price <= 0:
+            return None, 0
+
+        change_pct = (binance_price - self._ewma_price) / self._ewma_price * 100
+        magnitude = abs(change_pct)
+
+        # Use OU adaptive threshold if available, otherwise fixed threshold
+        if self.ou_adaptive_threshold is not None:
+            threshold = self.ou_adaptive_threshold.update(binance_price)
+        else:
+            threshold = self.spike_threshold
+
+        if magnitude >= threshold:
+            direction = "UP" if change_pct > 0 else "DOWN"
+
+            # Update state
+            self.state.last_spike_direction = direction
+            self.state.last_spike_magnitude = magnitude
+            self.state.last_spike_time = time.time()
+
+            logger.debug(
+                f"[ENHSPIKE] EWMA spike: {direction} {magnitude:.4f}% "
+                f"(threshold={threshold:.4f}%, ewma=${self._ewma_price:.2f}, current=${binance_price:.2f})"
+            )
+            return direction, magnitude
+
+        return None, 0
+
+    def _detect_spike_fixed(self, binance_price: float) -> Tuple[Optional[str], float]:
+        """
+        FIXED lookback spike detection (legacy method).
+
+        Compares current price to price N ticks ago.
+        Issue: After a spike, every tick for ~1200ms shows the same spike = 14 signals.
         """
         # Use shared BinanceClient buffer if available (60Hz, fast warmup)
         # Otherwise fall back to local buffer (5s rate, slow warmup)
@@ -985,7 +1074,7 @@ class EnhancedSpikeStrategy:
             self.state.last_spike_time = time.time()
 
             logger.debug(
-                f"[ENHSPIKE] Spike detected: {direction} {magnitude:.4f}% "
+                f"[ENHSPIKE] FIXED spike: {direction} {magnitude:.4f}% "
                 f"(threshold={threshold:.4f}%, ${previous:.2f} -> ${current:.2f})"
             )
             return direction, magnitude
@@ -1048,6 +1137,7 @@ class EnhancedSpikeStrategy:
     def clear_spike_history(self) -> None:
         """Clear spike detection history (call on new market)."""
         self._binance_price_history = []
+        self._ewma_price = None  # Reset EWMA state
         self.state.last_spike_direction = None
         self.state.last_spike_magnitude = 0.0
         self.state.last_spike_time = 0.0

@@ -541,17 +541,23 @@ function stopCountdown(modeName) {
 // ============================================
 
 function getAggressiveConfig() {
+    // Handle z-score values - empty means disabled (null) for EWMA config
+    const zLoVal = document.getElementById('aggressive-z-lo').value;
+    const zHiVal = document.getElementById('aggressive-z-hi').value;
+    const z_lo = zLoVal === '' ? null : parseFloat(zLoVal);
+    const z_hi = zHiVal === '' ? null : parseFloat(zHiVal);
+
     return {
         mode: document.querySelector('input[name="aggressive_mode"]:checked').value,
         market: 'btc-15m',
         start_datetime: document.getElementById('aggressive-start').value,
         end_datetime: document.getElementById('aggressive-end').value,
         starting_balance: parseFloat(document.getElementById('aggressive-balance-input').value),
-        // AGGRESSIVE specific parameters
+        // AGGRESSIVE specific parameters - EWMA_1000 + TS30 winner (Feb 3, 2026)
         lookback_ms: parseInt(document.getElementById('aggressive-lookback').value),
         time_stop_seconds: parseFloat(document.getElementById('aggressive-time-stop').value),
-        z_lo: parseFloat(document.getElementById('aggressive-z-lo').value),
-        z_hi: parseFloat(document.getElementById('aggressive-z-hi').value),
+        z_lo: z_lo,  // null = disabled (EWMA config doesn't use z-score filter)
+        z_hi: z_hi,  // null = disabled (EWMA config doesn't use z-score filter)
         base_size: parseInt(document.getElementById('aggressive-base-size').value),
         high_entry_threshold: parseFloat(document.getElementById('aggressive-high-entry').value),
         use_cycling: document.getElementById('aggressive-cycling').checked,

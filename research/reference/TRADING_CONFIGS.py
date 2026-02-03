@@ -91,9 +91,20 @@ class TradingConfig:
     premature_stop_pct: float
     premature_pnl_lost: float
 
+    # =========================================================================
+    # FIELDS WITH DEFAULTS (must come after non-default fields)
+    # =========================================================================
+
+    # Spike detection method (Feb 3, 2026)
+    # "FIXED" = fixed lookback window, "EWMA_1000" = EWMA with 1000ms half-life
+    spike_method: str = "FIXED"  # "FIXED", "EWMA_500", "EWMA_1000", "EWMA_1200"
+
+    # Cycling gap (Feb 3, 2026)
+    min_cycle_gap_ms: int = 50  # Minimum gap between cycles (ms)
+
     # TIME120s_SKIP parameters (Jan 27, 2026)
     skip_high_entry: bool = False  # Skip entries >= high_entry_threshold
-    high_entry_threshold: float = 0.80  # TESTING: $0.80 (revert to $0.90 for production)
+    high_entry_threshold: float = 0.90  # PRODUCTION: $0.90
     min_time_remaining: float = 60.0  # Minimum seconds before market end
 
     # OBI (Orderbook Imbalance) filter (Jan 28, 2026)
@@ -129,9 +140,9 @@ class TradingConfig:
 # VALIDATED CONFIGURATIONS (Jan 24, 2026)
 # =============================================================================
 
-# TIME180s_SKIP + OBI VALIDATED (Jan 31, 2026): ~$9.00/hr avg across 157.4h cross-validation
-# +24% hourly rate vs TIME120s, skip rule eliminates turkey problem losses
-# OBI filter adds +4.1pp accuracy when orderbook confirms spike direction (binary check: obi > 0)
+# EWMA_1000 + TS30 + OLD HEDGE VALIDATED (Feb 3, 2026): +$13.80/hr on 60Hz datasets
+# EWMA reduces redundant signals: one price move → one spike (not 14)
+# See: research/findings/AGGRESSIVE_EWMA_FINDINGS.md
 #
 # MULTI-CYCLE ABANDONED (Jan 31, 2026):
 # - Multi-cycle destroyed profitability: 39.8% win rate vs 54.3% single-cycle
@@ -146,13 +157,18 @@ AGGRESSIVE = TradingConfig(
     lookback_ticks=72,
     lookback_ms=1200,
 
-    # STOP SETTINGS - USE 180s TIME-STOP (validated Jan 31, 2026)
-    # See: research/findings/TIMESTOP_OFFSET_STUDY_20260131.md
+    # SPIKE DETECTION - EWMA_1000 (Feb 3, 2026 winner)
+    # EWMA with 1000ms half-life reduces redundant signals from same price move
+    spike_method="EWMA_1000",    # Winner config (was "FIXED")
+
+    # STOP SETTINGS - USE 30s TIME-STOP (Feb 3, 2026 EWMA winner)
+    # See: research/findings/AGGRESSIVE_EWMA_FINDINGS.md
     stop_loss_pct=None,         # NO price-based stop
-    time_stop_seconds=180.0,    # Exit after 180s if not filled (CURRENT_TS180 winner)
+    time_stop_seconds=30.0,     # Exit after 30s if not filled (E1000_TS30 winner)
 
     # Cycling ON for more trades
     use_cycling=True,
+    min_cycle_gap_ms=50,        # Faster cycling (was 200)
 
     # Z-score filter - DISABLED (Feb 2, 2026)
     # Testing showed filter blocked 99.7% of trades due to OU z-score mismatch
@@ -161,10 +177,10 @@ AGGRESSIVE = TradingConfig(
     z_lo=None,
     z_hi=None,
 
-    # TIME180s_SKIP parameters (updated from TIME120s, Jan 31, 2026)
+    # TS30 parameters (Feb 3, 2026 - updated for EWMA winner)
     skip_high_entry=True,        # Skip entries >= threshold (unhedgeable)
-    high_entry_threshold=0.80,   # TESTING: $0.80 (revert to $0.90 for production)
-    min_time_remaining=240.0,    # time_stop + 60s buffer = 180 + 60 = 240
+    high_entry_threshold=0.90,   # PRODUCTION: $0.90
+    min_time_remaining=90.0,     # time_stop + 60s buffer = 30 + 60 = 90
 
     # SINGLE-CYCLE ONLY (Jan 31, 2026 - multi-cycle abandoned)
     # Multi-cycle destroyed profitability: 39.8% win rate vs 54.3% single
@@ -175,11 +191,11 @@ AGGRESSIVE = TradingConfig(
     # Session loss limit (Feb 1, 2026) - circuit breaker
     max_session_loss=10.0,       # TESTING: $10 limit (revert to $50 for production)
 
-    # Expected performance (at 50 shares, TIME120s_SKIP cross-validation)
-    expected_pnl=90.00,          # ~$9.00/hr * 10h example
-    expected_hourly_rate=9.00,   # at 50 shares, cross-validated
+    # Expected performance (at 50 shares, EWMA_1000 + TS30 on 60Hz datasets)
+    expected_pnl=618.43,         # Combined OOS7+OOS8+OOS9.1 (44.81h)
+    expected_hourly_rate=13.80,  # at 50 shares, 60Hz datasets
     expected_win_rate=70.0,
-    expected_trades=150,         # estimate
+    expected_trades=793,         # Combined across 44.81h
     premature_stop_pct=25.0,     # time-stop exits
     premature_pnl_lost=-2.50,
 )

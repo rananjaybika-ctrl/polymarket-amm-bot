@@ -801,9 +801,13 @@ class PaperTradingBot:
             except Exception as e:
                 logger.warning(f"[AGGRESSIVE] Failed to load OU params: {e} - using fixed threshold")
 
+            # Get spike_method from TRADING_CONFIGS (default to EWMA_1000 winner)
+            spike_method = getattr(AGGRESSIVE_CONFIG, 'spike_method', 'EWMA_1000')
+
             self._aggressive_strategy = EnhancedSpikeStrategy(
                 base_size=self.spread_base_size,
                 spike_lookback=self.spread_spike_lookback,
+                spike_method=spike_method,  # EWMA_1000 winner (Feb 3, 2026)
                 time_stop_seconds=self.time_stop_seconds,
                 stop_loss_pct=None,  # No price-based SL - use time-stop only
                 zscore_lo=self.zscore_lo,
@@ -828,7 +832,7 @@ class PaperTradingBot:
                 )
             logger.info(
                 f"[AGGRESSIVE] Initialized: base_size={self.spread_base_size}, "
-                f"spike_lookback={self.spread_spike_lookback}, time_stop={self.time_stop_seconds}s, "
+                f"spike_method={spike_method}, time_stop={self.time_stop_seconds}s, "
                 f"z_bounds=[{self.zscore_lo}, {self.zscore_hi}], skip_high>=${self.high_entry_threshold}, "
                 f"threshold={'OU_ADAPTIVE' if ou_adaptive else 'FIXED_0.02'}{multicycle_info}"
             )
@@ -4942,10 +4946,14 @@ class PaperTradingBot:
                 }
                 if self.trading_mode == "paper":
                     is_hedge = quote.get("is_hedge", False)
+                    is_market_order = quote.get("is_market_order", False)
                     exec_kwargs["is_hedge"] = is_hedge
                     # Entry (taker): instant fill at ask
                     # Hedge (maker): pending order, waits for price-touch
-                    exec_kwargs["use_pending_orders"] = is_hedge
+                    # TIME-STOP FIX (Feb 2, 2026): Market orders (time-stop) fill instantly at ask
+                    # Without this, time-stop hedge goes to pending orders with strict price-touch,
+                    # defeating the purpose of forcing a hedge before market resolution
+                    exec_kwargs["use_pending_orders"] = is_hedge and not is_market_order
 
                 result = await self._engine.execute_single_side_trade(**exec_kwargs)
 
@@ -5285,10 +5293,14 @@ class PaperTradingBot:
                 }
                 if self.trading_mode == "paper":
                     is_hedge = quote.get("is_hedge", False)
+                    is_market_order = quote.get("is_market_order", False)
                     exec_kwargs["is_hedge"] = is_hedge
                     # Entry (taker): instant fill at ask
                     # Hedge (maker): pending order, waits for price-touch
-                    exec_kwargs["use_pending_orders"] = is_hedge
+                    # TIME-STOP FIX (Feb 2, 2026): Market orders (time-stop) fill instantly at ask
+                    # Without this, time-stop hedge goes to pending orders with strict price-touch,
+                    # defeating the purpose of forcing a hedge before market resolution
+                    exec_kwargs["use_pending_orders"] = is_hedge and not is_market_order
 
                 result = await self._engine.execute_single_side_trade(**exec_kwargs)
 
@@ -5687,10 +5699,14 @@ class PaperTradingBot:
                 }
                 if self.trading_mode == "paper":
                     is_hedge = quote.get("is_hedge", False)
+                    is_market_order = quote.get("is_market_order", False)
                     exec_kwargs["is_hedge"] = is_hedge
                     # Entry (taker): instant fill at ask
                     # Hedge (maker): pending order, waits for price-touch
-                    exec_kwargs["use_pending_orders"] = is_hedge
+                    # TIME-STOP FIX (Feb 2, 2026): Market orders (time-stop) fill instantly at ask
+                    # Without this, time-stop hedge goes to pending orders with strict price-touch,
+                    # defeating the purpose of forcing a hedge before market resolution
+                    exec_kwargs["use_pending_orders"] = is_hedge and not is_market_order
 
                 result = await self._engine.execute_single_side_trade(**exec_kwargs)
 

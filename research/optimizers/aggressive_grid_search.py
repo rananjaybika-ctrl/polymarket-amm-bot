@@ -93,7 +93,7 @@ from src.core import (
 #
 # FIXED PARAMS (not part of grid - same for all tests):
 TARGET_SHARES = 50
-MIN_TIME = 240              # Entry cutoff (time_stop + 60s buffer)
+# MIN_TIME is now DYNAMIC per config: time_stop + 60s buffer (see TestConfig.min_time property)
 MIN_RUNTIME_SECS = 300      # 5 min market duration filter
 HIGH_ENTRY_THRESHOLD = 0.90 # Skip entries >= $0.90
 SPIKE_LOOKBACK = 72         # 72 ticks (1200ms at 60Hz)
@@ -116,7 +116,7 @@ DEFAULT_DROP_INTERCEPT = 0.08
 TARGET_PAIR_COST = 0.99
 
 # Cycling
-MIN_CYCLE_GAP_MS = 200
+MIN_CYCLE_GAP_MS = 50  # Faster cycling (was 200)
 
 
 # FEE MODEL: imported from src.core (polymarket_taker_fee, calculate_pnl_with_fees)
@@ -133,6 +133,8 @@ class TestConfig:
     drop_multiplier: float
     drop_intercept: float
     offset_name: str  # TIGHT, CURRENT
+    # Spike detection method
+    spike_method: str = "FIXED"  # "FIXED", "EWMA_500", "EWMA_1000", "EWMA_1200"
     # Multi-cycle parameters
     max_cycles: int = 1      # 1 = single-cycle, 2+ = multi-cycle
     shares_per_cycle: int = 50  # Shares per cycle
@@ -146,6 +148,15 @@ class TestConfig:
     def total_shares(self) -> int:
         """Total shares across all cycles."""
         return self.max_cycles * self.shares_per_cycle
+
+    @property
+    def min_time(self) -> float:
+        """Minimum time remaining for entry = time_stop + 60s buffer.
+
+        CRITICAL BUG FIX (Feb 3, 2026): Was static 240s which broke TS=30 logic.
+        Now dynamic: TS=30 → min_time=90, TS=180 → min_time=240
+        """
+        return self.time_stop_seconds + 60.0
 
     def calculate_loser_bid(self, winner_entry: float, spike_magnitude: float) -> float:
         """Calculate loser bid with this config's offset parameters."""
@@ -164,6 +175,10 @@ class TestConfig:
 OFFSET_PRESETS = {
     "CURRENT": (0.50, 0.08, "Current baseline"),
 }
+
+# Spike detection methods (Feb 3, 2026)
+# EWMA reduces redundant signals from same price move (one spike per move, not 14)
+SPIKE_METHODS = ["FIXED", "EWMA_500", "EWMA_1000", "EWMA_1200"]
 
 # Time-stops to test
 # 0 = no time-stop (rely on stop-loss or passive fill only)
@@ -280,7 +295,7 @@ def compute_ou_zscore(volatility: float) -> float:
 
 DATASETS = {
     # ==========================================================================
-    # ALL DATASETS - For comprehensive grid search (Jan 31, 2026)
+    # ALL DATASETS - For comprehensive grid search (Feb 3, 2026)
     # ==========================================================================
     "IS+OOS2": {
         "name": "IS+OOS2 (Jan 16-19)",
@@ -293,6 +308,7 @@ DATASETS = {
         ],
         "use_obi": True,  # Auto: uses OBI if columns exist, skips if not
         "expected_hours": 23.0,  # Reduced from 69h - partial data available
+        "is_60hz": True,  # 87.1 Hz - include in spike testing
     },
     "OOS3+4": {
         "name": "OOS3+4 (Jan 22-24)",
@@ -302,6 +318,7 @@ DATASETS = {
         ],
         "use_obi": True,  # Auto: uses OBI if columns exist, skips if not
         "expected_hours": 47.0,
+        "is_60hz": True,  # 84.9 Hz - include in spike testing
     },
     "OOS5": {
         "name": "OOS5 (Jan 26)",
@@ -311,6 +328,7 @@ DATASETS = {
         ],
         "use_obi": True,  # Auto: uses OBI if columns exist, skips if not
         "expected_hours": 41.0,
+        "is_60hz": False,  # Only 1.3 Hz - EXCLUDE from spike testing
     },
     "OOS7": {
         "name": "OOS7 (Jan 29-30)",
@@ -321,6 +339,7 @@ DATASETS = {
         ],
         "use_obi": True,  # OBI ON for OOS7
         "expected_hours": 19.0,
+        "is_60hz": True,  # 185.9 Hz - include in spike testing
     },
     "OOS8": {
         "name": "OOS8 (Jan 31)",
@@ -329,9 +348,23 @@ DATASETS = {
             "research/observer/grid_obs_20260131.csv",
         ],
         "use_obi": True,  # OBI ON for OOS8
-        "expected_hours": 24.0,  # Estimate
+        "expected_hours": 24.0,
+        "is_60hz": True,  # 197.3 Hz - include in spike testing
+    },
+    "OOS9.1": {
+        "name": "OOS9.1 (Feb 1, 7.7h overlap - trending market)",
+        "btc_file": "research/binance_hf/btc_prices_oos9_1.csv",
+        "obs_files": [
+            "research/observer/grid_obs_oos9_1.csv",
+        ],
+        "use_obi": True,
+        "expected_hours": 7.7,
+        "is_60hz": True,  # 229.5 Hz - include in spike testing
     },
 }
+
+# Filter to 60Hz-only datasets for EWMA spike testing
+DATASETS_60HZ = {k: v for k, v in DATASETS.items() if v.get('is_60hz', True)}
 
 MIN_COVERAGE_PCT = 80.0
 
@@ -442,9 +475,9 @@ class BacktestCycle:
 # SPIKE DETECTION - VECTORIZED PRECOMPUTATION
 # =============================================================================
 
-def precompute_spikes_ou(btc_df: pd.DataFrame, lookback: int = SPIKE_LOOKBACK) -> pd.DataFrame:
-    """Vectorized spike detection with OU ADAPTIVE threshold."""
-    print("    Using OU ADAPTIVE threshold (per TRADING_CONFIGS.py)")
+def precompute_spikes_fixed(btc_df: pd.DataFrame, lookback: int = SPIKE_LOOKBACK) -> pd.DataFrame:
+    """Vectorized spike detection with FIXED lookback + OU ADAPTIVE threshold."""
+    print(f"    Using FIXED lookback ({lookback} ticks) + OU ADAPTIVE threshold")
     df = btc_df.copy()
     df = df.sort_values('timestamp_ms').reset_index(drop=True)
 
@@ -480,9 +513,86 @@ def precompute_spikes_ou(btc_df: pd.DataFrame, lookback: int = SPIKE_LOOKBACK) -
     df.loc[(df['spike_detected']) & (df['change_pct'] < 0), 'spike_direction'] = 'DOWN'
 
     spike_count = df['spike_detected'].sum()
-    print(f"    Found {spike_count:,} spikes (OU adaptive)")
+    print(f"    Found {spike_count:,} spikes (FIXED + OU adaptive)")
 
     return df
+
+
+def precompute_spikes_ewma(btc_df: pd.DataFrame, halflife_ms: int) -> pd.DataFrame:
+    """EWMA: Compare current price to exponentially weighted moving average.
+
+    Key advantage: After a spike, the EWMA adapts, reducing redundant signals
+    from the same price move. One price move → one spike (not 14 spikes).
+    """
+    halflife_ticks = halflife_ms / 16.67  # ~60Hz data
+    alpha = 1 - 0.5 ** (1.0 / halflife_ticks)
+
+    print(f"    [EWMA_{halflife_ms}] Half-life={halflife_ms}ms, α={alpha:.4f}")
+
+    df = btc_df.copy()
+    df = df.sort_values('timestamp_ms').reset_index(drop=True)
+
+    # Compute EWMA of price
+    prices = df['price'].values
+    ewma_prices = np.zeros(len(prices))
+    ewma_prices[0] = prices[0]
+
+    for i in range(1, len(prices)):
+        ewma_prices[i] = alpha * prices[i] + (1 - alpha) * ewma_prices[i-1]
+
+    df['ewma_price'] = ewma_prices
+    df['change_pct'] = (df['price'] - df['ewma_price']) / df['ewma_price'] * 100
+    df['spike_magnitude'] = df['change_pct'].abs()
+
+    # OU adaptive threshold (same as FIXED)
+    returns = df['price'].pct_change() * 100
+    vol_halflife = 300
+    vol_alpha = 1 - 0.5 ** (1.0 / vol_halflife)
+
+    variance = returns.iloc[:60].var() if len(returns) > 60 else 0.01
+    thresholds = []
+    zscores = []
+
+    for i, r in enumerate(returns):
+        if pd.isna(r):
+            thresholds.append(OU_BASE_THRESHOLD)
+            zscores.append(0.0)
+            continue
+        variance = vol_alpha * (r ** 2) + (1 - vol_alpha) * variance
+        vol = max(np.sqrt(variance), 1e-6)
+        threshold = compute_ou_threshold(vol)
+        z_score = compute_ou_zscore(vol)
+        thresholds.append(threshold)
+        zscores.append(z_score)
+
+    df['threshold'] = thresholds
+    df['z_score'] = zscores
+    df['spike_detected'] = df['spike_magnitude'] >= df['threshold']
+    df['spike_direction'] = None
+    df.loc[(df['spike_detected']) & (df['change_pct'] > 0), 'spike_direction'] = 'UP'
+    df.loc[(df['spike_detected']) & (df['change_pct'] < 0), 'spike_direction'] = 'DOWN'
+
+    spike_count = df['spike_detected'].sum()
+    print(f"    [EWMA_{halflife_ms}] Found {spike_count:,} spikes")
+
+    return df
+
+
+def precompute_spikes(btc_df: pd.DataFrame, method: str) -> pd.DataFrame:
+    """Dispatch to appropriate spike detection method."""
+    if method == "FIXED":
+        return precompute_spikes_fixed(btc_df)
+    elif method.startswith("EWMA_"):
+        halflife_ms = int(method.split("_")[1])
+        return precompute_spikes_ewma(btc_df, halflife_ms)
+    else:
+        raise ValueError(f"Unknown spike method: {method}")
+
+
+# Legacy alias for backward compatibility
+def precompute_spikes_ou(btc_df: pd.DataFrame, lookback: int = SPIKE_LOOKBACK) -> pd.DataFrame:
+    """Legacy: Alias for precompute_spikes_fixed."""
+    return precompute_spikes_fixed(btc_df, lookback)
 
 
 # HELPER FUNCTIONS: imported from src.core
@@ -789,8 +899,8 @@ def simulate_market_single(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
         time_rem = obs_row['time_remaining_secs']
         velocity_bps = obs_row.get('velocity_bps', 0.0) or 0.0
 
-        # Skip if too close to end
-        if time_rem < MIN_TIME:
+        # Skip if too close to end (dynamic: time_stop + 60s buffer)
+        if time_rem < config.min_time:
             spike_idx += 1
             continue
 
@@ -1145,6 +1255,99 @@ def simulate_market_multicycle(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
 
 
 # =============================================================================
+# DEEP METRICS COMPUTATION - Per-trade analysis for autonomous trading decisions
+# =============================================================================
+
+def compute_deep_metrics(trades: List[TradeResult], hours: float, config_name: str, dataset_name: str) -> dict:
+    """
+    Compute comprehensive risk metrics for autonomous trading decisions.
+
+    Returns metrics required by CLAUDE_MISTAKES.md MANDATORY ANALYSIS METRICS:
+    - Sharpe ratio (> 1.0 minimum, > 1.5 strong)
+    - Profitable market % (> 50% minimum)
+    - Worst single trade (> -$10)
+    - Worst single market
+    - Taker exit % - lower is better
+    - Max drawdown % (target < 20%)
+    """
+    if not trades:
+        return None
+
+    trades_df = pd.DataFrame([t.__dict__ for t in trades])
+    returns = trades_df['pnl_net']
+
+    # Sharpe ratio (annualized to hourly - sqrt of trades per hour)
+    trades_per_hour = len(trades_df) / hours if hours > 0 else 0
+    if returns.std() > 0 and trades_per_hour > 0:
+        sharpe = (returns.mean() / returns.std()) * np.sqrt(trades_per_hour)
+    else:
+        sharpe = 0.0
+
+    # Max drawdown calculation
+    cumulative_pnl = returns.cumsum()
+    rolling_max = cumulative_pnl.cummax()
+    drawdown = rolling_max - cumulative_pnl
+    max_drawdown = drawdown.max()
+    total_pnl = returns.sum()
+    max_drawdown_pct = (max_drawdown / abs(total_pnl) * 100) if total_pnl != 0 else 0
+
+    # Worst single trade
+    worst_trade_pnl = returns.min()
+    worst_trade_idx = returns.idxmin()
+    worst_trade_market = trades_df.loc[worst_trade_idx, 'market_slug']
+
+    # Per-market statistics
+    market_pnl = trades_df.groupby('market_slug')['pnl_net'].sum()
+    worst_market_pnl = market_pnl.min()
+    worst_market_slug = market_pnl.idxmin()
+    profitable_markets = (market_pnl > 0).sum()
+    total_markets = len(market_pnl)
+    profitable_market_pct = (profitable_markets / total_markets * 100) if total_markets > 0 else 0
+
+    # Taker exit % (time_stop, stop_loss, resolution = taker exit)
+    taker_exit_count = trades_df['hedge_type'].isin(['time_stop', 'stop_loss', 'resolution']).sum()
+    taker_exit_pct = (taker_exit_count / len(trades_df) * 100) if len(trades_df) > 0 else 0
+
+    # Additional stats
+    passive_pct = (trades_df['hedge_type'] == 'passive').sum() / len(trades_df) * 100
+    stop_loss_pct = (trades_df['hedge_type'] == 'stop_loss').sum() / len(trades_df) * 100
+
+    return {
+        'sharpe': sharpe,
+        'max_drawdown': max_drawdown,
+        'max_drawdown_pct': max_drawdown_pct,
+        'profitable_market_pct': profitable_market_pct,
+        'profitable_markets': profitable_markets,
+        'total_markets': total_markets,
+        'worst_trade_pnl': worst_trade_pnl,
+        'worst_trade_market': worst_trade_market,
+        'worst_market_pnl': worst_market_pnl,
+        'worst_market_slug': worst_market_slug,
+        'taker_exit_pct': taker_exit_pct,  # Renamed from unhedged_pct
+        'passive_pct': passive_pct,
+        'stop_loss_pct': stop_loss_pct,
+    }
+
+
+def save_per_trade_csv(trades: List[TradeResult], config_name: str, dataset_name: str) -> str:
+    """Save per-trade data to CSV for detailed analysis."""
+    if not trades:
+        return None
+
+    trades_df = pd.DataFrame([t.__dict__ for t in trades])
+
+    # Create clean filename
+    clean_config = config_name.replace('/', '_').replace(' ', '_')
+    clean_dataset = dataset_name.replace('+', '_').replace(' ', '_')
+
+    trades_path = Path(f"research/findings/data/grid_trades_{clean_config}_{clean_dataset}.csv")
+    trades_path.parent.mkdir(parents=True, exist_ok=True)
+    trades_df.to_csv(trades_path, index=False)
+
+    return str(trades_path)
+
+
+# =============================================================================
 # DATA LOADING
 # =============================================================================
 
@@ -1302,6 +1505,12 @@ def run_grid_search():
                 passive_pct = sum(1 for t in all_trades if t.hedge_type == "passive") / total_trades * 100
                 hourly_rate = total_pnl_net / hours if hours > 0 else 0
 
+                # Compute deep metrics (MANDATORY per CLAUDE_MISTAKES.md)
+                deep_metrics = compute_deep_metrics(all_trades, hours, config.name, dataset_key)
+
+                # Save per-trade CSV for detailed analysis
+                trades_csv_path = save_per_trade_csv(all_trades, config.name, dataset_key)
+
                 result = {
                     'config': config.name,
                     'time_stop': config.time_stop_seconds,
@@ -1319,10 +1528,21 @@ def run_grid_search():
                     'win_rate': win_rate,
                     'avg_pair_cost': avg_pair_cost,
                     'passive_pct': passive_pct,
+                    # Deep metrics
+                    'sharpe': deep_metrics['sharpe'] if deep_metrics else 0,
+                    'profitable_market_pct': deep_metrics['profitable_market_pct'] if deep_metrics else 0,
+                    'worst_trade_pnl': deep_metrics['worst_trade_pnl'] if deep_metrics else 0,
+                    'worst_market_pnl': deep_metrics['worst_market_pnl'] if deep_metrics else 0,
+                    'worst_market_slug': deep_metrics['worst_market_slug'] if deep_metrics else '',
+                    'unhedged_pct': deep_metrics['unhedged_pct'] if deep_metrics else 0,
+                    'trades_csv': trades_csv_path,
                 }
                 all_results.append(result)
 
-                print(f"    [{config.cycle_mode}] Trades: {total_trades}, $/hr: ${hourly_rate:.2f}, Win%: {win_rate:.1f}%")
+                # Print summary with deep metrics
+                print(f"    Trades: {total_trades}, $/hr: ${hourly_rate:.2f}, Win%: {win_rate:.1f}%")
+                if deep_metrics:
+                    print(f"    Sharpe: {deep_metrics['sharpe']:.2f}, ProfMkt: {deep_metrics['profitable_market_pct']:.1f}%, Unhedged: {deep_metrics['unhedged_pct']:.1f}%")
 
         # Checkpoint save after each config
         if all_results:
