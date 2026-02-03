@@ -336,8 +336,6 @@ function formatConfigTooltip(modeName, status) {
         lines.push(`Skip High: $${config.high_entry_threshold || '--'}`);
         lines.push(`Lookback: ${config.lookback_ms || '--'}ms`);
         lines.push(`Time Stop: ${config.time_stop_seconds || '--'}s`);
-        lines.push(`Z-Lo: ${config.z_lo || '--'}`);
-        lines.push(`Z-Hi: ${config.z_hi || '--'}`);
         lines.push(`Cycling: ${config.use_cycling ? 'Yes' : 'No'}`);
     } else if (modeName === 'contrarian') {
         lines.push(`Shares: ${config.shares_per_trade || '--'}`);
@@ -541,12 +539,6 @@ function stopCountdown(modeName) {
 // ============================================
 
 function getAggressiveConfig() {
-    // Handle z-score values - empty means disabled (null) for EWMA config
-    const zLoVal = document.getElementById('aggressive-z-lo').value;
-    const zHiVal = document.getElementById('aggressive-z-hi').value;
-    const z_lo = zLoVal === '' ? null : parseFloat(zLoVal);
-    const z_hi = zHiVal === '' ? null : parseFloat(zHiVal);
-
     return {
         mode: document.querySelector('input[name="aggressive_mode"]:checked').value,
         market: 'btc-15m',
@@ -556,8 +548,7 @@ function getAggressiveConfig() {
         // AGGRESSIVE specific parameters - EWMA_1000 + TS30 winner (Feb 3, 2026)
         lookback_ms: parseInt(document.getElementById('aggressive-lookback').value),
         time_stop_seconds: parseFloat(document.getElementById('aggressive-time-stop').value),
-        z_lo: z_lo,  // null = disabled (EWMA config doesn't use z-score filter)
-        z_hi: z_hi,  // null = disabled (EWMA config doesn't use z-score filter)
+        // z_lo/z_hi removed - EWMA config doesn't use z-score filter (Feb 3, 2026)
         base_size: parseInt(document.getElementById('aggressive-base-size').value),
         high_entry_threshold: parseFloat(document.getElementById('aggressive-high-entry').value),
         use_cycling: document.getElementById('aggressive-cycling').checked,

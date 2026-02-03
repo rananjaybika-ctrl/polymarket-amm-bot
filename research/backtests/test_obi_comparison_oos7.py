@@ -47,8 +47,8 @@ OU_MAX_THRESHOLD = 0.10
 VELOCITY_CONFIRM_THRESHOLD = 0.10
 ENHANCED_SCORE_THRESHOLD = 0.40
 
-# Time-stop (matching live)
-TIME_STOP_SECONDS = 120.0   # 2 minutes
+# Time-stop - MUST MATCH TRADING_CONFIGS.py (AGGRESSIVE_CONFIG.time_stop_seconds)
+TIME_STOP_SECONDS = 180.0   # 3 minutes - synced Feb 2, 2026
 
 # Loser bid calculation (from live enhanced_spike.py)
 DROP_MULTIPLIER = 0.50      # Recalibrated Jan 18

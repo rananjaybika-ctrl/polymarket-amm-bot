@@ -223,7 +223,9 @@ class LatencyArbStrategy:
         expected_drop = DROP_MULTIPLIER * magnitude_pct + DROP_INTERCEPT + regime_bonus
         expected_drop = max(0.02, min(0.20, expected_drop))
         max_loser = TARGET_PAIR_COST - winner_entry
-        loser_bid = min(loser_ask - expected_drop, max_loser)
+        # FIX Feb 2, 2026: Use theoretical loser (1.0 - winner_entry), NOT loser_ask
+        theoretical_loser = 1.0 - winner_entry
+        loser_bid = min(theoretical_loser - expected_drop, max_loser)
         return max(0.01, min(0.95, loser_bid))
 
     # =========================================================================

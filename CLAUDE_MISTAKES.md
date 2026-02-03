@@ -4,6 +4,34 @@
 
 ---
 
+## MANDATORY ANALYSIS METRICS
+
+Whenever running backtest analysis, ALWAYS report:
+- **Sharpe ratio** (> 1.0 minimum, > 1.5 strong)
+- **Profitable market %** (> 50% minimum)
+- **Worst single trade** (> -$10)
+- **Worst single market**
+- **Unhedged %** (< 20%)
+
+Don't report $/hr alone - these metrics assess STABILITY for autonomous trading.
+
+---
+
+## BEFORE ANY SSH/RSYNC/DEPLOY COMMAND
+1. Read deploy.sh for IP and key path
+2. **IP: 54.170.244.221**
+3. **Key: $HOME/Downloads/polymarket-key.pem**
+
+## KILLING AWS FRONTEND
+When user asks to kill the frontend, use **systemctl** not kill:
+```bash
+ssh -i ~/Downloads/polymarket-key.pem ubuntu@54.170.244.221 'sudo systemctl stop polymarket-bot'
+```
+**DO NOT** use `kill -9 <PID>` - the systemd service will auto-restart it.
+Keep frontend dead until user explicitly asks to restart it.
+
+---
+
 ## CRITICAL MISTAKES - Jan 28, 2026
 
 ### OOS6 DATA COLLECTION - USED WRONG SCRIPT
@@ -556,8 +584,193 @@ AWS_KEY="$HOME/Downloads/polymarket-key.pem"  # Line 11 of deploy.sh
 
 ---
 
+### 40. ADDED EARLY-RETURN GUARD WITHOUT UNDERSTANDING FUNCTION'S FULL LOGIC FLOW
+**What happened:** Positions were ending up unhedged at market resolution despite time-stop being configured (180s). User correctly identified: "our time stop should have triggered."
+
+**Root cause:** The `min_time_remaining` check was added at the TOP of `get_quotes()` (line 1528) without understanding the function's full logic flow:
+
+```python
+def get_quotes(...):
+    # Line 1528 - EARLY RETURN added here
+    if time_remaining < self.min_time_remaining:
+        return []  # ← Exits function immediately, no condition on position state
+
+    # ... 200 lines of code ...
+
+    # Line 1724 - TIME-STOP CHECK (never reached if above returns!)
+    if s.first_fill_side is not None and elapsed >= self.time_stop_seconds:
+        return [time_stop_hedge_order]  # ← Never executes when time < 240s
+```
+
+The guard was intended to block NEW ENTRIES when market is ending soon. But by placing it at the function's entry point with no condition check on position state, it blocked ALL code paths including:
+- Time-stop hedges for existing positions (the critical bug)
+- Stop-loss hedges
+- Any other exit logic that needed to run
+
+This is the classic mistake of adding code "in the first convenient spot" without tracing through all scenarios it affects.
+
+**Cost:**
+- Positions ending unhedged at resolution = direct losses on every affected market
+- Multiple markets affected before bug was caught
+- Time wasted debugging "why isn't time-stop working" when the answer was trivial: code never reached the time-stop check
+
+**FIX (Feb 2, 2026):**
+```python
+# Only block NEW ENTRIES, not exits for existing positions
+if time_remaining < self.min_time_remaining and s.first_fill_side is None:
+    return []  # Now allows time-stop/stop-loss for existing positions
+```
+
+**PREVENTION:**
+1. Before adding early-return guards, TRACE the entire function to understand what code paths they block
+2. Early returns should explicitly check ALL conditions they might affect (e.g., "am I in a position?")
+3. When adding "block entries when time is low", ask: "what about EXITS for existing positions?"
+4. The fix was trivial (`and s.first_fill_side is None`) - the bug was not reading the function before modifying it
+
+**Source:** Feb 2, 2026 - Paper trading time-stop bug investigation
+
+---
+
+---
+
+### 41. HEDGE BID FORMULA USED WRONG BASE PRICE - FUNDAMENTAL BACKTEST/LIVE MISMATCH
+**What happened:** Paper trading was consistently losing money while backtests showed profitability. User asked "why were backtests so profitable but paper trading so ass?"
+
+**Root cause:** The hedge bid calculation in live code used a DIFFERENT formula than backtest:
+
+**BACKTEST (correct):**
+```python
+loser_bid = min((1.0 - winner_entry) - expected_drop, max_loser)
+```
+
+**LIVE (wrong):**
+```python
+loser_bid = min(loser_ask - expected_drop, max_loser)
+```
+
+The backtest uses `(1.0 - winner_entry)` = theoretical loser price (since UP + DOWN = $1.00 in binary market).
+The live code used `loser_ask` = actual market ask, which includes spread/premium.
+
+**Example:**
+- Entry UP at $0.60
+- Theoretical loser: $0.40 (1.0 - 0.60)
+- Actual loser ask: $0.45 (5 cent premium)
+- Backtest bids: $0.40 - drop = $0.32
+- Live was bidding: $0.45 - drop = $0.37 (5 CENTS HIGHER!)
+
+This caused live pair costs to be systematically WORSE than backtest predicted.
+
+**Cost:**
+- Every hedge was 3-5 cents more expensive than backtest assumed
+- $-7.36 session loss vs profitable backtest expectations
+- Fundamental mismatch making all backtests unreliable for live performance
+
+**FIX (Feb 2, 2026):**
+Fixed in 3 locations:
+1. `enhanced_spike.py:calculate_magnitude_loser_bid()` (class method)
+2. `enhanced_spike.py:calculate_magnitude_loser_bid()` (standalone function)
+3. `latency_arb.py:calculate_loser_bid()`
+
+All now use: `theoretical_loser = 1.0 - winner_entry`
+
+**PREVENTION:**
+1. When porting formulas from backtest to live, COPY EXACTLY - don't "improve"
+2. Any deviation between backtest and live formula is a critical bug
+3. The `loser_ask` parameter was a red herring - it's available but shouldn't be used as the base
+
+**Source:** Feb 2, 2026 - Paper trading discrepancy investigation
+
+---
+
+---
+
+### 42. VELOCITY FILTER BOUNDARY CONDITION MISMATCH
+**What happened:** User asked "is this correct?" about velocity filter comparison in my verification table. I had claimed it matched when it DIDN'T.
+
+**Root cause:** Live code used strict inequality (`<` and `>`) while core function used inclusive boundary (`>` and `<` with opposite return logic):
+
+**CORE (returns TRUE to ALLOW):**
+```python
+if spike_dir == "UP":
+    return velocity_bps > -threshold  # At -0.10: FALSE (REJECT)
+```
+
+**LIVE (used to REJECT):**
+```python
+if spike_dir == "UP" and velocity_bps < -0.10:  # At -0.10: FALSE (ALLOW)
+    return REJECT
+```
+
+At exactly `velocity_bps = -0.10`:
+- Core: REJECTS (because -0.10 is NOT > -0.10)
+- Live: ALLOWED (because -0.10 is NOT < -0.10)
+
+**Cost:**
+- Live allowed trades at the exact boundary that backtest would reject
+- Subtle mismatch that I claimed was "matching" in my verification
+- User had to catch my error by questioning the table
+
+**FIX (Feb 2, 2026):**
+Changed live code from `<` to `<=` and `>` to `>=`:
+```python
+if spike_dir == "UP" and velocity_bps <= -0.10:  # Now matches core
+if spike_dir == "DOWN" and velocity_bps >= 0.10:  # Now matches core
+```
+
+**PREVENTION:**
+1. When verifying "matching" logic, trace through BOUNDARY VALUES explicitly
+2. Different logical structures (return TRUE vs if-reject) can have subtle boundary differences
+3. Don't claim code "matches" without checking edge cases: `==`, `<`, `<=`, `>`, `>=`
+
+**Source:** Feb 2, 2026 - User caught verification error in my table
+
+---
+
+---
+
+### 43. Z-SCORE FILTER NOT PORTED TO NEW BACKTEST FILES DURING REFACTOR
+**What happened:** On Jan 31, 2026, the src/core refactor created new "main" backtest files (`aggressive_main_backtest.py`, `aggressive_grid_search.py`). The z-score volatility filter [0.0, 1.5] was NOT ported from the original validated backtest (`fixed_cycling_grid_backtest.py` line 675).
+
+**Root cause:**
+- Original backtest (`fixed_cycling_grid_backtest.py`) had z-score filtering: `if zscore < config.z_lo or zscore > config.z_hi: continue`
+- New main backtest files were created to import from src/core
+- Z-score filtering logic was simply OMITTED - not intentionally removed, just not copied
+- The refactor focused on fee model and signal filters, not volatility gating
+
+**Cost:**
+- Validated results ($9/hr) came from OLD backtest WITH z-score filter
+- NEW backtest results are MORE OPTIMISTIC (include trades old backtest would skip)
+- Live code HAS z-score filter (enhanced_spike.py:1555-1561)
+- Backtest/live mismatch undetected for 2 days
+
+**Files affected:**
+- `research/backtests/aggressive_main_backtest.py` - missing z-score filter
+- `research/optimizers/aggressive_grid_search.py` - missing z-score filter
+- `research/backtests/fixed_cycling_grid_backtest.py` - HAS z-score filter (original)
+
+**FIX:**
+Add z-score filter to new backtest files:
+```python
+# After spike detection, before entry:
+z_score = spike_row.get('z_score', 0.0)
+if z_score < Z_LO or z_score > Z_HI:
+    spike_idx += 1
+    continue
+```
+
+**PREVENTION:**
+1. When refactoring/creating new backtest files, DIFF against validated original
+2. Check TRADING_CONFIGS.py for ALL filter parameters (z_lo, z_hi, etc.)
+3. Grep for filter logic: `grep -r "z_lo\|z_hi" research/backtests/`
+4. Validate new backtest produces SAME results as original on same data
+
+**Source:** Feb 2, 2026 - Audit discovered z-score filter missing from main backtest
+
+---
+
 **Last updated:** Feb 2, 2026
-**Mistakes documented:** 39
+**Mistakes documented:** 43
+**Note:** Use `sudo systemctl stop polymarket-bot` to kill AWS frontend (not kill PID)
 
 **Note:** Multi-cycle findings moved to `research/findings/SINGLE_CYCLE_OPTIMAL_20260131.md` (research finding, not Claude mistake)
 **Sources:** CODEBASE_AUDIT_JAN17.md, AWS_7HR_OBSERVER_DEEP_ANALYSIS.md, VOL_FILTER_GRID_SEARCH_FINDINGS_JAN22.md, PLAN_FIX_ENTRY_FILL_JAN19.md, SPREAD_CAPTURE_FIX_PLAN.md

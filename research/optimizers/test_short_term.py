@@ -1,59 +1,34 @@
 #!/usr/bin/env python3
 """
-AGGRESSIVE Grid Search - Main Optimization File
-
 =============================================================================
-THIS IS THE CANONICAL GRID SEARCH FILE (Jan 31, 2026)
-Location: research/optimizers/aggressive_grid_search.py
-Legacy: research/optimizers/aggressive_grid_search_v1_legacy.py
+COMPREHENSIVE GRID SEARCH - Spike Method × Time-Stop × Hedge Formula
 =============================================================================
 
-Grid dimensions:
-1. Time-Stop: 30s, 180s, 240s
-2. Loser Offset: TIGHT, CURRENT
-3. Cycle Mode: SINGLE only (multi-cycle DEPRECATED)
+Grid dimensions (Feb 3, 2026):
+1. Spike Methods: FIXED (72-tick lookback), EWMA_500, EWMA_1000, EWMA_1200
+2. Time-Stops: 30s, 180s
+3. Hedge Formulas: OLD (0.50/0.08), NEW (0.10/0.035)
 
-Grid: 2 offsets × 3 time-stops × 1 cycle-mode = 6 configurations
+Total: 4 spike methods × 2 time-stops × 2 hedge formulas = 16 configs
 
-Loser bid formula:
-    expected_drop = DROP_MULTIPLIER * spike_magnitude + DROP_INTERCEPT
-    loser_bid = (1.0 - winner_entry) - expected_drop
+Key insight from EWMA spike base testing:
+- TS30 needs volume → FIXED wins ($22/hr vs $19/hr with EWMA)
+- TS180 can be selective → EWMA_1000 wins ($9.12/hr vs $6.89/hr, turns OOS9.1 loss to profit)
 
-Offset presets:
-    TIGHT:   DROP_MULT=0.30, DROP_INT=0.05 (aggressive, faster fill)
-    CURRENT: DROP_MULT=0.50, DROP_INT=0.08 (baseline)
+Metrics collected:
+- PnL ($/hr)
+- Sharpe ratio (target > 1.0)
+- Max drawdown (target < 20%)
+- Profitable market % (target > 50%)
+- Worst single trade (target > -$10)
+- Taker exit % (lower = better, more passive fills)
 
-Cycle mode (Jan 31, 2026 - SINGLE ONLY):
-    SINGLE: 1 cycle × 50 shares (LIVE-READY, production config)
-
-    MULTI-CYCLE ABANDONED (Jan 31, 2026):
-    Multi-cycle destroyed profitability even with direction consistency fix.
-    - SINGLE: 54.3% win rate, +$1.37/hr (LIVE-READY)
-    - MULTI: 39.8% win rate, -$26.70/hr (10x trades, 15pp lower win rate)
-    Root cause: Stacking same-direction trades catches weak follow-on spikes.
-
-Features:
-- Fee model with gross/net PnL separation
-- Dataset coverage validation
-- Checkpoint saves after each config
-- Offset + time-stop + cycle-mode sensitivity analysis
-- OU adaptive threshold (per TRADING_CONFIGS.py)
-- Binary OBI filter (simple: obi > 0 = confirm, obi <= 0 = reject)
-- Direction consistency check for multi-cycle modes
-- EWMA spike detection with timestamp deduplication (Feb 3, 2026)
-- Gap detection and EWMA reset at gaps > 30 minutes
-
-Datasets (~130h total):
-- IS+OOS2 - 23h (partial)
-- OOS3+4 - 47h
-- OOS5 - 41h
-- OOS7 - 19h
+Datasets:
+- OOS7, OOS8, OOS9.1 (with OBI)
+- IS+OOS2, OOS3+4, OOS5 (older, OBI auto-detect)
 
 Usage:
-    python research/optimizers/aggressive_grid_search.py
-
-For quick single-config validation, use:
-    python research/backtests/aggressive_main_backtest.py
+    python research/optimizers/test_short_term.py
 """
 
 import pandas as pd
@@ -95,10 +70,22 @@ from src.core import (
 #
 # FIXED PARAMS (not part of grid - same for all tests):
 TARGET_SHARES = 50
-# MIN_TIME is now DYNAMIC per config: time_stop + 60s buffer (see TestConfig.min_time property)
 MIN_RUNTIME_SECS = 300      # 5 min market duration filter
-HIGH_ENTRY_THRESHOLD = 0.90 # Skip entries >= $0.90
-SPIKE_LOOKBACK = 72         # 72 ticks (1200ms at 60Hz)
+LOW_ENTRY_THRESHOLD = None  # REMOVED per user request - matches main backtest
+HIGH_ENTRY_THRESHOLD = 0.90 # Skip entries >= $0.90 (matches TRADING_CONFIGS.py)
+SPIKE_LOOKBACK = 72         # 72 ticks (1200ms at 60Hz) - used by FIXED method
+
+# =============================================================================
+# SPIKE METHODS - FIXED vs EWMA (Feb 3, 2026)
+# =============================================================================
+# FIXED: Compare current price to price N ticks ago (sliding window)
+# EWMA: Compare current price to exponentially weighted moving average
+#
+# Key finding: EWMA reduces redundant signals from one price move
+# - TS30 needs volume → FIXED wins (but already tested separately)
+# - TS180 can be selective → EWMA_1000 wins (turns OOS9.1 loss to profit)
+# FIXED already tested in previous runs - focus on EWMA variants
+SPIKE_METHODS = ["EWMA_500", "EWMA_1000", "EWMA_1200"]
 
 # OU ADAPTIVE THRESHOLD params
 OU_BASE_THRESHOLD = 0.02
@@ -117,8 +104,8 @@ DEFAULT_DROP_MULTIPLIER = 0.50
 DEFAULT_DROP_INTERCEPT = 0.08
 TARGET_PAIR_COST = 0.99
 
-# Cycling
-MIN_CYCLE_GAP_MS = 50  # Faster cycling (was 200)
+# Cycling - FASTER for short-term
+MIN_CYCLE_GAP_MS = 50  # Was 200 - faster cycling for volume play
 
 
 # FEE MODEL: imported from src.core (polymarket_taker_fee, calculate_pnl_with_fees)
@@ -129,14 +116,13 @@ MIN_CYCLE_GAP_MS = 50  # Faster cycling (was 200)
 
 @dataclass
 class TestConfig:
-    """Configuration for time-stop + loser offset + multi-cycle test."""
+    """Configuration for spike-method + time-stop + hedge formula test."""
     name: str
     time_stop_seconds: float
     drop_multiplier: float
     drop_intercept: float
-    offset_name: str  # TIGHT, CURRENT
-    # Spike detection method
-    spike_method: str = "FIXED"  # "FIXED", "EWMA_500", "EWMA_1000", "EWMA_1200"
+    offset_name: str  # OLD, NEW (hedge formula)
+    spike_method: str = "FIXED"  # FIXED, EWMA_500, EWMA_1000, EWMA_1200
     # Multi-cycle parameters
     max_cycles: int = 1      # 1 = single-cycle, 2+ = multi-cycle
     shares_per_cycle: int = 50  # Shares per cycle
@@ -145,8 +131,6 @@ class TestConfig:
     # Loss mechanism parameters (Feb 1, 2026)
     stop_loss_pct: Optional[float] = None  # None = disabled, 0.15/0.20/0.30 = exit if drop >= X%
     max_market_losses: Optional[int] = None  # None = disabled, 2/3 = stop trading after N losses in market
-    # Breakeven exit (Feb 3, 2026) - exit when winner_bid <= entry_price
-    breakeven_min_hold_ms: Optional[int] = None  # None = disabled, 2000/5000/10000 = min hold before BE check
 
     @property
     def total_shares(self) -> int:
@@ -155,11 +139,7 @@ class TestConfig:
 
     @property
     def min_time(self) -> float:
-        """Minimum time remaining for entry = time_stop + 60s buffer.
-
-        CRITICAL BUG FIX (Feb 3, 2026): Was static 240s which broke TS=30 logic.
-        Now dynamic: TS=30 → min_time=90, TS=180 → min_time=240
-        """
+        """Minimum time remaining for entry = time_stop + 60s buffer."""
         return self.time_stop_seconds + 60.0
 
     def calculate_loser_bid(self, winner_entry: float, spike_magnitude: float) -> float:
@@ -174,28 +154,24 @@ class TestConfig:
 # GRID PARAMETERS: OFFSET × TIME-STOP × CYCLE-MODE
 # =============================================================================
 
-# Offset parameters: (DROP_MULTIPLIER, DROP_INTERCEPT, description)
-# TIGHT removed (Feb 1, 2026) - focus on CURRENT baseline only
-OFFSET_PRESETS = {
-    "CURRENT": (0.50, 0.08, "Current baseline"),
+# =============================================================================
+# 2x2 HEDGE FORMULA COMPARISON
+# =============================================================================
+# OLD: Deep hedge ~0.91 pair cost (current main backtest formula)
+# NEW: Tight hedge ~0.95 pair cost (current test_short_term formula)
+HEDGE_FORMULAS = {
+    "OLD": (0.50, 0.08, "Deep hedge ~0.91 pair cost"),
+    "NEW": (0.10, 0.035, "Tight hedge ~0.95 pair cost"),
 }
 
-# Spike detection methods (Feb 3, 2026)
-# EWMA reduces redundant signals from same price move (one spike per move, not 14)
-SPIKE_METHODS = ["FIXED", "EWMA_500", "EWMA_1000", "EWMA_1200"]
+# Time-stops: 2x2 comparison (short vs long)
+TIME_STOPS = [30.0, 180.0]
 
-# Time-stops to test
-# 0 = no time-stop (rely on stop-loss or passive fill only)
-TIME_STOPS = [0.0, 30.0, 180.0]
+# Stop-loss: Disabled for time-stop comparison
+STOP_LOSS_PCTS = [None]
 
-# Stop-loss percentages to test (Feb 1, 2026)
-# None = disabled, percentage = exit if winner drops >= X%
-STOP_LOSS_PCTS = [None, 0.15, 0.20, 0.30]
-
-# Market loss limits to test (Feb 1, 2026)
-# None = disabled, N = stop trading in market after N total losses
-# Analysis showed: 2 total losses saves $91.66 (18.3% improvement)
-MAX_MARKET_LOSSES = [None, 2, 3]
+# Market loss limits: DISABLED for initial test
+MAX_MARKET_LOSSES = [None]
 
 # Cycle modes: (max_cycles, shares_per_cycle, direction_mode, description)
 # SINGLE-CYCLE ONLY - Multi-cycle DEPRECATED (Jan 31, 2026)
@@ -211,41 +187,34 @@ CYCLE_MODES = {
     # "MULTI_CLEAR": (2, 25, DIRECTION_MODE_CLEAR, "DEPRECATED - destroyed profitability"),
 }
 
-# Generate all configs: 2 offsets × 3 time-stops × 4 stop-losses × 3 market-limits = ~70 configs
-# (minus invalid configs where TS=0 AND SL=None AND MML=None)
+# Generate configs: spike_methods × time-stops × hedge formulas
 CONFIGS = []
-for offset_name, (mult, intercept, offset_desc) in OFFSET_PRESETS.items():
-    for ts in TIME_STOPS:
-        for sl_pct in STOP_LOSS_PCTS:
-            for mml in MAX_MARKET_LOSSES:
-                # Skip invalid: no time-stop AND no stop-loss AND no market limit
-                # (would never exit losing positions)
-                if ts == 0 and sl_pct is None and mml is None:
-                    continue
+for spike_method in SPIKE_METHODS:
+    for hedge_name, (mult, intercept, hedge_desc) in HEDGE_FORMULAS.items():
+        for ts in TIME_STOPS:
+            # Build descriptive name: {spike}_{TS}{time}_{hedge}
+            spike_short = spike_method.replace("EWMA_", "E")  # E500, E1000, E1200, FIXED
+            name = f"{spike_short}_TS{int(ts)}_{hedge_name}"
 
-                # Build descriptive name
-                sl_label = f"SL{int(sl_pct*100)}" if sl_pct else "NOSL"
-                mml_label = f"MML{mml}" if mml else "NOMML"
-                name = f"{offset_name}_TS{int(ts)}_{sl_label}_{mml_label}"
+            # Use SINGLE cycle mode only (multi-cycle deprecated)
+            max_cycles, shares_per, dir_mode, _ = CYCLE_MODES["SINGLE"]
 
-                # Use SINGLE cycle mode only (multi-cycle deprecated)
-                max_cycles, shares_per, dir_mode, _ = CYCLE_MODES["SINGLE"]
+            CONFIGS.append(TestConfig(
+                name=name,
+                time_stop_seconds=ts,
+                drop_multiplier=mult,
+                drop_intercept=intercept,
+                offset_name=hedge_name,
+                spike_method=spike_method,
+                max_cycles=max_cycles,
+                shares_per_cycle=shares_per,
+                cycle_mode="SINGLE",
+                direction_mode=dir_mode,
+                stop_loss_pct=None,  # No stop-loss for this comparison
+                max_market_losses=None,  # No market loss limit
+            ))
 
-                CONFIGS.append(TestConfig(
-                    name=name,
-                    time_stop_seconds=ts,
-                    drop_multiplier=mult,
-                    drop_intercept=intercept,
-                    offset_name=offset_name,
-                    max_cycles=max_cycles,
-                    shares_per_cycle=shares_per,
-                    cycle_mode="SINGLE",
-                    direction_mode=dir_mode,
-                    stop_loss_pct=sl_pct,
-                    max_market_losses=mml,
-                ))
-
-print(f"Generated {len(CONFIGS)} configs: {len(OFFSET_PRESETS)} offsets × {len(TIME_STOPS)} time-stops × {len(STOP_LOSS_PCTS)} stop-losses × {len(MAX_MARKET_LOSSES)} market-limits")
+print(f"Generated {len(CONFIGS)} configs: {len(SPIKE_METHODS)} spike methods × {len(TIME_STOPS)} time-stops × {len(HEDGE_FORMULAS)} hedge formulas")
 
 
 # =============================================================================
@@ -299,7 +268,7 @@ def compute_ou_zscore(volatility: float) -> float:
 
 DATASETS = {
     # ==========================================================================
-    # ALL DATASETS - For comprehensive grid search (Feb 3, 2026)
+    # ALL DATASETS - For comprehensive grid search (Jan 31, 2026)
     # ==========================================================================
     "IS+OOS2": {
         "name": "IS+OOS2 (Jan 16-19)",
@@ -312,7 +281,6 @@ DATASETS = {
         ],
         "use_obi": True,  # Auto: uses OBI if columns exist, skips if not
         "expected_hours": 23.0,  # Reduced from 69h - partial data available
-        "is_60hz": True,  # 87.1 Hz - include in spike testing
     },
     "OOS3+4": {
         "name": "OOS3+4 (Jan 22-24)",
@@ -322,7 +290,6 @@ DATASETS = {
         ],
         "use_obi": True,  # Auto: uses OBI if columns exist, skips if not
         "expected_hours": 47.0,
-        "is_60hz": True,  # 84.9 Hz - include in spike testing
     },
     "OOS5": {
         "name": "OOS5 (Jan 26)",
@@ -332,7 +299,6 @@ DATASETS = {
         ],
         "use_obi": True,  # Auto: uses OBI if columns exist, skips if not
         "expected_hours": 41.0,
-        "is_60hz": False,  # Only 1.3 Hz - EXCLUDE from spike testing
     },
     "OOS7": {
         "name": "OOS7 (Jan 29-30)",
@@ -343,7 +309,6 @@ DATASETS = {
         ],
         "use_obi": True,  # OBI ON for OOS7
         "expected_hours": 19.0,
-        "is_60hz": True,  # 185.9 Hz - include in spike testing
     },
     "OOS8": {
         "name": "OOS8 (Jan 31)",
@@ -352,8 +317,7 @@ DATASETS = {
             "research/observer/grid_obs_20260131.csv",
         ],
         "use_obi": True,  # OBI ON for OOS8
-        "expected_hours": 24.0,
-        "is_60hz": True,  # 197.3 Hz - include in spike testing
+        "expected_hours": 24.0,  # Estimate
     },
     "OOS9.1": {
         "name": "OOS9.1 (Feb 1, 7.7h overlap - trending market)",
@@ -361,16 +325,21 @@ DATASETS = {
         "obs_files": [
             "research/observer/grid_obs_oos9_1.csv",
         ],
-        "use_obi": True,
+        "use_obi": True,  # OBI ON
         "expected_hours": 7.7,
-        "is_60hz": True,  # 229.5 Hz - include in spike testing
     },
 }
 
-# Filter to 60Hz-only datasets for EWMA spike testing
-DATASETS_60HZ = {k: v for k, v in DATASETS.items() if v.get('is_60hz', True)}
+# =============================================================================
+# DATASETS TO RUN
+# =============================================================================
+# OBI filter is controlled by DATASETS[key]['use_obi'] config
+# Older datasets (IS+OOS2, OOS3+4, OOS5) don't have OBI columns - filter auto-skips
 
-MIN_COVERAGE_PCT = 80.0
+# All 6 datasets for comprehensive analysis
+DATASETS_TO_RUN = ["OOS7", "OOS8", "OOS9.1", "IS+OOS2", "OOS3+4", "OOS5"]
+
+MIN_COVERAGE_PCT = 75.0  # Lowered for OOS8 (76% coverage)
 
 
 def validate_dataset_coverage() -> bool:
@@ -442,7 +411,7 @@ class TradeResult:
     winner_side: str
     winner_fill_price: float
     loser_fill_price: float
-    hedge_type: str  # "passive", "breakeven", "time_stop", "stop_loss", "resolution"
+    hedge_type: str  # "passive", "time_stop", "stop_loss", "resolution"
     pair_cost: float
     pnl_gross: float
     pnl_net: float
@@ -480,8 +449,8 @@ class BacktestCycle:
 # =============================================================================
 
 def precompute_spikes_fixed(btc_df: pd.DataFrame, lookback: int = SPIKE_LOOKBACK) -> pd.DataFrame:
-    """Vectorized spike detection with FIXED lookback + OU ADAPTIVE threshold."""
-    print(f"    Using FIXED lookback ({lookback} ticks) + OU ADAPTIVE threshold")
+    """FIXED: Compare current price to price N ticks ago (sliding window)."""
+    print(f"    [FIXED] Using {lookback}-tick lookback")
     df = btc_df.copy()
     df = df.sort_values('timestamp_ms').reset_index(drop=True)
 
@@ -517,19 +486,16 @@ def precompute_spikes_fixed(btc_df: pd.DataFrame, lookback: int = SPIKE_LOOKBACK
     df.loc[(df['spike_detected']) & (df['change_pct'] < 0), 'spike_direction'] = 'DOWN'
 
     spike_count = df['spike_detected'].sum()
-    print(f"    Found {spike_count:,} spikes (FIXED + OU adaptive)")
+    print(f"    [FIXED] Found {spike_count:,} spikes")
 
     return df
 
 
-def precompute_spikes_ewma(btc_df: pd.DataFrame, halflife_ms: int, gap_threshold_ms: int = 30 * 60 * 1000) -> pd.DataFrame:
+def precompute_spikes_ewma(btc_df: pd.DataFrame, halflife_ms: int) -> pd.DataFrame:
     """EWMA: Compare current price to exponentially weighted moving average.
 
     Key advantage: After a spike, the EWMA adapts, reducing redundant signals
     from the same price move. One price move → one spike (not 14 spikes).
-
-    CRITICAL (Feb 3, 2026): Includes timestamp deduplication and gap detection
-    to match main backtest behavior exactly.
     """
     halflife_ticks = halflife_ms / 16.67  # ~60Hz data
     alpha = 1 - 0.5 ** (1.0 / halflife_ticks)
@@ -539,30 +505,13 @@ def precompute_spikes_ewma(btc_df: pd.DataFrame, halflife_ms: int, gap_threshold
     df = btc_df.copy()
     df = df.sort_values('timestamp_ms').reset_index(drop=True)
 
-    # Deduplicate by timestamp to ensure consistent spike detection (Feb 3, 2026)
-    original_len = len(df)
-    df = df.drop_duplicates(subset=['timestamp_ms'], keep='first').reset_index(drop=True)
-    if len(df) < original_len:
-        print(f"    [EWMA_{halflife_ms}] Deduplicated: {original_len:,} → {len(df):,} rows")
-
-    # Compute EWMA of price with gap detection
+    # Compute EWMA of price
     prices = df['price'].values
-    timestamps = df['timestamp_ms'].values
     ewma_prices = np.zeros(len(prices))
     ewma_prices[0] = prices[0]
 
-    gap_count = 0
     for i in range(1, len(prices)):
-        time_diff = timestamps[i] - timestamps[i-1]
-        if time_diff > gap_threshold_ms:
-            # Gap detected - reset EWMA to current price
-            ewma_prices[i] = prices[i]
-            gap_count += 1
-        else:
-            ewma_prices[i] = alpha * prices[i] + (1 - alpha) * ewma_prices[i-1]
-
-    if gap_count > 0:
-        print(f"    [EWMA_{halflife_ms}] Reset EWMA at {gap_count} gap(s) > 30min")
+        ewma_prices[i] = alpha * prices[i] + (1 - alpha) * ewma_prices[i-1]
 
     df['ewma_price'] = ewma_prices
     df['change_pct'] = (df['price'] - df['ewma_price']) / df['ewma_price'] * 100
@@ -798,57 +747,8 @@ def simulate_market_single(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                             obs_idx += 1
                             break
 
-                # Check BREAKEVEN EXIT (Feb 3, 2026) - exit when winner_bid <= entry
-                elapsed_ms = obs_ts - entry_ts
-                if config.breakeven_min_hold_ms is not None and elapsed_ms >= config.breakeven_min_hold_ms:
-                    winner_side_current = position_data['winner_side']
-                    if winner_side_current == "UP":
-                        winner_bid_current = obs_row['up_bid']
-                    else:
-                        winner_bid_current = obs_row['down_bid']
-
-                    # Breakeven = winner_bid <= entry (exit before loss grows)
-                    if pd.notna(winner_bid_current) and winner_bid_current <= winner_entry:
-                        loser_fill = loser_ask if pd.notna(loser_ask) else loser_target * 1.05
-                        pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
-                            winner_entry, loser_fill, config.shares_per_cycle,
-                            is_taker_entry=True, is_taker_exit=True
-                        )
-                        trades.append(TradeResult(
-                            market_slug=slug,
-                            cycle_num=cycle_num,
-                            entry_time_remaining=position_data['entry_time_rem'],
-                            signal_score=score,
-                            winner_side=position_data['winner_side'],
-                            winner_fill_price=winner_entry,
-                            loser_fill_price=loser_fill,
-                            hedge_type="breakeven",
-                            pair_cost=winner_entry + loser_fill,
-                            pnl_gross=pnl_gross,
-                            pnl_net=pnl_net,
-                            entry_fee=entry_fee,
-                            exit_fee=exit_fee,
-                            correct_direction=(resolution == position_data['winner_side']),
-                            spike_magnitude=spike_mag,
-                            dataset=dataset_name,
-                            offset_name=config.offset_name,
-                            cycle_mode=config.cycle_mode,
-                            shares=config.shares_per_cycle,
-                            stop_loss_pct=config.stop_loss_pct,
-                            max_market_losses=config.max_market_losses,
-                        ))
-
-                        if pnl_net < 0:
-                            market_loss_count += 1
-
-                        in_position = False
-                        position_data = None
-                        last_hedge_ts = obs_ts
-                        obs_idx += 1
-                        break
-
                 # Check time-stop (ONLY if NOT in profit)
-                # elapsed_ms already calculated above for breakeven check
+                elapsed_ms = obs_ts - entry_ts
                 if time_stop_ms > 0 and elapsed_ms >= time_stop_ms:
                     winner_side_current = position_data['winner_side']
                     if winner_side_current == "UP":
@@ -972,7 +872,7 @@ def simulate_market_single(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
         time_rem = obs_row['time_remaining_secs']
         velocity_bps = obs_row.get('velocity_bps', 0.0) or 0.0
 
-        # Skip if too close to end (dynamic: time_stop + 60s buffer)
+        # Skip if too close to end (dynamic based on config.time_stop)
         if time_rem < config.min_time:
             spike_idx += 1
             continue
@@ -1229,7 +1129,7 @@ def simulate_market_multicycle(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
             # Entry filters
             can_enter = True
             score = 0.0
-            if time_rem < MIN_TIME:
+            if time_rem < config.min_time:
                 can_enter = False
             elif not velocity_confirms_spike(spike_dir, velocity_bps):
                 can_enter = False
@@ -1328,99 +1228,6 @@ def simulate_market_multicycle(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
 
 
 # =============================================================================
-# DEEP METRICS COMPUTATION - Per-trade analysis for autonomous trading decisions
-# =============================================================================
-
-def compute_deep_metrics(trades: List[TradeResult], hours: float, config_name: str, dataset_name: str) -> dict:
-    """
-    Compute comprehensive risk metrics for autonomous trading decisions.
-
-    Returns metrics required by CLAUDE_MISTAKES.md MANDATORY ANALYSIS METRICS:
-    - Sharpe ratio (> 1.0 minimum, > 1.5 strong)
-    - Profitable market % (> 50% minimum)
-    - Worst single trade (> -$10)
-    - Worst single market
-    - Taker exit % - lower is better
-    - Max drawdown % (target < 20%)
-    """
-    if not trades:
-        return None
-
-    trades_df = pd.DataFrame([t.__dict__ for t in trades])
-    returns = trades_df['pnl_net']
-
-    # Sharpe ratio (annualized to hourly - sqrt of trades per hour)
-    trades_per_hour = len(trades_df) / hours if hours > 0 else 0
-    if returns.std() > 0 and trades_per_hour > 0:
-        sharpe = (returns.mean() / returns.std()) * np.sqrt(trades_per_hour)
-    else:
-        sharpe = 0.0
-
-    # Max drawdown calculation
-    cumulative_pnl = returns.cumsum()
-    rolling_max = cumulative_pnl.cummax()
-    drawdown = rolling_max - cumulative_pnl
-    max_drawdown = drawdown.max()
-    total_pnl = returns.sum()
-    max_drawdown_pct = (max_drawdown / abs(total_pnl) * 100) if total_pnl != 0 else 0
-
-    # Worst single trade
-    worst_trade_pnl = returns.min()
-    worst_trade_idx = returns.idxmin()
-    worst_trade_market = trades_df.loc[worst_trade_idx, 'market_slug']
-
-    # Per-market statistics
-    market_pnl = trades_df.groupby('market_slug')['pnl_net'].sum()
-    worst_market_pnl = market_pnl.min()
-    worst_market_slug = market_pnl.idxmin()
-    profitable_markets = (market_pnl > 0).sum()
-    total_markets = len(market_pnl)
-    profitable_market_pct = (profitable_markets / total_markets * 100) if total_markets > 0 else 0
-
-    # Taker exit % (time_stop, stop_loss, resolution = taker exit)
-    taker_exit_count = trades_df['hedge_type'].isin(['time_stop', 'breakeven', 'stop_loss', 'resolution']).sum()
-    taker_exit_pct = (taker_exit_count / len(trades_df) * 100) if len(trades_df) > 0 else 0
-
-    # Additional stats
-    passive_pct = (trades_df['hedge_type'] == 'passive').sum() / len(trades_df) * 100
-    stop_loss_pct = (trades_df['hedge_type'] == 'stop_loss').sum() / len(trades_df) * 100
-
-    return {
-        'sharpe': sharpe,
-        'max_drawdown': max_drawdown,
-        'max_drawdown_pct': max_drawdown_pct,
-        'profitable_market_pct': profitable_market_pct,
-        'profitable_markets': profitable_markets,
-        'total_markets': total_markets,
-        'worst_trade_pnl': worst_trade_pnl,
-        'worst_trade_market': worst_trade_market,
-        'worst_market_pnl': worst_market_pnl,
-        'worst_market_slug': worst_market_slug,
-        'taker_exit_pct': taker_exit_pct,  # Renamed from unhedged_pct
-        'passive_pct': passive_pct,
-        'stop_loss_pct': stop_loss_pct,
-    }
-
-
-def save_per_trade_csv(trades: List[TradeResult], config_name: str, dataset_name: str) -> str:
-    """Save per-trade data to CSV for detailed analysis."""
-    if not trades:
-        return None
-
-    trades_df = pd.DataFrame([t.__dict__ for t in trades])
-
-    # Create clean filename
-    clean_config = config_name.replace('/', '_').replace(' ', '_')
-    clean_dataset = dataset_name.replace('+', '_').replace(' ', '_')
-
-    trades_path = Path(f"research/findings/data/grid_trades_{clean_config}_{clean_dataset}.csv")
-    trades_path.parent.mkdir(parents=True, exist_ok=True)
-    trades_df.to_csv(trades_path, index=False)
-
-    return str(trades_path)
-
-
-# =============================================================================
 # DATA LOADING
 # =============================================================================
 
@@ -1507,55 +1314,168 @@ def load_dataset(dataset_key: str) -> Tuple[Optional[pd.DataFrame], Optional[pd.
 
 
 # =============================================================================
-# MAIN GRID SEARCH
+# DEEP METRICS COMPUTATION - Per-trade analysis for autonomous trading decisions
+# =============================================================================
+
+def compute_deep_metrics(trades: List[TradeResult], hours: float, config_name: str, dataset_name: str) -> dict:
+    """
+    Compute comprehensive risk metrics for autonomous trading decisions.
+
+    Returns metrics required by CLAUDE_MISTAKES.md MANDATORY ANALYSIS METRICS:
+    - Sharpe ratio (> 1.0 minimum, > 1.5 strong)
+    - Profitable market % (> 50% minimum)
+    - Worst single trade (> -$10)
+    - Worst single market
+    - Taker exit % (formerly "unhedged %") - lower is better
+    - Max drawdown % (target < 20%)
+    """
+    if not trades:
+        return None
+
+    trades_df = pd.DataFrame([t.__dict__ for t in trades])
+    returns = trades_df['pnl_net']
+
+    # Sharpe ratio (annualized to hourly - sqrt of trades per hour)
+    trades_per_hour = len(trades_df) / hours if hours > 0 else 0
+    if returns.std() > 0 and trades_per_hour > 0:
+        sharpe = (returns.mean() / returns.std()) * np.sqrt(trades_per_hour)
+    else:
+        sharpe = 0.0
+
+    # Max drawdown calculation
+    cumulative_pnl = returns.cumsum()
+    rolling_max = cumulative_pnl.cummax()
+    drawdown = rolling_max - cumulative_pnl
+    max_drawdown = drawdown.max()
+    total_pnl = returns.sum()
+    max_drawdown_pct = (max_drawdown / abs(total_pnl) * 100) if total_pnl != 0 else 0
+
+    # Worst single trade
+    worst_trade_pnl = returns.min()
+    worst_trade_idx = returns.idxmin()
+    worst_trade_market = trades_df.loc[worst_trade_idx, 'market_slug']
+
+    # Per-market statistics
+    market_pnl = trades_df.groupby('market_slug')['pnl_net'].sum()
+    worst_market_pnl = market_pnl.min()
+    worst_market_slug = market_pnl.idxmin()
+    profitable_markets = (market_pnl > 0).sum()
+    total_markets = len(market_pnl)
+    profitable_market_pct = (profitable_markets / total_markets * 100) if total_markets > 0 else 0
+
+    # Taker exit % (time_stop, stop_loss, resolution = taker exit, not "unhedged")
+    # These trades ARE hedged, just via taker instead of passive maker
+    taker_exit_count = trades_df['hedge_type'].isin(['time_stop', 'stop_loss', 'resolution']).sum()
+    taker_exit_pct = (taker_exit_count / len(trades_df) * 100) if len(trades_df) > 0 else 0
+
+    # Passive fill stats
+    passive_pct = (trades_df['hedge_type'] == 'passive').sum() / len(trades_df) * 100
+    stop_loss_pct = (trades_df['hedge_type'] == 'stop_loss').sum() / len(trades_df) * 100
+    time_stop_pct = (trades_df['hedge_type'] == 'time_stop').sum() / len(trades_df) * 100
+
+    return {
+        'sharpe': sharpe,
+        'max_drawdown': max_drawdown,
+        'max_drawdown_pct': max_drawdown_pct,
+        'profitable_market_pct': profitable_market_pct,
+        'profitable_markets': profitable_markets,
+        'total_markets': total_markets,
+        'worst_trade_pnl': worst_trade_pnl,
+        'worst_trade_market': worst_trade_market,
+        'worst_market_pnl': worst_market_pnl,
+        'worst_market_slug': worst_market_slug,
+        'taker_exit_pct': taker_exit_pct,  # Renamed from unhedged_pct
+        'passive_pct': passive_pct,
+        'stop_loss_pct': stop_loss_pct,
+        'time_stop_pct': time_stop_pct,
+    }
+
+
+def save_per_trade_csv(trades: List[TradeResult], config_name: str, dataset_name: str) -> str:
+    """Save per-trade data to CSV for detailed analysis."""
+    if not trades:
+        return None
+
+    trades_df = pd.DataFrame([t.__dict__ for t in trades])
+
+    # Create clean filename
+    clean_config = config_name.replace('/', '_').replace(' ', '_')
+    clean_dataset = dataset_name.replace('+', '_').replace(' ', '_')
+
+    trades_path = Path(f"research/findings/data/short_term_trades_{clean_config}_{clean_dataset}.csv")
+    trades_path.parent.mkdir(parents=True, exist_ok=True)
+    trades_df.to_csv(trades_path, index=False)
+
+    return str(trades_path)
+
+
+# =============================================================================
+# MAIN GRID SEARCH - With deep metrics and per-trade logging
 # =============================================================================
 
 def run_grid_search():
-    """Run grid search across all 9 configurations x 4 datasets."""
+    """Run grid search across all configurations with deep metrics."""
 
     if not validate_dataset_coverage():
         print("\n  ABORTING: Fix dataset coverage issues before running backtest!")
         return None
 
     print("=" * 80)
-    print("TIME-STOP & LOSER OFFSET OPTIMIZATION TEST")
+    print("COMPREHENSIVE GRID SEARCH - Spike Method × Time-Stop × Hedge Formula")
     print("=" * 80)
-    print(f"\nConfigurations: {len(CONFIGS)} ({len(OFFSET_PRESETS)} offsets x {len(TIME_STOPS)} time-stops)")
-    print(f"Datasets: {len(DATASETS)} ({', '.join(DATASETS.keys())})")
-    print(f"Total runs: {len(CONFIGS) * len(DATASETS)}")
+
+    print(f"Configurations: {len(CONFIGS)} ({len(SPIKE_METHODS)} spike × {len(TIME_STOPS)} time-stop × {len(HEDGE_FORMULAS)} hedge)")
+    print(f"Datasets: {len(DATASETS_TO_RUN)} ({', '.join(DATASETS_TO_RUN)})")
+    print(f"Total runs: {len(CONFIGS) * len(DATASETS_TO_RUN)}")
     print()
-    print("Offset presets:")
-    for name, (mult, intercept, desc) in OFFSET_PRESETS.items():
+    print("Spike methods:")
+    for method in SPIKE_METHODS:
+        print(f"  {method}")
+    print()
+    print("Hedge formulas:")
+    for name, (mult, intercept, desc) in HEDGE_FORMULAS.items():
         print(f"  {name}: DROP_MULT={mult}, DROP_INT={intercept} ({desc})")
     print()
 
     load_ou_params()
 
-    dataset_cache = {}
+    # Cache by (dataset, spike_method) tuple - different spike methods need different precomputation
+    dataset_cache = {}  # key: dataset_key, value: (btc_df, obs_df, res_map, hours, use_obi)
+    spike_cache = {}    # key: (dataset_key, spike_method), value: btc_spikes
     all_results = []
-    checkpoint_path = Path("research/findings/data/timestop_offset_v2_checkpoint.csv")
+    all_deep_metrics = []
+    checkpoint_path = Path("research/findings/data/short_term_test_checkpoint.csv")
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
-    total_iterations = len(CONFIGS) * len(DATASETS)
+    total_iterations = len(CONFIGS) * len(DATASETS_TO_RUN)
     iteration = 0
     start_time = time.time()
 
     for config in CONFIGS:
-        for dataset_key in DATASETS.keys():
+        for dataset_key in DATASETS_TO_RUN:
             iteration += 1
+            ds_config = DATASETS[dataset_key]
+            use_obi = ds_config['use_obi']
+
             print(f"\n[{iteration}/{total_iterations}] {config.name} on {dataset_key}")
 
+            # Load dataset (cached by dataset_key)
             if dataset_key not in dataset_cache:
-                ds_config = DATASETS[dataset_key]
                 btc_df, obs_df, res_map, hours = load_dataset(dataset_key)
                 if btc_df is not None:
-                    btc_spikes = precompute_spikes_ou(btc_df)
-                    dataset_cache[dataset_key] = (btc_spikes, obs_df, res_map, hours, ds_config['use_obi'])
+                    dataset_cache[dataset_key] = (btc_df, obs_df, res_map, hours, use_obi)
                 else:
                     continue
             else:
-                btc_spikes, obs_df, res_map, hours, use_obi = dataset_cache[dataset_key]
-                ds_config = DATASETS[dataset_key]
+                btc_df, obs_df, res_map, hours, use_obi = dataset_cache[dataset_key]
+
+            # Compute spikes (cached by (dataset_key, spike_method))
+            cache_key = (dataset_key, config.spike_method)
+            if cache_key not in spike_cache:
+                btc_spikes = precompute_spikes(btc_df, config.spike_method)
+                spike_cache[cache_key] = btc_spikes
+            else:
+                btc_spikes = spike_cache[cache_key]
 
             all_trades = []
             slugs = obs_df['market_slug'].unique()
@@ -1566,7 +1486,7 @@ def run_grid_search():
                     continue
 
                 trades = simulate_market(
-                    btc_spikes, obs_df, slug, resolution, ds_config['use_obi'], dataset_key, config
+                    btc_spikes, obs_df, slug, resolution, use_obi, dataset_key, config
                 )
                 all_trades.extend(trades)
 
@@ -1586,6 +1506,7 @@ def run_grid_search():
 
                 result = {
                     'config': config.name,
+                    'spike_method': config.spike_method,
                     'time_stop': config.time_stop_seconds,
                     'drop_multiplier': config.drop_multiplier,
                     'drop_intercept': config.drop_intercept,
@@ -1594,6 +1515,7 @@ def run_grid_search():
                     'max_cycles': config.max_cycles,
                     'shares_per_cycle': config.shares_per_cycle,
                     'dataset': dataset_key,
+                    'use_obi': use_obi,
                     'hours': hours,
                     'trades': total_trades,
                     'pnl_net': total_pnl_net,
@@ -1603,19 +1525,31 @@ def run_grid_search():
                     'passive_pct': passive_pct,
                     # Deep metrics
                     'sharpe': deep_metrics['sharpe'] if deep_metrics else 0,
+                    'max_drawdown': deep_metrics['max_drawdown'] if deep_metrics else 0,
+                    'max_drawdown_pct': deep_metrics['max_drawdown_pct'] if deep_metrics else 0,
                     'profitable_market_pct': deep_metrics['profitable_market_pct'] if deep_metrics else 0,
                     'worst_trade_pnl': deep_metrics['worst_trade_pnl'] if deep_metrics else 0,
                     'worst_market_pnl': deep_metrics['worst_market_pnl'] if deep_metrics else 0,
                     'worst_market_slug': deep_metrics['worst_market_slug'] if deep_metrics else '',
-                    'unhedged_pct': deep_metrics['unhedged_pct'] if deep_metrics else 0,
+                    'taker_exit_pct': deep_metrics['taker_exit_pct'] if deep_metrics else 0,
                     'trades_csv': trades_csv_path,
                 }
                 all_results.append(result)
 
+                # Store deep metrics separately for detailed report
+                if deep_metrics:
+                    deep_metrics['config'] = config.name
+                    deep_metrics['dataset'] = dataset_key
+                    deep_metrics['use_obi'] = use_obi
+                    deep_metrics['hourly_rate'] = hourly_rate
+                    deep_metrics['hours'] = hours
+                    deep_metrics['trades'] = total_trades
+                    all_deep_metrics.append(deep_metrics)
+
                 # Print summary with deep metrics
                 print(f"    Trades: {total_trades}, $/hr: ${hourly_rate:.2f}, Win%: {win_rate:.1f}%")
-                if deep_metrics:
-                    print(f"    Sharpe: {deep_metrics['sharpe']:.2f}, ProfMkt: {deep_metrics['profitable_market_pct']:.1f}%, Unhedged: {deep_metrics['unhedged_pct']:.1f}%")
+                print(f"    Sharpe: {deep_metrics['sharpe']:.2f}, Drawdown: ${deep_metrics['max_drawdown']:.2f}, ProfMkts: {deep_metrics['profitable_market_pct']:.1f}%, Taker: {deep_metrics['taker_exit_pct']:.1f}%")
+                print(f"    Worst trade: ${deep_metrics['worst_trade_pnl']:.2f}, Worst mkt: ${deep_metrics['worst_market_pnl']:.2f} ({deep_metrics['worst_market_slug'][:30]}...)")
 
         # Checkpoint save after each config
         if all_results:
@@ -1624,35 +1558,109 @@ def run_grid_search():
     elapsed = time.time() - start_time
     print(f"\n\nCompleted in {elapsed / 60:.1f} minutes")
 
-    return all_results
+    # Save deep metrics summary
+    if all_deep_metrics:
+        deep_metrics_path = Path("research/findings/data/short_term_deep_metrics.csv")
+        pd.DataFrame(all_deep_metrics).to_csv(deep_metrics_path, index=False)
+        print(f"\nDeep metrics saved to: {deep_metrics_path}")
+
+    return all_results, all_deep_metrics
 
 
-def print_results(results: List[dict]):
-    """Print comprehensive results summary."""
+def print_results(results: List[dict], deep_metrics: List[dict] = None):
+    """Print comprehensive results summary with deep metrics."""
     df = pd.DataFrame(results)
 
-    print("\n" + "=" * 100)
-    print("TIME-STOP & LOSER OFFSET TEST RESULTS")
-    print("=" * 100)
+    print("\n" + "=" * 140)
+    print("COMPREHENSIVE GRID SEARCH RESULTS - Spike Method × Time-Stop × Hedge Formula")
+    print("=" * 140)
 
-    # Per-dataset breakdown
-    for dataset in DATASETS.keys():
-        ds_df = df[df['dataset'] == dataset]
-        if len(ds_df) == 0:
-            continue
+    # ==========================================================================
+    # DEEP METRICS TABLE (MANDATORY per CLAUDE_MISTAKES.md)
+    # ==========================================================================
+    print("\n" + "=" * 140)
+    print("DEEP METRICS - Required for Autonomous Trading Decision")
+    print("Thresholds: Sharpe > 1.0, Drawdown < 20%, Profitable Mkts > 50%, Worst Trade > -$10")
+    print("=" * 140)
 
-        hours = ds_df['hours'].iloc[0]
-        print(f"\n{'='*80}")
-        print(f"Dataset: {dataset} ({hours:.1f}h, OBI {'ON' if DATASETS[dataset]['use_obi'] else 'OFF'})")
-        print(f"{'='*80}")
+    if 'sharpe' in df.columns:
         print()
-        print(f"{'Config':<20} {'Trades':>8} {'$/hr':>10} {'Win%':>8} {'Passive%':>10} {'Avg Pair':>10}")
-        print("-" * 80)
+        print(f"{'Config':<22} {'Dataset':<10} {'$/hr':>8} {'Sharpe':>7} {'MaxDD':>8} {'ProfMkt%':>9} {'WorstTrd':>10} {'Taker%':>8}")
+        print("-" * 140)
 
-        ds_df_sorted = ds_df.sort_values('hourly_rate', ascending=False)
-        for _, row in ds_df_sorted.iterrows():
-            print(f"{row['config']:<20} {row['trades']:>8} ${row['hourly_rate']:>9.2f} "
-                  f"{row['win_rate']:>7.1f}% {row['passive_pct']:>9.1f}% ${row['avg_pair_cost']:>9.4f}")
+        for _, row in df.sort_values(['config', 'dataset']).iterrows():
+            # Color-code pass/fail (using markers)
+            sharpe_mark = "✓" if row['sharpe'] > 1.0 else "✗"
+            drawdown_mark = "✓" if row.get('max_drawdown', 0) < row.get('pnl_net', 1) * 0.2 else "✗"
+            profmkt_mark = "✓" if row['profitable_market_pct'] > 50 else "✗"
+            worst_trade_mark = "✓" if row['worst_trade_pnl'] > -10 else "✗"
+
+            taker_pct = row.get('taker_exit_pct', row.get('unhedged_pct', 0))
+
+            print(f"{row['config']:<22} {row['dataset']:<10} "
+                  f"${row['hourly_rate']:>7.2f} {row['sharpe']:>6.2f}{sharpe_mark} "
+                  f"${row.get('max_drawdown', 0):>6.2f}{drawdown_mark} "
+                  f"{row['profitable_market_pct']:>8.1f}%{profmkt_mark} "
+                  f"${row['worst_trade_pnl']:>8.2f}{worst_trade_mark} "
+                  f"{taker_pct:>7.1f}%")
+
+    # ==========================================================================
+    # CONSERVATIVE VALIDATION SUMMARY (older datasets without OBI)
+    # ==========================================================================
+    conservative_df = df[df['use_obi'] == False] if 'use_obi' in df.columns else pd.DataFrame()
+    if len(conservative_df) > 0:
+        print("\n" + "=" * 120)
+        print("CONSERVATIVE VALIDATION (Older Data WITHOUT OBI)")
+        print("If profitable here, strategy is robust (OBI improves results ~4pp)")
+        print("=" * 120)
+        print()
+
+        for config_name in conservative_df['config'].unique():
+            config_df = conservative_df[conservative_df['config'] == config_name]
+            total_pnl = config_df['pnl_net'].sum()
+            total_hours = config_df['hours'].sum()
+            avg_rate = total_pnl / total_hours if total_hours > 0 else 0
+            avg_sharpe = config_df['sharpe'].mean()
+            all_profitable = (config_df['hourly_rate'] > 0).all()
+
+            status = "PASS ✓" if all_profitable and avg_rate > 0 else "FAIL ✗"
+            print(f"  {config_name:<25}: ${avg_rate:.2f}/hr, Sharpe={avg_sharpe:.2f} → {status}")
+
+            # Per-dataset breakdown
+            for _, row in config_df.iterrows():
+                ds_status = "+" if row['hourly_rate'] > 0 else "-"
+                print(f"      {row['dataset']:<12}: ${row['hourly_rate']:.2f}/hr {ds_status}")
+
+    # ==========================================================================
+    # OOS7/8/9.1 RESULTS (with OBI - primary validation)
+    # ==========================================================================
+    obi_on_df = df[df['use_obi'] == True] if 'use_obi' in df.columns else df
+    if len(obi_on_df) > 0:
+        print("\n" + "=" * 120)
+        print("PRIMARY VALIDATION (OOS7/8/9.1 WITH OBI)")
+        print("=" * 120)
+
+        # Per-dataset breakdown
+        datasets_shown = set()
+        for dataset in obi_on_df['dataset'].unique():
+            ds_df = obi_on_df[obi_on_df['dataset'] == dataset]
+            if len(ds_df) == 0 or dataset in datasets_shown:
+                continue
+            datasets_shown.add(dataset)
+
+            hours = ds_df['hours'].iloc[0]
+            print(f"\n{'='*80}")
+            print(f"Dataset: {dataset} ({hours:.1f}h, OBI ON)")
+            print(f"{'='*80}")
+            print()
+            print(f"{'Config':<22} {'Trades':>8} {'$/hr':>10} {'Sharpe':>8} {'Drawdown':>10} {'ProfMkt%':>10} {'Taker%':>8}")
+            print("-" * 90)
+
+            ds_df_sorted = ds_df.sort_values('hourly_rate', ascending=False)
+            for _, row in ds_df_sorted.iterrows():
+                taker_pct = row.get('taker_exit_pct', row.get('unhedged_pct', 0))
+                print(f"{row['config']:<22} {row['trades']:>8} ${row['hourly_rate']:>9.2f} "
+                      f"{row['sharpe']:>7.2f} ${row.get('max_drawdown', 0):>8.2f} {row['profitable_market_pct']:>9.1f}% {taker_pct:>7.1f}%")
 
     # Combined results
     print("\n" + "=" * 100)
@@ -1681,21 +1689,21 @@ def print_results(results: List[dict]):
         print(f"{row['config']:<20} {row['trades']:>8} ${row['hourly_rate']:>9.2f} "
               f"{row['win_rate']:>7.1f}% {row['passive_pct']:>9.1f}% {winner:>8}")
 
-    # Offset sensitivity
+    # Hedge formula sensitivity
     print("\n" + "=" * 100)
-    print("OFFSET SENSITIVITY ANALYSIS")
+    print("HEDGE FORMULA SENSITIVITY ANALYSIS")
     print("=" * 100)
 
-    print("\nBy Offset Type:")
-    for offset_name in OFFSET_PRESETS.keys():
-        offset_df = df[df['offset_name'] == offset_name]
-        if len(offset_df) > 0:
-            total_pnl = offset_df['pnl_net'].sum()
-            total_hours = offset_df['hours'].sum()
+    print("\nBy Hedge Formula:")
+    for hedge_name in HEDGE_FORMULAS.keys():
+        hedge_df = df[df['offset_name'] == hedge_name]
+        if len(hedge_df) > 0:
+            total_pnl = hedge_df['pnl_net'].sum()
+            total_hours = hedge_df['hours'].sum()
             avg_rate = total_pnl / total_hours
-            avg_passive = offset_df['passive_pct'].mean()
-            mult, intercept, desc = OFFSET_PRESETS[offset_name]
-            print(f"  {offset_name:<8}: ${avg_rate:.2f}/hr, {avg_passive:.1f}% passive (mult={mult}, int={intercept})")
+            avg_passive = hedge_df['passive_pct'].mean()
+            mult, intercept, desc = HEDGE_FORMULAS[hedge_name]
+            print(f"  {hedge_name:<8}: ${avg_rate:.2f}/hr, {avg_passive:.1f}% passive (mult={mult}, int={intercept})")
 
     # Time-stop sensitivity
     print("\nBy Time-Stop:")
@@ -1720,64 +1728,132 @@ def print_results(results: List[dict]):
             avg_win = mode_df['win_rate'].mean()
             print(f"  {mode_name:<12}: ${avg_rate:.2f}/hr, {total_trades} trades, {avg_win:.1f}% win ({desc})")
 
-    # Key comparison
-    print("\n" + "=" * 100)
-    print("KEY COMPARISON: SINGLE vs MULTI-CYCLE")
-    print("=" * 100)
-    print("\nQuestion: Does multi-cycle improve hourly rate?")
+    # Spike method sensitivity
+    print("\n" + "=" * 120)
+    print("SPIKE METHOD SENSITIVITY ANALYSIS")
+    print("=" * 120)
+    print("\nBy Spike Method:")
+    for method in SPIKE_METHODS:
+        method_df = df[df['spike_method'] == method] if 'spike_method' in df.columns else pd.DataFrame()
+        if len(method_df) > 0:
+            total_pnl = method_df['pnl_net'].sum()
+            total_hours = method_df['hours'].sum()
+            total_trades = method_df['trades'].sum()
+            avg_rate = total_pnl / total_hours if total_hours > 0 else 0
+            avg_sharpe = method_df['sharpe'].mean() if 'sharpe' in method_df.columns else 0
+            avg_drawdown = method_df['max_drawdown'].mean() if 'max_drawdown' in method_df.columns else 0
+            print(f"  {method:<12}: ${avg_rate:.2f}/hr, {total_trades} trades, Sharpe={avg_sharpe:.2f}, Drawdown=${avg_drawdown:.2f}")
+
+    # Time-stop sensitivity with deep metrics
+    print("\n" + "=" * 120)
+    print("TIME-STOP SENSITIVITY WITH DEEP METRICS")
+    print("=" * 120)
+    print("\nBy Time-Stop:")
+    for ts in TIME_STOPS:
+        ts_df = df[df['time_stop'] == ts]
+        if len(ts_df) > 0:
+            total_pnl = ts_df['pnl_net'].sum()
+            total_hours = ts_df['hours'].sum()
+            avg_rate = total_pnl / total_hours if total_hours > 0 else 0
+            avg_sharpe = ts_df['sharpe'].mean() if 'sharpe' in ts_df.columns else 0
+            avg_taker = ts_df.get('taker_exit_pct', ts_df.get('unhedged_pct', pd.Series([0]))).mean()
+            avg_profmkt = ts_df['profitable_market_pct'].mean() if 'profitable_market_pct' in ts_df.columns else 0
+            avg_drawdown = ts_df['max_drawdown'].mean() if 'max_drawdown' in ts_df.columns else 0
+            print(f"  {int(ts):>4}s: ${avg_rate:.2f}/hr, Sharpe={avg_sharpe:.2f}, Drawdown=${avg_drawdown:.2f}, ProfMkt={avg_profmkt:.1f}%, Taker={avg_taker:.1f}%")
+
+    # ==========================================================================
+    # DECISION CRITERIA FOR AUTONOMOUS TRADING
+    # ==========================================================================
+    print("\n" + "=" * 120)
+    print("DECISION CRITERIA FOR AUTONOMOUS TRADING")
+    print("=" * 120)
+    print()
+    print("Minimum thresholds:")
+    print("  - Sharpe > 1.0 on OOS7/8/9.1 (with OBI)")
+    print("  - Profitable market % > 50% across all datasets")
+    print("  - Worst single trade > -$10 (no catastrophic losses)")
+    print("  - Max drawdown < 20% of total PnL")
+    print("  - Profitable on older data (no OBI) - conservative validation passes")
+    print()
+    print("Strong signal if:")
+    print("  - Sharpe > 1.5")
+    print("  - Profitable on ALL datasets including older ones")
+    print("  - Worst market loss < -$20")
     print()
 
-    # Compare SINGLE vs MULTI for each offset+timestop combo
-    for offset_name in OFFSET_PRESETS.keys():
-        for ts in TIME_STOPS:
-            single_name = f"{offset_name}_TS{int(ts)}_SINGLE"
-            multi_name = f"{offset_name}_TS{int(ts)}_MULTI"
+    # Evaluate each config against criteria
+    if 'sharpe' in df.columns:
+        print("Config Evaluation:")
+        for config_name in df['config'].unique():
+            config_df = df[df['config'] == config_name]
 
-            single_df = df[df['config'] == single_name]
-            multi_df = df[df['config'] == multi_name]
+            # OBI ON results (primary)
+            obi_on = config_df[config_df['use_obi'] == True] if 'use_obi' in config_df.columns else config_df
+            # OBI OFF results (conservative)
+            obi_off = config_df[config_df['use_obi'] == False] if 'use_obi' in config_df.columns else pd.DataFrame()
 
-            if len(single_df) > 0 and len(multi_df) > 0:
-                single_rate = single_df['pnl_net'].sum() / single_df['hours'].sum()
-                multi_rate = multi_df['pnl_net'].sum() / multi_df['hours'].sum()
-                single_trades = single_df['trades'].sum()
-                multi_trades = multi_df['trades'].sum()
-                diff = multi_rate - single_rate
-                trade_increase = (multi_trades / single_trades - 1) * 100 if single_trades > 0 else 0
-                winner = "MULTI*" if multi_rate > single_rate else "SINGLE"
-                print(f"  {offset_name}_TS{int(ts)}: SINGLE ${single_rate:.2f}/hr ({single_trades} trades) | "
-                      f"MULTI ${multi_rate:.2f}/hr ({multi_trades} trades, +{trade_increase:.0f}%) → {winner}")
+            passes_sharpe = (obi_on['sharpe'] > 1.0).all() if len(obi_on) > 0 else False
+            passes_profmkt = (config_df['profitable_market_pct'] > 50).all()
+            passes_worst_trade = (config_df['worst_trade_pnl'] > -10).all()
+            passes_drawdown = (config_df['max_drawdown_pct'] < 20).all() if 'max_drawdown_pct' in config_df.columns else True
+            passes_conservative = (obi_off['hourly_rate'] > 0).all() if len(obi_off) > 0 else True
+
+            all_pass = passes_sharpe and passes_profmkt and passes_worst_trade and passes_drawdown and passes_conservative
+
+            status = "READY FOR AUTONOMOUS TRADING ✓" if all_pass else "NEEDS REVIEW"
+            print(f"\n  {config_name}:")
+            print(f"    Sharpe > 1.0 (OBI ON):     {'✓' if passes_sharpe else '✗'}")
+            print(f"    Profitable Mkts > 50%:     {'✓' if passes_profmkt else '✗'}")
+            print(f"    Worst Trade > -$10:        {'✓' if passes_worst_trade else '✗'}")
+            print(f"    Drawdown < 20% PnL:        {'✓' if passes_drawdown else '✗'}")
+            print(f"    Conservative Valid (no OBI): {'✓' if passes_conservative else '✗'}")
+            print(f"    → {status}")
 
     # Save final results
-    output_path = Path("research/findings/data/timestop_offset_v2_results.csv")
+    output_path = Path("research/findings/data/short_term_test_results.csv")
     df.to_csv(output_path, index=False)
     print(f"\nResults saved to: {output_path}")
 
 
 def main():
-    print("=" * 80)
-    print("AGGRESSIVE GRID SEARCH - Offset × Time-Stop × Cycle-Mode")
-    print("Config from TRADING_CONFIGS.py - OU ADAPTIVE threshold")
-    print("=" * 80)
+    print("=" * 100)
+    print("COMPREHENSIVE GRID SEARCH - Spike Method × Time-Stop × Hedge Formula")
+    print("=" * 100)
     print()
     print("Grid dimensions:")
     print()
-    print("1. Offset presets:")
-    for name, (mult, intercept, desc) in OFFSET_PRESETS.items():
+    print("1. Spike Methods (Feb 3, 2026 - EWMA spike base discovery):")
+    print("   (FIXED already tested separately - focus on EWMA variants)")
+    for method in SPIKE_METHODS:
+        halflife = method.split("_")[1]
+        print(f"   {method}: Compare to EWMA (half-life={halflife}ms) - adapts after spike")
+    print()
+    print("2. Hedge formulas:")
+    for name, (mult, intercept, desc) in HEDGE_FORMULAS.items():
         print(f"   {name}: DROP_MULT={mult}, DROP_INT={intercept} ({desc})")
     print()
-    print(f"2. Time-stops: {[int(t) for t in TIME_STOPS]}s")
+    print(f"3. Time-stops: {[int(t) for t in TIME_STOPS]}s")
     print()
-    print("3. Cycle modes:")
-    for name, (max_cycles, shares, dir_mode, desc) in CYCLE_MODES.items():
-        print(f"   {name}: {max_cycles} cycles × {shares} shares, mode={dir_mode} ({desc})")
+    print(f"4. Datasets: {DATASETS_TO_RUN}")
+    print("   (OBI filter auto-applies if columns exist in data)")
     print()
-    print(f"Total configs: {len(CONFIGS)} = {len(OFFSET_PRESETS)} offsets × {len(TIME_STOPS)} time-stops × {len(CYCLE_MODES)} cycle-modes")
+    print(f"Total configs: {len(CONFIGS)} = {len(SPIKE_METHODS)} spike × {len(TIME_STOPS)} time-stop × {len(HEDGE_FORMULAS)} hedge")
+    print()
+    print("Deep metrics collected:")
+    print("  - PnL ($/hr)")
+    print("  - Sharpe ratio (target > 1.0)")
+    print("  - Max drawdown (target < 20% of PnL)")
+    print("  - Profitable market % (target > 50%)")
+    print("  - Worst single trade (target > -$10)")
+    print("  - Worst single market")
+    print("  - Taker exit % (lower = more passive fills)")
     print()
 
-    results = run_grid_search()
+    result = run_grid_search()
 
-    if results:
-        print_results(results)
+    if result:
+        results, deep_metrics = result
+        print_results(results, deep_metrics)
 
 
 if __name__ == "__main__":

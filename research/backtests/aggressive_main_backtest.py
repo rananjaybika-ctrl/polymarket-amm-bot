@@ -86,6 +86,16 @@ TARGET_PAIR_COST = 0.99
 # Cycling
 MIN_CYCLE_GAP_MS = getattr(AGGRESSIVE_CONFIG, 'min_cycle_gap_ms', 50)  # 50ms (faster cycling)
 
+# =============================================================================
+# BREAKEVEN EXIT - Real-time profit threshold monitoring
+# =============================================================================
+# When enabled, checks every tick if winner_bid <= entry_price (breakeven/loss).
+# If so, exits immediately at market (loser_ask) instead of waiting for time-stop.
+# This catches exits at ~$1.00 pair cost instead of $1.04 from 5s polling delay.
+BREAKEVEN_EXIT_ENABLED = True  # Set False to compare with/without breakeven exit
+BREAKEVEN_MIN_HOLD_MS = 2000   # Minimum hold time (ms) before checking breakeven
+                               # Prevents instant exit from bid/ask spread on entry
+
 # -----------------------------------------------------------------------------
 # Z-SCORE VOLATILITY FILTER - CRITICAL DISCREPANCY!
 # -----------------------------------------------------------------------------
@@ -242,6 +252,26 @@ DATASETS = {
         "expected_hours": 7.7,
         "is_60hz": True,  # 229.5 Hz - include in spike testing
     },
+    "OOS9.2": {
+        "name": "OOS9.2 (Feb 2-3, 17.2h overlap)",
+        "btc_file": "research/binance_hf/btc_prices_oos9_2.csv",
+        "obs_files": [
+            "research/observer/grid_obs_oos9_2.csv",
+        ],
+        "use_obi": True,
+        "expected_hours": 17.2,
+        "is_60hz": True,  # 60Hz+ - include in spike testing
+    },
+    "OOS9": {
+        "name": "OOS9 (Feb 1-3, combined 9.1+9.2)",
+        "btc_file": "research/binance_hf/btc_prices_oos9.csv",
+        "obs_files": [
+            "research/observer/grid_obs_oos9.csv",
+        ],
+        "use_obi": True,
+        "expected_hours": 25.0,
+        "is_60hz": True,  # 60Hz+ - include in spike testing
+    },
 }
 
 # Filter to 60Hz-only datasets for EWMA spike testing
@@ -300,28 +330,49 @@ def precompute_spikes_ewma(btc_df: pd.DataFrame, halflife_ms: int) -> pd.DataFra
 
     Key advantage: After a spike, the EWMA adapts, reducing redundant signals
     from the same price move. One price move → one spike (not 14 spikes).
+
+    Gap handling: When there's a gap > 30 minutes, reset EWMA to current price
+    to avoid false spikes from stale EWMA values.
     """
     halflife_ticks = halflife_ms / 16.67  # ~60Hz data
     alpha = 1 - 0.5 ** (1.0 / halflife_ticks)
+    gap_threshold_ms = 30 * 60 * 1000  # 30 minutes
 
     print(f"    [EWMA_{halflife_ms}] Half-life={halflife_ms}ms, α={alpha:.4f}")
 
     df = btc_df.copy()
     df = df.sort_values('timestamp_ms').reset_index(drop=True)
 
-    # Compute EWMA of price
+    # Deduplicate by timestamp to ensure consistent spike detection
+    original_len = len(df)
+    df = df.drop_duplicates(subset=['timestamp_ms'], keep='first').reset_index(drop=True)
+    if len(df) < original_len:
+        print(f"    [EWMA_{halflife_ms}] Deduplicated: {original_len:,} → {len(df):,} rows")
+
+    # Compute EWMA of price with gap detection
     prices = df['price'].values
+    timestamps = df['timestamp_ms'].values
     ewma_prices = np.zeros(len(prices))
     ewma_prices[0] = prices[0]
 
+    gap_count = 0
     for i in range(1, len(prices)):
-        ewma_prices[i] = alpha * prices[i] + (1 - alpha) * ewma_prices[i-1]
+        time_diff = timestamps[i] - timestamps[i-1]
+        if time_diff > gap_threshold_ms:
+            # Gap detected - reset EWMA to current price
+            ewma_prices[i] = prices[i]
+            gap_count += 1
+        else:
+            ewma_prices[i] = alpha * prices[i] + (1 - alpha) * ewma_prices[i-1]
+
+    if gap_count > 0:
+        print(f"    [EWMA_{halflife_ms}] Reset EWMA at {gap_count} gap(s) > 30min")
 
     df['ewma_price'] = ewma_prices
     df['change_pct'] = (df['price'] - df['ewma_price']) / df['ewma_price'] * 100
     df['spike_magnitude'] = df['change_pct'].abs()
 
-    # OU adaptive threshold (same as FIXED)
+    # OU adaptive threshold (same as FIXED) - also reset on gaps
     returns = df['price'].pct_change() * 100
     vol_halflife = 300
     vol_alpha = 1 - 0.5 ** (1.0 / vol_halflife)
@@ -335,6 +386,9 @@ def precompute_spikes_ewma(btc_df: pd.DataFrame, halflife_ms: int) -> pd.DataFra
             thresholds.append(OU_BASE_THRESHOLD)
             zscores.append(0.0)
             continue
+        # Reset variance on gaps
+        if i > 0 and (timestamps[i] - timestamps[i-1]) > gap_threshold_ms:
+            variance = 0.01  # Reset to default
         variance = vol_alpha * (r ** 2) + (1 - vol_alpha) * variance
         vol = max(np.sqrt(variance), 1e-6)
         threshold = compute_ou_threshold(vol)
@@ -481,8 +535,60 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                     obs_idx += 1
                     break
 
-                # Check time-stop (ONLY if NOT in profit) - matches grid search
+                # =========================================================
+                # BREAKEVEN EXIT: Check if winner_bid <= entry_price
+                # This catches the exact moment we hit breakeven/loss
+                # Exit immediately at market to get ~$1.00 pair cost
+                # instead of waiting for time-stop at $1.04
+                # =========================================================
                 elapsed_ms = obs_ts - entry_ts
+                if BREAKEVEN_EXIT_ENABLED and elapsed_ms >= BREAKEVEN_MIN_HOLD_MS:
+                    winner_side_current = position_data['winner_side']
+                    if winner_side_current == "UP":
+                        winner_bid_current = obs_row['up_bid']
+                    else:
+                        winner_bid_current = obs_row['down_bid']
+
+                    # Breakeven = winner_bid <= entry (not strictly less - includes equal)
+                    if pd.notna(winner_bid_current) and winner_bid_current <= winner_entry:
+                        # Exit at market (loser_ask) - same as time-stop but triggered earlier
+                        loser_fill = loser_ask if pd.notna(loser_ask) else loser_target * 1.05
+                        pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
+                            winner_entry, loser_fill, TARGET_SHARES,
+                            is_taker_entry=True,
+                            is_taker_exit=True  # Market order = taker
+                        )
+
+                        trades.append(TradeResult(
+                            market_slug=slug,
+                            cycle_num=cycle_num,
+                            entry_time_remaining=position_data['entry_time_rem'],
+                            signal_score=score,
+                            winner_side=position_data['winner_side'],
+                            winner_fill_price=winner_entry,
+                            loser_fill_price=loser_fill,
+                            hedge_type="breakeven",  # New hedge type
+                            pair_cost=winner_entry + loser_fill,
+                            pnl_gross=pnl_gross,
+                            pnl_net=pnl_net,
+                            entry_fee=entry_fee,
+                            exit_fee=exit_fee,
+                            correct_direction=(resolution == position_data['winner_side']),
+                            spike_magnitude=spike_mag,
+                            dataset=dataset_name,
+                            offset_name="CURRENT",
+                            cycle_mode="SINGLE",
+                            shares=TARGET_SHARES,
+                        ))
+
+                        in_position = False
+                        position_data = None
+                        last_hedge_ts = obs_ts
+                        obs_idx += 1
+                        break
+
+                # Check time-stop (ONLY if NOT in profit) - matches grid search
+                # elapsed_ms already calculated above for breakeven check
                 if time_stop_ms > 0 and elapsed_ms >= time_stop_ms:
                     winner_side_current = position_data['winner_side']
                     if winner_side_current == "UP":
@@ -740,8 +846,28 @@ def load_dataset(dataset_key: str) -> Tuple[Optional[pd.DataFrame], Optional[pd.
     overlap_start = max(btc_start, obs_start)
     overlap_end = min(btc_end, obs_end)
 
-    duration_hours = (overlap_end - overlap_start) / 3600000
-    print(f"  Overlap: {duration_hours:.2f} hours")
+    # Calculate ACTUAL trading hours (accounting for gaps)
+    # Sort timestamps and find gaps > 30 minutes
+    sorted_ts = np.sort(obs_df['timestamp_ms'].unique())
+    if len(sorted_ts) > 1:
+        diffs = np.diff(sorted_ts)
+        gap_threshold_ms = 30 * 60 * 1000  # 30 minutes
+        gaps = diffs[diffs > gap_threshold_ms]
+        total_gap_ms = gaps.sum() if len(gaps) > 0 else 0
+
+        # Actual hours = span - gaps
+        span_ms = sorted_ts[-1] - sorted_ts[0]
+        actual_ms = span_ms - total_gap_ms
+        duration_hours = actual_ms / 3600000
+
+        if len(gaps) > 0:
+            print(f"  Span: {span_ms/3600000:.2f}h, Gaps: {total_gap_ms/3600000:.2f}h ({len(gaps)} gaps)")
+            print(f"  Actual trading hours: {duration_hours:.2f}h")
+        else:
+            print(f"  Overlap: {duration_hours:.2f} hours (no gaps)")
+    else:
+        duration_hours = 0
+        print(f"  Overlap: 0 hours (no data)")
 
     # Filter
     btc_df = btc_df[(btc_df['timestamp_ms'] >= overlap_start) &
@@ -845,8 +971,8 @@ def compute_deep_metrics(trades: List[TradeResult], hours: float, dataset_name: 
     total_markets = len(market_pnl)
     profitable_market_pct = (profitable_markets / total_markets * 100) if total_markets > 0 else 0
 
-    # Taker exit % (time_stop, stop_loss, resolution = taker exit)
-    taker_exit_count = trades_df['hedge_type'].isin(['time_stop', 'stop_loss', 'resolution']).sum()
+    # Taker exit % (time_stop, breakeven, stop_loss, resolution = taker exit)
+    taker_exit_count = trades_df['hedge_type'].isin(['time_stop', 'breakeven', 'stop_loss', 'resolution']).sum()
     taker_exit_pct = (taker_exit_count / len(trades_df) * 100) if len(trades_df) > 0 else 0
 
     # Passive fill stats
@@ -887,6 +1013,7 @@ def print_results(trades: List[TradeResult], dataset_key: str, hours: float):
 
     passive = (df['hedge_type'] == 'passive').sum()
     time_stop = (df['hedge_type'] == 'time_stop').sum()
+    breakeven = (df['hedge_type'] == 'breakeven').sum()
     resolution = (df['hedge_type'] == 'resolution').sum()
 
     # Compute deep metrics
@@ -901,7 +1028,7 @@ def print_results(trades: List[TradeResult], dataset_key: str, hours: float):
     print(f"PnL Net:   ${total_pnl_net:.2f} (after ${total_fees:.2f} fees)")
     print(f"Hourly rate: ${hourly_rate:.2f}/hr")
     print(f"Avg pair cost: {avg_pair_cost:.4f}")
-    print(f"Exit types: {passive} passive, {time_stop} time-stop, {resolution} resolution")
+    print(f"Exit types: {passive} passive, {breakeven} breakeven, {time_stop} time-stop, {resolution} resolution")
     if deep_metrics:
         print(f"Sharpe: {deep_metrics['sharpe']:.2f}, ProfMkt: {deep_metrics['profitable_market_pct']:.1f}%")
         print(f"Max drawdown: ${deep_metrics['max_drawdown']:.2f} ({deep_metrics['max_drawdown_pct']:.1f}%)")
@@ -935,6 +1062,8 @@ def main():
     print(f"        LOOKBACK={SPIKE_LOOKBACK}, HIGH_ENTRY_THRESHOLD={HIGH_ENTRY_THRESHOLD}")
     print(f"        DROP_MULT={DROP_MULTIPLIER}, DROP_INT={DROP_INTERCEPT}")
     print(f"        MIN_CYCLE_GAP={MIN_CYCLE_GAP_MS}ms, TARGET_SHARES={TARGET_SHARES}")
+    breakeven_status = f"ON (min_hold={BREAKEVEN_MIN_HOLD_MS}ms)" if BREAKEVEN_EXIT_ENABLED else "OFF"
+    print(f"        BREAKEVEN_EXIT={breakeven_status}")
     print("=" * 80)
     print(f"Running on 60Hz-only datasets: {list(DATASETS_60HZ.keys())}")
     print(f"Excluding: {[k for k in DATASETS.keys() if k not in DATASETS_60HZ]}")

@@ -26,8 +26,9 @@ import sys
 import time
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Deque, Callable, Dict, Any, Tuple
+from typing import Optional, List, Deque, Callable, Dict, Any, Tuple, Set
 from collections import deque
+from dataclasses import dataclass
 import random as random_module
 from zoneinfo import ZoneInfo  # Python 3.9+ for timezone handling
 
@@ -83,7 +84,13 @@ from src.strategies.opportunistic_mm import (
 from src.strategies.enhanced_spike import EnhancedSpikeStrategy
 from src.strategies.contrarian import ContrarianStrategy
 from src.services.trend_detector import TrendDetector, TrendState, TrendDirection
-from src.api.websocket_client import UserWebSocketClient, OrderFill, MarketResolved
+from src.api.websocket_client import (
+    UserWebSocketClient,
+    OrderFill,
+    MarketResolved,
+    WebSocketClient,
+    BookUpdate,
+)
 from src.utils.market_detector import MarketTypeDetector
 from src.services.health_monitor import get_health_monitor, HealthMonitor
 from src.services.auto_redeemer import AutoRedeemer
@@ -436,6 +443,325 @@ def should_enter_at_open(
     )
 
 
+# =============================================================================
+# BREAKEVEN MONITOR - Real-time profit threshold monitoring via WebSocket
+# =============================================================================
+
+@dataclass
+class BreakevenPosition:
+    """Tracked position for breakeven monitoring."""
+    position_key: str
+    market_slug: str
+    winner_token_id: str
+    loser_token_id: str
+    entry_price: float
+    entry_side: str  # "UP" or "DOWN"
+    loser_side: str  # "UP" or "DOWN"
+    entry_time: float
+    size: int
+
+
+class BreakevenMonitor:
+    """
+    Real-time profit threshold monitoring using Polymarket Market WebSocket.
+
+    When price drops from profit (winner_bid > entry) to breakeven/loss
+    (winner_bid <= entry), triggers immediate market hedge to exit at ~$1.00
+    pair cost instead of waiting for 5-second polling and exiting at $1.04.
+
+    Key insight: Catching the exact moment we hit breakeven prevents the
+    $0.04/pair loss that occurs when polling misses the price transition.
+
+    VALIDATED (Feb 3, 2026): 10s hold is optimal (+13% $/hr, +41% Sharpe vs baseline)
+    - 0ms = DISASTER (98% taker exit due to spread)
+    - 2s = worse than baseline
+    - 5s = good (+5% $/hr) - close second, use if you want more trades
+    - 10s = BEST (+13% $/hr, Sharpe 1.03 on OOS7-9)
+    See: research/findings/BREAKEVEN_SWEEP_FINDINGS.md
+    """
+
+    # Default minimum hold time (seconds) before checking breakeven
+    # Can be overridden via constructor from TRADING_CONFIGS.breakeven_min_hold_ms
+    DEFAULT_MIN_HOLD_SECONDS = 10.0
+
+    def __init__(self, on_breakeven_hit: Callable, min_hold_seconds: float = None):
+        """
+        Initialize breakeven monitor.
+
+        Args:
+            on_breakeven_hit: Async callback when breakeven is detected.
+                              Called with (position_key, position: BreakevenPosition)
+            min_hold_seconds: Minimum seconds to hold before checking breakeven.
+                              Default 10.0s from TRADING_CONFIGS.breakeven_min_hold_ms
+        """
+        self.ws_client: Optional[WebSocketClient] = None
+        self._on_breakeven_hit = on_breakeven_hit
+        self.min_hold_seconds = min_hold_seconds if min_hold_seconds is not None else self.DEFAULT_MIN_HOLD_SECONDS
+        self._active_positions: Dict[str, BreakevenPosition] = {}
+        self._subscribed_tokens: Set[str] = set()
+        self._ws_task: Optional[asyncio.Task] = None
+        self._lock = asyncio.Lock()  # For position dict operations
+        self._running = False
+        # Race condition protection (Feb 3, 2026):
+        # Lock-based coordination between breakeven exit and time-stop
+        self._exit_lock = asyncio.Lock()  # Ensures only ONE exit path executes
+        self._exited_positions: Set[str] = set()  # Positions already exited (prevents double-hedge)
+
+    async def start(self) -> bool:
+        """
+        Start the WebSocket client.
+
+        Returns:
+            True if connection successful
+        """
+        if self._running:
+            return True
+
+        try:
+            self.ws_client = WebSocketClient(auto_reconnect=True)
+            self.ws_client.on_book_update(self._on_book_update)
+
+            if await self.ws_client.connect():
+                self._running = True
+                self._ws_task = asyncio.create_task(self.ws_client.run())
+                logger.info("[BREAKEVEN] WebSocket monitor started")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"[BREAKEVEN] Failed to start WebSocket: {e}")
+            return False
+
+    async def stop(self) -> None:
+        """Stop the WebSocket client and clean up."""
+        self._running = False
+
+        if self.ws_client:
+            await self.ws_client.disconnect()
+            self.ws_client = None
+
+        if self._ws_task:
+            self._ws_task.cancel()
+            try:
+                await self._ws_task
+            except asyncio.CancelledError:
+                pass
+            self._ws_task = None
+
+        self._active_positions.clear()
+        self._subscribed_tokens.clear()
+        self._exited_positions.clear()
+        logger.info("[BREAKEVEN] WebSocket monitor stopped")
+
+    async def start_monitoring(
+        self,
+        position_key: str,
+        market_slug: str,
+        winner_token_id: str,
+        loser_token_id: str,
+        entry_price: float,
+        entry_side: str,
+        loser_side: str,
+        size: int,
+    ) -> bool:
+        """
+        Start monitoring a position for breakeven.
+
+        Args:
+            position_key: Unique identifier for this position
+            market_slug: Market slug for logging
+            winner_token_id: Token ID of the side we bought (winner)
+            loser_token_id: Token ID of the hedge side (loser)
+            entry_price: Price we paid for the winner side
+            entry_side: "UP" or "DOWN" - the side we entered
+            loser_side: "UP" or "DOWN" - the side we need to hedge
+            size: Number of shares in the position
+
+        Returns:
+            True if monitoring started successfully
+        """
+        async with self._lock:
+            # Ensure WebSocket is running
+            if not self._running:
+                if not await self.start():
+                    return False
+
+            # Store position
+            self._active_positions[position_key] = BreakevenPosition(
+                position_key=position_key,
+                market_slug=market_slug,
+                winner_token_id=winner_token_id,
+                loser_token_id=loser_token_id,
+                entry_price=entry_price,
+                entry_side=entry_side,
+                loser_side=loser_side,
+                entry_time=time.time(),
+                size=size,
+            )
+
+            # Subscribe to winner token orderbook if not already subscribed
+            if winner_token_id not in self._subscribed_tokens:
+                await self.ws_client.subscribe([winner_token_id])
+                self._subscribed_tokens.add(winner_token_id)
+
+            logger.info(
+                f"[BREAKEVEN] Started monitoring {position_key}: "
+                f"{entry_side} @ ${entry_price:.4f}, watching {winner_token_id[:16]}..."
+            )
+            return True
+
+    async def stop_monitoring(self, position_key: str) -> None:
+        """
+        Stop monitoring a position (e.g., when hedge fills passively).
+
+        Args:
+            position_key: The position key to stop monitoring
+        """
+        async with self._lock:
+            pos = self._active_positions.pop(position_key, None)
+            if pos:
+                logger.info(f"[BREAKEVEN] Stopped monitoring {position_key}")
+
+                # Check if any other position uses this token
+                token_still_needed = any(
+                    p.winner_token_id == pos.winner_token_id
+                    for p in self._active_positions.values()
+                )
+                if not token_still_needed and pos.winner_token_id in self._subscribed_tokens:
+                    # Could unsubscribe here, but Polymarket requires re-sending full subscription
+                    # Instead, we just let it stay subscribed (low overhead)
+                    pass
+
+    async def clear_all(self, market_slug: Optional[str] = None) -> int:
+        """
+        Clear all monitored positions, optionally filtered by market slug.
+
+        Used on market rotation to clean up stale positions.
+
+        Args:
+            market_slug: If provided, only clear positions for this market.
+                        If None, clear ALL positions.
+
+        Returns:
+            Number of positions cleared.
+        """
+        async with self._lock:
+            if market_slug is None:
+                count = len(self._active_positions)
+                self._active_positions.clear()
+                self._exited_positions.clear()  # Also clear exited tracking
+                if count > 0:
+                    logger.info(f"[BREAKEVEN] Cleared all {count} monitored positions")
+                return count
+            else:
+                # Clear only positions for the specified market
+                to_remove = [k for k in self._active_positions if k.startswith(f"{market_slug}_")]
+                for key in to_remove:
+                    del self._active_positions[key]
+                # Also clear exited tracking for this market
+                exited_to_remove = [k for k in self._exited_positions if k.startswith(f"{market_slug}_")]
+                for key in exited_to_remove:
+                    self._exited_positions.discard(key)
+                if to_remove:
+                    logger.info(f"[BREAKEVEN] Cleared {len(to_remove)} positions for {market_slug}")
+                return len(to_remove)
+
+    def _on_book_update(self, update: BookUpdate) -> None:
+        """
+        Handle orderbook updates from WebSocket.
+
+        Check if any monitored position has hit breakeven (winner_bid <= entry_price).
+        """
+        # Find positions watching this token
+        positions_to_exit = []
+        current_time = time.time()
+
+        for pos_key, pos in list(self._active_positions.items()):
+            if update.token_id == pos.winner_token_id:
+                # Check minimum hold time first (prevents instant exit from bid/ask spread)
+                # VALIDATED: 10s optimal (0ms=disaster, 5s=close second)
+                elapsed = current_time - pos.entry_time
+                if elapsed < self.min_hold_seconds:
+                    continue
+
+                # Check if winner bid has dropped to or below entry price
+                if update.best_bid is not None and update.best_bid <= pos.entry_price:
+                    # HIT BREAKEVEN - mark for exit
+                    positions_to_exit.append((pos_key, pos, update.best_bid))
+                    logger.info(
+                        f"[BREAKEVEN] 🎯 HIT: {pos_key} | "
+                        f"winner_bid=${update.best_bid:.4f} <= entry=${pos.entry_price:.4f} | "
+                        f"elapsed={elapsed:.1f}s"
+                    )
+
+        # Trigger exits (must be done outside loop to avoid modification during iteration)
+        for pos_key, pos, current_bid in positions_to_exit:
+            # Remove from active monitoring first
+            self._active_positions.pop(pos_key, None)
+            # Schedule locked exit (will acquire _exit_lock and check _exited_positions)
+            asyncio.create_task(self._execute_breakeven_exit_locked(pos_key, pos, current_bid))
+
+    async def _execute_breakeven_exit_locked(
+        self, pos_key: str, pos: BreakevenPosition, current_bid: float
+    ) -> None:
+        """
+        Execute breakeven exit with lock protection.
+
+        Acquires _exit_lock to ensure only ONE exit path (breakeven OR time-stop) executes.
+        """
+        async with self._exit_lock:
+            # Check if already exited (time-stop might have won the race)
+            if pos_key in self._exited_positions:
+                logger.info(f"[BREAKEVEN] Skipping {pos_key}: already exited by time-stop")
+                return
+
+            # Mark as exited BEFORE executing (prevents time-stop from starting)
+            self._exited_positions.add(pos_key)
+
+        # Execute callback OUTSIDE lock (don't hold lock during slow operations)
+        try:
+            await self._on_breakeven_hit(pos_key, pos, current_bid)
+        except Exception as e:
+            logger.error(f"[BREAKEVEN] Exit failed for {pos_key}: {e}")
+            # Don't remove from _exited_positions - position state is uncertain
+
+    async def try_acquire_for_timestop(self, position_key: str) -> bool:
+        """
+        Try to acquire exit lock for time-stop execution.
+
+        Returns True if time-stop should proceed, False if breakeven already handling it.
+        If True is returned, the position is marked as exited and time-stop MUST execute.
+
+        This is the LOCK-BASED coordination that prevents race conditions:
+        - Breakeven callback and time-stop both call this before hedging
+        - Whoever gets the lock first, wins
+        - Loser sees position in _exited_positions and skips
+        """
+        async with self._exit_lock:
+            if position_key in self._exited_positions:
+                # Breakeven already won - skip time-stop
+                return False
+
+            # Time-stop wins - mark as exited
+            self._exited_positions.add(position_key)
+            return True
+
+    def get_monitored_positions(self) -> List[str]:
+        """Get list of position keys currently being monitored."""
+        return list(self._active_positions.keys())
+
+    def is_monitoring(self, position_key: str) -> bool:
+        """Check if a position is currently being monitored."""
+        return position_key in self._active_positions
+
+    def was_exited(self, position_key: str) -> bool:
+        """Check if a position was already exited (by breakeven or time-stop)."""
+        return position_key in self._exited_positions
+
+    def clear_exited(self, position_key: str) -> None:
+        """Clear exited status for a position (called on cycle reset)."""
+        self._exited_positions.discard(position_key)
+
+
 class PaperTradingBot:
     """
     Standalone paper trading bot with CSV logging and Discord notifications.
@@ -456,7 +782,7 @@ class PaperTradingBot:
         accum_pair_cost_target: float = 0.995,  # Target pair cost for normal trading
         accum_pair_cost_limit: float = 1.02,  # Max pair cost for rebalancing
         accum_max_imbalance_pct: float = 0.20,  # Max imbalance as % of target (20% = 6 shares)
-        hard_max_imbalance: int = 60,  # HARD LIMIT: Stop ALL trading if imbalance >= this (raised for 50-share trades)
+        hard_max_imbalance: int = AGGRESSIVE_CONFIG.hard_max_imbalance,  # From TRADING_CONFIGS
         accum_target_shares: int = 50,  # Target shares per side per market (capped by max_position_pct)
         accum_buy_both_sides: bool = True,  # Try to buy both sides each cycle
         max_position_pct: float = 0.17,  # Max shares per side as % of balance (17% of $100 = 17 shares)
@@ -668,6 +994,10 @@ class PaperTradingBot:
         self._user_ws_task: Optional[asyncio.Task] = None
         self._ws_fill_queue: asyncio.Queue = asyncio.Queue()  # For async fill notifications
 
+        # Breakeven monitor for real-time profit threshold detection (Feb 2026)
+        # Catches the exact moment winner_bid drops to entry_price for ~$1.00 exits
+        self._breakeven_monitor: Optional[BreakevenMonitor] = None
+
         # REST API backup for fill verification (catches missed WebSocket fills)
         self._pending_order_ids: Dict[str, Dict[str, Any]] = {}  # order_id -> {side, size, price, strategy}
         # FIXED: Separate fill tracking to prevent ID collisions between paper and live modes
@@ -836,6 +1166,16 @@ class PaperTradingBot:
                 f"z_bounds=[{self.zscore_lo}, {self.zscore_hi}], skip_high>=${self.high_entry_threshold}, "
                 f"threshold={'OU_ADAPTIVE' if ou_adaptive else 'FIXED_0.02'}{multicycle_info}"
             )
+
+            # Initialize breakeven monitor for real-time exit detection
+            # Catches exact moment winner_bid <= entry_price for ~$1.00 exits
+            # VALIDATED (Feb 3, 2026): 10s hold is optimal, 5s is close second
+            be_hold_seconds = AGGRESSIVE_CONFIG.breakeven_min_hold_ms / 1000.0
+            self._breakeven_monitor = BreakevenMonitor(
+                on_breakeven_hit=self._trigger_breakeven_exit,
+                min_hold_seconds=be_hold_seconds,
+            )
+            logger.info(f"[AGGRESSIVE] Breakeven monitor initialized: min_hold={be_hold_seconds:.1f}s")
 
         # CONTRARIAN Strategy (Path 2): Bet against BTC direction at reversal
         # Uses window-based reversal detection with adaptive vol gate
@@ -1187,7 +1527,7 @@ class PaperTradingBot:
             accum_trade_size=config.get("accum_trade_size", 1),
             accum_target_shares=config.get("accum_target_shares", 15),
             accum_max_imbalance_pct=config.get("accum_max_imbalance_pct", 0.15),
-            hard_max_imbalance=config.get("hard_max_imbalance", 10),
+            hard_max_imbalance=config.get("hard_max_imbalance", AGGRESSIVE_CONFIG.hard_max_imbalance),
             accum_pair_cost_target=config.get("accum_pair_cost_target", 0.995),
             accum_pair_cost_limit=config.get("accum_pair_cost_limit", 1.02),
             accum_buy_both_sides=config.get("accum_buy_both_sides", True),
@@ -1253,6 +1593,9 @@ class PaperTradingBot:
             spread_spike_lookback=config.get("lookback_ticks", AGGRESSIVE_CONFIG.lookback_ticks),
             # Max daily loss protection - FROM TRADING_CONFIGS.py
             max_daily_loss=config.get("max_daily_loss", AGGRESSIVE_CONFIG.max_session_loss),
+            # IMBALANCE LIMITS - prevent runaway one-sided accumulation
+            # FROM TRADING_CONFIGS.py - single source of truth
+            hard_max_imbalance=config.get("hard_max_imbalance", AGGRESSIVE_CONFIG.hard_max_imbalance),
             # Output
             csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_aggressive.csv",
             live_display=True,
@@ -4935,6 +5278,21 @@ class PaperTradingBot:
             best_ask = up_ask if side == "UP" else down_ask
             best_bid = up_bid if side == "UP" else down_bid
 
+            # RACE CONDITION FIX (Feb 3, 2026): Lock-based coordination with breakeven exit
+            # Prevents double-hedging when breakeven and time-stop trigger near-simultaneously
+            is_time_stop = quote.get("is_time_stop", False)
+            if is_time_stop and self._breakeven_monitor:
+                # Position key: entry side is OPPOSITE of hedge side
+                entry_side = "DOWN" if side == "UP" else "UP"
+                position_key = f"{market.slug}_{entry_side}"
+                # Try to acquire lock - returns False if breakeven already handling it
+                if not await self._breakeven_monitor.try_acquire_for_timestop(position_key):
+                    logger.info(
+                        f"[SPREADCAP] Skipping time-stop: breakeven already handling {position_key}"
+                    )
+                    continue
+                # Lock acquired - time-stop will execute
+
             try:
                 # Build execution kwargs (use_pending_orders only for paper mode)
                 exec_kwargs = {
@@ -5039,16 +5397,19 @@ class PaperTradingBot:
 
         time_remaining_secs = market.time_remaining()
 
-        # Hard stop enforcement
+        # Hard stop enforcement - check PROJECTED imbalance (current + entry size)
+        # This prevents new same-side entries that would exceed the limit
         current_imbalance = abs(current_up - current_down)
         is_actively_hedging = strategy.state.first_fill_side is not None
-        in_hard_stop = current_imbalance >= self.hard_max_imbalance and not is_actively_hedging
+        projected_imbalance = current_imbalance + self.spread_base_size  # Assume new entry on surplus side
+        in_hard_stop = projected_imbalance >= self.hard_max_imbalance and not is_actively_hedging
 
         if in_hard_stop:
             now = time.time()
             if now - self._last_hard_stop_log >= 60:
                 logger.warning(
-                    f"🛑 [AGGRESSIVE] HARD STOP: Imbalance {current_imbalance:.0f} >= {self.hard_max_imbalance}"
+                    f"🛑 [AGGRESSIVE] HARD STOP: Projected imbalance {projected_imbalance:.0f} >= {self.hard_max_imbalance} "
+                    f"(current={current_imbalance:.0f}, entry_size={self.spread_base_size})"
                 )
                 self._last_hard_stop_log = now
 
@@ -5069,9 +5430,33 @@ class PaperTradingBot:
                         strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
                         logger.info(f"[AGGRESSIVE] Fill: {fill_side} {fill_size} @ ${fill_price:.4f}")
 
+                        # ENTRY FILL: Start breakeven monitoring
+                        # (had_position=False means this was an entry, not a hedge)
+                        if not had_position and self._breakeven_monitor:
+                            winner_token = market.up_token_id if fill_side == "UP" else market.down_token_id
+                            loser_token = market.down_token_id if fill_side == "UP" else market.up_token_id
+                            loser_side = "DOWN" if fill_side == "UP" else "UP"
+                            position_key = f"{market.slug}_{fill_side}"
+                            await self._breakeven_monitor.start_monitoring(
+                                position_key=position_key,
+                                market_slug=market.slug,
+                                winner_token_id=winner_token,
+                                loser_token_id=loser_token,
+                                entry_price=fill_price,
+                                entry_side=fill_side,
+                                loser_side=loser_side,
+                                size=fill_size,
+                            )
+
                         # CYCLE COMPLETION: If cycle just completed, cancel orders and merge
                         if had_position and strategy.state.first_fill_side is None:
                             await self._cancel_pending_after_cycle_reset(market, "WS_FILL")
+                            # Stop breakeven monitoring (cycle complete via passive hedge)
+                            if self._breakeven_monitor:
+                                # Try both possible position keys since fill_side could be entry or hedge
+                                for pos_side in ["UP", "DOWN"]:
+                                    position_key = f"{market.slug}_{pos_side}"
+                                    await self._breakeven_monitor.stop_monitoring(position_key)
 
                             # Auto-merge if a new cycle was recorded
                             if len(strategy._completed_pairs) > completed_pairs_before:
@@ -5168,9 +5553,31 @@ class PaperTradingBot:
                         self._send_web_update()
                         logger.info(f"[AGGRESSIVE] Paper fill: {fill_side} {fill_size} @ ${fill_price:.4f}")
 
+                        # ENTRY FILL: Start breakeven monitoring
+                        # (had_position=False means this was an entry, not a hedge)
+                        if not had_position and self._breakeven_monitor:
+                            winner_token = market.up_token_id if fill_side == "UP" else market.down_token_id
+                            loser_token = market.down_token_id if fill_side == "UP" else market.up_token_id
+                            loser_side = "DOWN" if fill_side == "UP" else "UP"
+                            position_key = f"{market.slug}_{fill_side}"
+                            await self._breakeven_monitor.start_monitoring(
+                                position_key=position_key,
+                                market_slug=market.slug,
+                                winner_token_id=winner_token,
+                                loser_token_id=loser_token,
+                                entry_price=fill_price,
+                                entry_side=fill_side,
+                                loser_side=loser_side,
+                                size=fill_size,
+                            )
+
                         # CYCLE COMPLETION: If cycle just completed, cancel orders and merge
                         if had_position and strategy.state.first_fill_side is None:
                             await self._cancel_pending_after_cycle_reset(market, "PAPER_FILL")
+                            # Stop breakeven monitoring (cycle complete)
+                            if self._breakeven_monitor:
+                                position_key = f"{market.slug}_{fill_side}"
+                                await self._breakeven_monitor.stop_monitoring(position_key)
 
                             # Auto-merge if a new cycle was recorded
                             if len(strategy._completed_pairs) > completed_pairs_before:
@@ -5249,6 +5656,14 @@ class PaperTradingBot:
                     # Log OBI values periodically to verify data flow (every 100 checks)
                     if self._opportunities_checked % 100 == 0:
                         logger.info(f"[OBI DATA] up_imbalance={up_imbalance:.3f}, down_imbalance={down_imbalance:.3f}")
+                        # Debug: log actual depths to investigate exact negative correlation
+                        if up_book and down_book:
+                            up_bids = sum(o.size for o in up_book.bids[:5])
+                            up_asks = sum(o.size for o in up_book.asks[:5])
+                            down_bids = sum(o.size for o in down_book.bids[:5])
+                            down_asks = sum(o.size for o in down_book.asks[:5])
+                            logger.info(f"[OBI DEBUG] UP: bids={up_bids:.0f}, asks={up_asks:.0f} | DOWN: bids={down_bids:.0f}, asks={down_asks:.0f}")
+                            logger.info(f"[OBI DEBUG] token_ids: up={up_token[-8:]}, down={down_token[-8:]}")
             except Exception as e:
                 logger.warning(f"[OBI] Failed to compute imbalance: {e}")
 
@@ -5282,6 +5697,17 @@ class PaperTradingBot:
             #     size = int(1.0 / price) + 1
 
             best_ask = up_ask if side == "UP" else down_ask
+
+            # RACE CONDITION FIX (Feb 3, 2026): Lock-based coordination with breakeven exit
+            is_time_stop = quote.get("is_time_stop", False)
+            if is_time_stop and self._breakeven_monitor:
+                entry_side = "DOWN" if side == "UP" else "UP"
+                position_key = f"{market.slug}_{entry_side}"
+                if not await self._breakeven_monitor.try_acquire_for_timestop(position_key):
+                    logger.info(
+                        f"[AGGRESSIVE] Skipping time-stop: breakeven already handling {position_key}"
+                    )
+                    continue
 
             try:
                 exec_kwargs = {
@@ -5329,9 +5755,34 @@ class PaperTradingBot:
 
                         logger.info(f"[AGGRESSIVE] Filled: {side} {filled_size} @ ${filled_price:.4f}")
 
+                        # ENTRY FILL: Start breakeven monitoring
+                        # (had_position=False means this was an entry, not a hedge)
+                        is_hedge = quote.get("is_hedge", False)
+                        if not had_position and not is_hedge and self._breakeven_monitor:
+                            winner_token = market.up_token_id if side == "UP" else market.down_token_id
+                            loser_token = market.down_token_id if side == "UP" else market.up_token_id
+                            loser_side = "DOWN" if side == "UP" else "UP"
+                            position_key = f"{market.slug}_{side}"
+                            await self._breakeven_monitor.start_monitoring(
+                                position_key=position_key,
+                                market_slug=market.slug,
+                                winner_token_id=winner_token,
+                                loser_token_id=loser_token,
+                                entry_price=filled_price,
+                                entry_side=side,
+                                loser_side=loser_side,
+                                size=int(filled_size),
+                            )
+
                         # CYCLE COMPLETION: If cycle just completed, cancel orders and merge
                         if had_position and strategy.state.first_fill_side is None:
                             await self._cancel_pending_after_cycle_reset(market, "EXEC_FILL")
+                            # Stop breakeven monitoring (cycle complete)
+                            if self._breakeven_monitor:
+                                # Try both possible position keys since side could be entry or hedge
+                                for pos_side in ["UP", "DOWN"]:
+                                    position_key = f"{market.slug}_{pos_side}"
+                                    await self._breakeven_monitor.stop_monitoring(position_key)
 
                             # Auto-merge if a new cycle was recorded
                             if len(strategy._completed_pairs) > completed_pairs_before:
@@ -5343,10 +5794,10 @@ class PaperTradingBot:
                                 # TRADE SUMMARY LOG for live monitoring
                                 pnl_per_share = 1.0 - pair_cost
                                 total_pnl = pnl_per_share * pairs
-                                result = "WIN" if pair_cost < 1.0 else "LOSS"
+                                result_str = "WIN" if pair_cost < 1.0 else "LOSS"
                                 trade_num = len(strategy._completed_pairs)
                                 logger.info(
-                                    f"[TRADE #{trade_num}] {result} | pair_cost=${pair_cost:.4f} | "
+                                    f"[TRADE #{trade_num}] {result_str} | pair_cost=${pair_cost:.4f} | "
                                     f"pnl=${total_pnl:.2f} | hedge={hedge_type} | pairs={pairs}"
                                 )
 
@@ -5388,6 +5839,150 @@ class PaperTradingBot:
                 )
         except Exception as e:
             logger.warning(f"[CYCLE_CANCEL] Failed to cancel pending orders ({source}): {e}")
+
+    async def _trigger_breakeven_exit(
+        self,
+        position_key: str,
+        position: BreakevenPosition,
+        current_winner_bid: float,
+    ) -> None:
+        """
+        Handle breakeven hit - exit immediately before loss grows.
+
+        Called by BreakevenMonitor when winner_bid drops to or below entry_price.
+        This catches the exact moment we hit breakeven for ~$1.00 pair cost exits
+        instead of waiting for 5-second polling and exiting at $1.04.
+
+        Args:
+            position_key: Unique identifier for the position
+            position: Position details including entry price, sides, etc.
+            current_winner_bid: Current bid price that triggered the breakeven
+        """
+        if not self._aggressive_strategy:
+            return
+
+        strategy = self._aggressive_strategy
+
+        logger.info(
+            f"[BREAKEVEN] 🎯 EXIT TRIGGERED: {position_key} | "
+            f"winner_bid=${current_winner_bid:.4f} <= entry=${position.entry_price:.4f} | "
+            f"hedging {position.loser_side} immediately"
+        )
+
+        # Get current market from rotator
+        market = self._rotator.current_market if self._rotator else None
+        if not market or market.slug != position.market_slug:
+            logger.warning(
+                f"[BREAKEVEN] Market mismatch: expected {position.market_slug}, "
+                f"current is {market.slug if market else 'None'} - skipping exit"
+            )
+            return
+
+        # 1. Cancel any pending hedge order
+        if self.trading_mode == "live" and hasattr(self._engine, 'cancel_all_pending'):
+            try:
+                cancelled = await self._engine.cancel_all_pending(market_slug=market.slug)
+                if cancelled > 0:
+                    logger.info(f"[BREAKEVEN] Cancelled {cancelled} pending hedge order(s)")
+            except Exception as e:
+                logger.warning(f"[BREAKEVEN] Failed to cancel pending orders: {e}")
+
+        # 2. Get current loser ask price from orderbook
+        try:
+            opportunity = await self._analyzer.analyze_asymmetric_opportunity(
+                market=market,
+                current_up_size=strategy.state.up_shares,
+                current_down_size=strategy.state.down_shares,
+                current_up_cost=strategy.state.up_cost,
+                current_down_cost=strategy.state.down_cost,
+                pair_cost_threshold=1.10,  # Allow higher cost - we need to exit
+            )
+            if opportunity:
+                loser_ask = opportunity.down_ask if position.loser_side == "DOWN" else opportunity.up_ask
+            else:
+                # Fallback: estimate loser_ask from winner_bid (binary market approximation)
+                loser_ask = 1.0 - current_winner_bid + 0.02  # Conservative estimate
+                logger.warning(f"[BREAKEVEN] No orderbook - using estimated loser_ask=${loser_ask:.4f}")
+        except Exception as e:
+            logger.error(f"[BREAKEVEN] Failed to get orderbook: {e}")
+            loser_ask = 1.0 - current_winner_bid + 0.02
+
+        loser_ask = min(loser_ask, 0.98)  # Hard cap
+
+        # 3. Place market hedge immediately
+        try:
+            exec_kwargs = {
+                "market": market,
+                "side": position.loser_side,
+                "price": loser_ask,
+                "size": position.size,
+                "best_ask": loser_ask,
+            }
+
+            if self.trading_mode == "paper":
+                exec_kwargs["is_hedge"] = True
+                exec_kwargs["use_pending_orders"] = False  # Instant fill (market order)
+
+            result = await self._engine.execute_single_side_trade(**exec_kwargs)
+
+            if result.get("success"):
+                filled_size = result.get("filled_size", 0)
+                filled_price = result.get("filled_price", loser_ask)
+
+                if filled_size > 0:
+                    # Track if we had a position before fill
+                    had_position = strategy.state.first_fill_side is not None
+                    completed_pairs_before = len(strategy._completed_pairs)
+
+                    # Record fill with special hedge_type
+                    strategy.on_fill(
+                        side=position.loser_side,
+                        price=filled_price,
+                        size=int(filled_size)
+                    )
+                    self._trade_count += 1
+                    self._send_web_update()
+
+                    pair_cost = position.entry_price + filled_price
+                    logger.info(
+                        f"[BREAKEVEN] ✅ HEDGED: {position.loser_side} {filled_size} @ ${filled_price:.4f} | "
+                        f"pair_cost=${pair_cost:.4f} (saved ~$0.04 vs time-stop)"
+                    )
+
+                    # CYCLE COMPLETION: merge and reset
+                    if had_position and strategy.state.first_fill_side is None:
+                        await self._cancel_pending_after_cycle_reset(market, "BREAKEVEN_EXIT")
+
+                        if len(strategy._completed_pairs) > completed_pairs_before:
+                            last_cycle = strategy._completed_pairs[-1]
+                            cycle_pair_cost = last_cycle["pair_cost"]
+                            pairs = last_cycle["pairs"]
+
+                            # Update hedge_type to reflect breakeven exit
+                            last_cycle["hedge_type"] = "breakeven"
+
+                            pnl_per_share = 1.0 - cycle_pair_cost
+                            total_pnl = pnl_per_share * pairs
+                            result_str = "WIN" if cycle_pair_cost < 1.0 else "LOSS"
+                            trade_num = len(strategy._completed_pairs)
+                            logger.info(
+                                f"[TRADE #{trade_num}] {result_str} | pair_cost=${cycle_pair_cost:.4f} | "
+                                f"pnl=${total_pnl:.2f} | hedge=BREAKEVEN | pairs={pairs}"
+                            )
+
+                            await self._auto_merge_after_cycle(
+                                market=market,
+                                pairs_to_merge=pairs,
+                                pair_cost=cycle_pair_cost,
+                                source="BREAKEVEN_EXIT"
+                            )
+            else:
+                logger.error(f"[BREAKEVEN] Hedge execution failed: {result}")
+
+        except Exception as e:
+            logger.error(f"[BREAKEVEN] Failed to place market hedge: {e}")
+            # Note: We do NOT clear _exited_positions here - position state is uncertain
+            # Time-stop will also be blocked, which is safer than double-hedging
 
     async def _auto_merge_after_cycle(
         self,
@@ -5688,6 +6283,17 @@ class PaperTradingBot:
             #     size = int(1.0 / price) + 1
 
             best_ask = up_ask if side == "UP" else down_ask
+
+            # RACE CONDITION FIX (Feb 3, 2026): Lock-based coordination with breakeven exit
+            is_time_stop = quote.get("is_time_stop", False)
+            if is_time_stop and self._breakeven_monitor:
+                entry_side = "DOWN" if side == "UP" else "UP"
+                position_key = f"{market.slug}_{entry_side}"
+                if not await self._breakeven_monitor.try_acquire_for_timestop(position_key):
+                    logger.info(
+                        f"[CONTRARIAN] Skipping time-stop: breakeven already handling {position_key}"
+                    )
+                    continue
 
             try:
                 exec_kwargs = {
@@ -6086,6 +6692,13 @@ class PaperTradingBot:
         # Teardown event-driven quote pulling for old market
         self._teardown_event_driven_pull()
 
+        # Clear breakeven monitor for this market (prevent stale exits)
+        if self._breakeven_monitor:
+            try:
+                await self._breakeven_monitor.clear_all(market_slug=old_market_slug)
+            except Exception as e:
+                logger.warning(f"[ROTATION] Failed to clear breakeven monitor: {e}")
+
         # Cancel any pending orders for this market before rotation
         if self.trading_mode == "live" and hasattr(self._engine, 'cancel_all_pending'):
             try:
@@ -6184,8 +6797,9 @@ class PaperTradingBot:
             pnl = self._engine.resolve_market(market.slug, winner)
             logger.info(f"Market resolved ({winner}): P&L ${pnl:.4f}, LockedProfit was ${locked:.4f}")
 
-            # Update cumulative P&L and check loss limit
+            # Update cumulative P&L and session P&L, check loss limit
             self.cumulative_pnl += pnl
+            self._session_merged_pnl += pnl  # Include resolution P&L in session total
             logger.info(f"[CUMULATIVE P&L] Session total: ${self.cumulative_pnl:.2f}")
 
             if self.max_daily_loss > 0 and self.cumulative_pnl <= -self.max_daily_loss:
@@ -6293,10 +6907,16 @@ class PaperTradingBot:
                     self._market_detector = MarketTypeDetector()
                     self._detected_market_type = "UNKNOWN"
                     logger.info(f"[MARKET_DETECTOR] Reset for new market {new_slug}")
-                    # Reset spread capture strategy for new market
+                    # Reset spread capture strategy for new market (deprecated but kept for backward compat)
                     if self._spread_capture_strategy:
                         self._spread_capture_strategy.reset()
                         logger.info(f"[SPREADCAP] Strategy reset for new market {new_slug}")
+
+                    # Reset EnhancedSpikeStrategy for new market (AGGRESSIVE mode)
+                    # This clears: spike history, EWMA state, cycle manager, first_fill_side
+                    if self._aggressive_strategy:
+                        self._aggressive_strategy.reset()
+                        logger.info(f"[ENHSPIKE] Strategy reset for new market {new_slug}")
 
                     # CRITICAL: Clear WebSocket fill queue to avoid stale fills from old market
                     if hasattr(self, '_ws_fill_queue'):
@@ -6422,6 +7042,10 @@ class PaperTradingBot:
 
         # Disconnect user WebSocket
         await self._teardown_user_websocket()
+
+        # Stop breakeven monitor
+        if self._breakeven_monitor:
+            await self._breakeven_monitor.stop()
 
         # Final stats
         runtime = datetime.now(timezone.utc) - self._start_time if self._start_time else timedelta(0)
@@ -6772,7 +7396,7 @@ async def main():
     # ACCUMULATION MODE parameters (now the only mode)
     # NOTE: When changing trade size, also update:
     #   - --accum-target-shares (should be >= trade size)
-    #   - hard_max_imbalance in code (default 60, should be > trade size)
+    #   - hard_max_imbalance: default 20, AGGRESSIVE uses 1.5x shares_per_cycle
     #   - For AGGRESSIVE mode: base_size in EnhancedSpikeStrategy (separate param)
     parser.add_argument(
         '--accum-trade-size',

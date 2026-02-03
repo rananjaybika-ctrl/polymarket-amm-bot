@@ -19,6 +19,9 @@ if TYPE_CHECKING:
     from src.services.paper_trading import PaperTradingEngine
     from src.services.live_trading import LiveTradingEngine
 
+# Import TRADING_CONFIGS for default values
+from research.reference.TRADING_CONFIGS import AGGRESSIVE as AGGRESSIVE_CONFIG
+
 logger = logging.getLogger(__name__)
 
 
@@ -138,7 +141,7 @@ class PositionManager:
     def __init__(
         self,
         trading_mode: str = "paper",
-        hard_max_imbalance: int = 10,
+        hard_max_imbalance: int = AGGRESSIVE_CONFIG.hard_max_imbalance,
         max_imbalance_pct: float = 0.20,
         hedge_trigger_pct: float = 0.15,
         sync_interval_secs: float = 5.0,

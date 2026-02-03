@@ -1,11 +1,11 @@
 """
-Master Trading Configurations - UPDATED Jan 27, 2026
+Master Trading Configurations - UPDATED Feb 3, 2026
 
 These configs are validated against 157.4 hours of data across 456 markets.
 Stop-out effects ARE factored into PnL calculations.
 
 IMPORTANT: Time-based stops work DIFFERENTLY than price-based stops:
-- AGGRESSIVE: 120s time-stop + skip rule (TIME120s_SKIP config)
+- AGGRESSIVE: 30s time-stop + 10s breakeven exit + skip rule
 - BALANCED/CONSERVATIVE: 15% price-stop is BETTER (DEPRECATED)
 
 Usage:
@@ -124,6 +124,24 @@ class TradingConfig:
     # Analysis showed $50 never triggered in OOS7/OOS8 but protects against catastrophic sessions
     max_session_loss: float = 50.0   # $50 hard stop on session losses
 
+    # Breakeven exit (Feb 3, 2026)
+    # Real-time monitoring: exit when winner_bid <= entry_price AFTER min hold time
+    # Prevents expensive time-stop exits ($1.04) by catching breakeven moment (~$1.00)
+    # TESTED: 0ms=DISASTER (98% taker), 2s=worse, 5s=good, 10s=BEST (+13% $/hr, +41% Sharpe)
+    # See: research/findings/BREAKEVEN_SWEEP_FINDINGS.md
+    breakeven_min_hold_ms: int = 10000  # 10s hold before BE check (5s is close second)
+
+    # Position imbalance limit (Feb 3, 2026)
+    # HARD STOP: Block ALL new entries when abs(up_shares - down_shares) >= this
+    # Calculated as 1.1x shares_per_cycle (allows small buffer, blocks runaway)
+    # NOTE: Set to None to auto-calculate as int(shares_per_cycle * 1.1)
+    hard_max_imbalance: Optional[int] = None  # Auto-calculated from shares_per_cycle
+
+    def __post_init__(self):
+        """Calculate derived fields after initialization."""
+        if self.hard_max_imbalance is None:
+            self.hard_max_imbalance = int(self.shares_per_cycle * 1.1)
+
     @property
     def z_zone_label(self) -> str:
         if self.z_lo is None and self.z_hi is None:
@@ -140,9 +158,11 @@ class TradingConfig:
 # VALIDATED CONFIGURATIONS (Jan 24, 2026)
 # =============================================================================
 
-# EWMA_1000 + TS30 + OLD HEDGE VALIDATED (Feb 3, 2026): +$13.80/hr on 60Hz datasets
+# EWMA_1000 + TS30 + BE10s + OLD HEDGE VALIDATED (Feb 3, 2026): +$15.35/hr on OOS7-9
 # EWMA reduces redundant signals: one price move → one spike (not 14)
+# Breakeven exit (10s hold) adds +13% $/hr, +41% Sharpe vs time-stop only
 # See: research/findings/AGGRESSIVE_EWMA_FINDINGS.md
+# See: research/findings/BREAKEVEN_SWEEP_FINDINGS.md
 #
 # MULTI-CYCLE ABANDONED (Jan 31, 2026):
 # - Multi-cycle destroyed profitability: 39.8% win rate vs 54.3% single-cycle
@@ -191,12 +211,20 @@ AGGRESSIVE = TradingConfig(
     # Session loss limit (Feb 1, 2026) - circuit breaker
     max_session_loss=10.0,       # TESTING: $10 limit (revert to $50 for production)
 
-    # Expected performance (at 50 shares, EWMA_1000 + TS30 on 60Hz datasets)
-    expected_pnl=618.43,         # Combined OOS7+OOS8+OOS9.1 (44.81h)
-    expected_hourly_rate=13.80,  # at 50 shares, 60Hz datasets
-    expected_win_rate=70.0,
-    expected_trades=793,         # Combined across 44.81h
-    premature_stop_pct=25.0,     # time-stop exits
+    # hard_max_imbalance: Auto-calculated as int(shares_per_cycle * 1.1) = 11
+
+    # BREAKEVEN EXIT - 10s minimum hold before checking winner_bid <= entry_price
+    # Prevents instant exit from spread (0ms=98% taker DISASTER)
+    # BE_10000ms: +$15.35/hr, Sharpe 1.03 on OOS7-9 (vs $13.61/hr, 0.73 baseline)
+    # BE_5000ms is close second: +$14.24/hr, Sharpe 1.01 (higher taker 71% vs 66%)
+    breakeven_min_hold_ms=10000,  # 10 seconds (WINNER - use 5000 for more trades)
+
+    # Expected performance (at 50 shares, EWMA_1000 + TS30 + BE10s on OOS7-9)
+    expected_pnl=686.94,         # Combined OOS7+OOS8+OOS9.1 (44.81h) with BE10s
+    expected_hourly_rate=15.35,  # at 50 shares, 60Hz datasets, BE_10000ms
+    expected_win_rate=46.1,      # Lower win% but higher avg win
+    expected_trades=1188,        # Combined across 44.81h (OOS7-9 only)
+    premature_stop_pct=66.3,     # taker exits (breakeven + time-stop)
     premature_pnl_lost=-2.50,
 )
 

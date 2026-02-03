@@ -63,9 +63,9 @@ class SimulationConfig:
         min_fill_delay_ms: Minimum time before order can fill (simulates queue)
     """
     fill_probability: float = 0.90  # 90% fill rate
-    partial_fill_rate: float = 0.10  # 10% partial fills
-    partial_fill_min: float = 0.3   # Min 30% filled
-    partial_fill_max: float = 0.9   # Max 90% filled
+    partial_fill_rate: float = 0.0   # DISABLED: No partial fills (always full or nothing)
+    partial_fill_min: float = 0.3   # Min 30% filled (unused when partial_fill_rate=0)
+    partial_fill_max: float = 0.9   # Max 90% filled (unused when partial_fill_rate=0)
     slippage_bps: float = 5.0       # 5 bps max slippage
     execution_delay_ms: float = 100.0
     price_improvement_chance: float = 0.05  # 5% chance of price improvement

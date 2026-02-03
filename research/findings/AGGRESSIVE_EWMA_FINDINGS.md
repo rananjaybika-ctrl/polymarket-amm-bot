@@ -1,19 +1,46 @@
 # EWMA Spike Base Findings (Feb 3, 2026)
 
-## Status: VALIDATED via Main Backtest
+## Status: VALIDATED via Main Backtest + Breakeven Sweep
 
 ---
 
-## Winner Config: E1000_TS30_OLD
+## Winner Config: E1000_TS30_BE10s_OLD
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
 | spike_method | EWMA_1000 | 1000ms half-life EWMA |
 | time_stop_seconds | 30s | Short time-stop (was 180s) |
+| **breakeven_min_hold_ms** | **10000** | **10s hold before BE check (NEW Feb 3)** |
 | DROP_MULTIPLIER | 0.50 | OLD formula |
 | DROP_INTERCEPT | 0.08 | OLD formula |
 | min_cycle_gap_ms | 50 | Faster cycling (was 200) |
 | min_time_remaining | 90s | time_stop + 60s buffer |
+
+---
+
+## Breakeven Exit Addition (Feb 3, 2026)
+
+### What is Breakeven Exit?
+Real-time monitoring that exits when `winner_bid <= entry_price` instead of waiting for time-stop. This catches the **exact moment** we hit breakeven (~$1.00 pair cost) instead of exiting later at $1.04.
+
+### Sweep Results (OOS7-9 Only)
+
+| Config | $/hr | Sharpe | vs Baseline |
+|--------|------|--------|-------------|
+| BE_DISABLED | $13.61 | 0.73 | baseline |
+| BE_0ms | **-$59.09** | -6.40 | DISASTER (98% taker) |
+| BE_5000ms | $14.24 | 1.01 | +5%, close second |
+| **BE_10000ms** | **$15.35** | **1.03** | **+13% WINNER** |
+
+### Why 10 Seconds?
+- **0ms (instant):** Bid-ask spread triggers instant exit = 98% taker rate = disaster
+- **1-2s:** Still too short, price hasn't recovered
+- **5s:** Good (+5% $/hr), use if you want more trades
+- **10s:** Optimal (+13% $/hr, +41% Sharpe)
+- **>15s:** Diminishing returns, approaches baseline
+
+### Full Details
+See: `research/findings/BREAKEVEN_SWEEP_FINDINGS.md`
 
 ---
 
@@ -37,7 +64,18 @@
 
 ## Performance (VALIDATED Feb 3, 2026)
 
-### Full 60Hz Dataset Validation (OBI ON, skip >= $0.90, proper gap handling, WITH DEDUPLICATION)
+### OOS7-9 with BE_10000ms (Latest - Breakeven Included)
+
+| Dataset | Hours | Trades | PnL Net | $/hr | Sharpe | Win% | Taker% |
+|---------|-------|--------|---------|------|--------|------|--------|
+| OOS7 | 19.0h | 385 | +$231.05 | **$12.19** | **0.99** | 48.6% | 66.8% |
+| OOS8 | 18.1h | 610 | +$309.51 | **$17.08** | **0.91** | 49.2% | 66.4% |
+| OOS9.1 | 7.7h | 193 | +$129.93 | **$16.78** | **1.20** | 40.4% | 65.8% |
+| **OOS7-9** | **44.8h** | **1,188** | **+$670.49** | **+$15.35/hr** | **1.03** | 46.1% | 66.3% |
+
+*Breakeven exit (10s hold) adds +13% $/hr, +41% Sharpe vs time-stop only*
+
+### Full 60Hz Dataset Validation (Without Breakeven - Historical Reference)
 
 | Dataset | Hours | Trades | PnL Net | $/hr | Sharpe | Win% |
 |---------|-------|--------|---------|------|--------|------|
@@ -100,6 +138,10 @@ EWMA tracks a smoothed running average that adapts:
 - [x] Live code updated (`enhanced_spike.py` with `_detect_spike_ewma()`)
 - [x] TRADING_CONFIGS.py updated with winner params
 - [x] run_paper_bot.py wired to use spike_method from config
+- [x] **Breakeven exit sweep completed (Feb 3, 2026)**
+- [x] **10s hold validated as optimal (+13% $/hr, +41% Sharpe)**
+- [x] **TRADING_CONFIGS.py updated with breakeven_min_hold_ms=10000**
+- [x] **run_paper_bot.py BreakevenMonitor updated to use config value**
 
 ---
 
@@ -108,8 +150,11 @@ EWMA tracks a smoothed running average that adapts:
 | File | Changes |
 |------|---------|
 | `research/backtests/aggressive_main_backtest.py` | Added EWMA spike detection, SPIKE_METHOD param, is_60hz flag, deep metrics |
-| `research/optimizers/aggressive_grid_search.py` | Added EWMA spike detection, fixed min_time bug, added OOS9.1, added spike_method to TestConfig |
-| `research/reference/TRADING_CONFIGS.py` | Added spike_method="EWMA_1000", updated time_stop=30s, min_time=90s, min_cycle_gap_ms=50 |
+| `research/optimizers/aggressive_grid_search.py` | Added EWMA spike detection, fixed min_time bug, added OOS9.1, breakeven logic |
+| `research/optimizers/test_breakeven_sweep.py` | **NEW** - Breakeven hold time sweep (9 configs × 5 datasets) |
+| `research/reference/TRADING_CONFIGS.py` | Added spike_method, time_stop=30s, **breakeven_min_hold_ms=10000** |
+| `scripts/run_paper_bot.py` | BreakevenMonitor now reads min_hold from config (was hardcoded 2s) |
+| `research/findings/BREAKEVEN_SWEEP_FINDINGS.md` | **NEW** - Full breakeven sweep analysis |
 
 ---
 

@@ -223,7 +223,7 @@ class AccumulationBotConfig(BaseModel):
     accum_trade_size: int = 1
     accum_target_shares: int = 15
     accum_max_imbalance_pct: float = 0.20  # Max imbalance as % of target (20% = 6 shares)
-    hard_max_imbalance: int = 10           # HARD LIMIT: Stop ALL trading if imbalance >= this
+    hard_max_imbalance: int = AGGRESSIVE_CONFIG.hard_max_imbalance  # From TRADING_CONFIGS
     accum_pair_cost_target: float = 0.995  # Target for normal trading (buy cheap)
     accum_pair_cost_limit: float = 1.02    # Max for rebalancing only
     accum_buy_both_sides: bool = True
@@ -322,7 +322,7 @@ class BotConfig(BaseModel):
     accum_trade_size: int = 1
     accum_target_shares: int = 15
     accum_max_imbalance_pct: float = 0.20  # 20% of target (6 shares)
-    hard_max_imbalance: int = 10          # HARD LIMIT: Stop ALL trading if imbalance >= this
+    hard_max_imbalance: int = AGGRESSIVE_CONFIG.hard_max_imbalance  # From TRADING_CONFIGS
     accum_pair_cost_target: float = 0.995
     accum_pair_cost_limit: float = 1.02
     accum_buy_both_sides: bool = True
@@ -1027,6 +1027,9 @@ async def start_aggressive(config: AggressiveBotConfig, username: str = Depends(
         strategy.reset_trading_data()
         strategy.task = None
 
+    # DEBUG: Log received config values from frontend
+    logger.info(f"[aggressive] RECEIVED from frontend: start={config.start_datetime}, end={config.end_datetime}")
+
     # Validate datetime
     try:
         start_dt = datetime.fromisoformat(config.start_datetime)
@@ -1039,7 +1042,8 @@ async def start_aggressive(config: AggressiveBotConfig, username: str = Depends(
     # Validate AGGRESSIVE parameters
     if config.base_size < 5:
         return JSONResponse(status_code=400, content={"error": "Base size must be at least 5 (Polymarket minimum)"})
-    if config.z_lo >= config.z_hi:
+    # Only validate z_lo < z_hi if both are set (None = disabled)
+    if config.z_lo is not None and config.z_hi is not None and config.z_lo >= config.z_hi:
         return JSONResponse(status_code=400, content={"error": "z_lo must be less than z_hi"})
 
     # Validate balance for live mode
