@@ -1,7 +1,7 @@
 # AGGRESSIVE Strategy (Path 1)
 
-**Status:** VALIDATED - TIME180s_SKIP + OBI Filter
-**Last Updated:** February 1, 2026
+**Status:** VALIDATED - EWMA_1000 + TS30 + OBI Filter
+**Last Updated:** February 3, 2026
 
 ---
 
@@ -11,24 +11,26 @@
 
 ---
 
-## Configuration (Canonical) - TIME180s_SKIP + OBI
+## Configuration (Canonical) - EWMA_1000 + TS30 + OBI
 
 ```python
 AGGRESSIVE = TradingConfig(
     name="AGGRESSIVE",
+    spike_method="EWMA_1000",       # EWMA spike detection (1000ms half-life)
     threshold_method="ou",          # OU (adaptive sigmoid on z-score)
     zscore_method="ewma",           # EWMA (fully adaptive, no drift)
-    lookback_ticks=72,              # 1200ms at 60Hz
+    lookback_ticks=72,              # 1200ms at 60Hz (used for velocity)
     lookback_ms=1200,
     stop_loss_pct=None,             # NO price-based stop
-    time_stop_seconds=180.0,        # Exit after 180s (Jan 31, 2026 update)
-    min_time_remaining=240.0,       # time_stop + 60s buffer (prevents resolution exits)
+    time_stop_seconds=30.0,         # Exit after 30s (Feb 3, 2026 - EWMA winner)
+    min_time_remaining=90.0,        # time_stop + 60s buffer (prevents resolution exits)
+    min_cycle_gap_ms=50,            # Fast cycling (was 200)
     use_cycling=True,               # Re-enter after exit
     z_lo=0.0,                       # Z-zone lower bound
     z_hi=1.5,                       # Z-zone upper bound (skip z > 1.5)
     skip_high_entry=True,           # Skip entries >= $0.90 (unhedgeable)
     high_entry_threshold=0.90,      # Turkey problem cutoff
-    use_obi_filter=True,            # NEW: Skip if OBI disagrees with spike (Jan 28)
+    use_obi_filter=True,            # Skip if OBI disagrees with spike (Jan 28)
 )
 
 # TESTING CONFIG (10 shares):
@@ -40,12 +42,14 @@ AGGRESSIVE = TradingConfig(
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
+| **Spike Method** | **EWMA_1000** | 1000ms half-life, cleaner signals (Feb 3) |
 | Threshold Method | OU | Adaptive sigmoid mapping on z-score |
 | Z-Score Method | **EWMA** | Adapts to regime shifts (OU drifts) |
-| Lookback | 1200ms | 72 ticks at 60Hz |
-| Stop | **180s TIME** | Time-stop exit (Jan 31, 2026) |
-| Min Time | 240s | time_stop + 60s (prevents resolution exits) |
+| Lookback | 1200ms | 72 ticks at 60Hz (for velocity) |
+| Stop | **30s TIME** | Time-stop exit (Feb 3, 2026 - EWMA winner) |
+| Min Time | 90s | time_stop + 60s (prevents resolution exits) |
 | Cycling | ON | Re-enter after each exit |
+| Min Cycle Gap | 50ms | Fast re-entry (was 200ms) |
 | Z-Zone | 0 < z < 1.5 | Skip very low and high volatility |
 | Skip High Entry | **>= $0.90** | Cannot hedge (Polymarket $1 min) |
 | Hedge | 100% full | Hedge on loser side |
@@ -55,45 +59,50 @@ AGGRESSIVE = TradingConfig(
 
 ## Performance Summary
 
-### Cross-Validation Results (TIME180s_SKIP + OBI)
+### Cross-Validation Results (EWMA_1000 + TS30 + OBI + DEDUP) - Feb 3, 2026
 
-| Period | Hours | Trades | PnL @50sh | $/hr | Win% | Passive% | Status |
-|--------|-------|--------|-----------|------|------|----------|--------|
-| IS+OOS2 (Jan 16-19) | 23.4 | 90 | $16 | $0.68 | 55.6% | 63.3% | Training |
-| OOS3+4 (Jan 22-24) | 47.1 | 300 | $253 | $5.36 | 56.0% | 70.0% | Validated |
-| OOS5 (Jan 26) | 41.7 | 234 | $24 | $0.58 | 59.8% | 62.4% | Validated |
-| **OOS7 (Jan 29-30)** | **18.95** | **232** | **$261** | **$13.78** | **54.3%** | **71.1%** | **Validated** |
-| **OOS8 (Jan 31)** | **18.12** | **267** | **$166** | **$9.17** | **53.2%** | **72.3%** | **Validated** |
+| Period | Hours | Trades | PnL @50sh | $/hr | Win% | Sharpe | Status |
+|--------|-------|--------|-----------|------|------|--------|--------|
+| IS+OOS2 (Jan 16-19) | 62.7 | 309 | $163 | $2.60 | 51.5% | 0.28 | Training |
+| OOS3+4 (Jan 22-24) | 42.4 | 704 | $759 | $17.91 | 51.7% | 1.15 | Validated |
+| OOS7 (Jan 29-30) | 19.0 | 798 | $512 | $27.00 | 50.0% | 1.11 | Validated |
+| OOS8 (Jan 31) | 18.1 | 912 | $412 | $22.75 | 50.4% | 0.77 | Validated |
+| **OOS9 (Feb 1-3)** | **24.9** | **1095** | **$692** | **$27.78** | **46.3%** | **1.09** | **Validated** |
+| **TOTAL** | **167.0** | **3818** | **$2,538** | **$15.20** | **49.7%** | **~0.90** | - |
 
-**Combined OOS7+OOS8:** 37.07 hours, 499 trades, **$427 total**, **$11.53/hr**
+*Note: OOS5 excluded (1.3Hz data incompatible with EWMA spike detection).*
+*OOS9 = combined Feb 1-3 with 20.68h gap properly removed.*
+*Results with timestamp deduplication - see Deduplication section below.*
 
-*Note: IS+OOS2 is older data with OBI OFF and limited 60Hz coverage (23h).
-OOS7/OOS8 are the primary validation sets (60Hz + OBI ON). Don't over-emphasize IS+OOS2 results.*
+### Validation Data Sources (Feb 3, 2026)
+- Main backtest: `research/backtests/aggressive_main_backtest.py`
+- Results: `research/findings/data/aggressive_main_backtest_results.csv`
+- Summary: `research/findings/data/aggressive_main_backtest_summary.csv`
+- EWMA findings: `research/findings/AGGRESSIVE_EWMA_FINDINGS.md`
 
-### Validation Data Sources (Feb 2, 2026)
-- All datasets: `research/findings/data/timestop_offset_v2_results.csv` (CURRENT_TS180_NOSL_NOMML)
-- OOS8: `research/findings/data/oos8_grid_results.csv` (CURRENT_TS180_NOSL_NOMML)
+**Key insight:** Win rate ~49% but avg win ($4.18) > avg loss ($2.45), giving positive edge.
 
-**Key insight:** Direction accuracy clusters around 54-60% across all OOS periods with consistent passive fill rates (62-72%).
-
-### OOS7 Details (18.95 hours, Jan 29-30)
+### OOS9 Details (24.9 hours, Feb 1-3)
 
 | Metric | Value |
 |--------|-------|
-| Total PnL @50sh | $261.15 |
-| Hourly Rate | $13.78/hr |
-| Direction Accuracy | 54.3% |
-| Trades | 232 |
-| Passive Fill Rate | 71.1% |
-| Avg Pair Cost | $0.97 |
+| Total PnL @50sh | $691.88 |
+| Hourly Rate | $27.78/hr |
+| Direction Accuracy | 46.3% |
+| Trades | 1095 |
+| Passive Fill Rate | 46.5% |
+| Avg Pair Cost | $0.98 |
+| Sharpe | 1.09 |
+| Max Drawdown | $73.83 (10.7%) |
+| Profitable Markets | 72.2% |
 
-### Exit Breakdown (In-Sample)
+### Exit Breakdown (OOS9)
 
-| Exit Type | Count | % | Notes |
-|-----------|-------|---|-------|
-| Passive fills | 57 | 51.4% | Our bid got hit |
-| Time stops | 29 | 26.1% | Exited after 180s |
-| Resolution | 25 | 22.5% | Held to end |
+| Exit Type | Count | % | Avg PnL | Notes |
+|-----------|-------|---|---------|-------|
+| Passive fills | 509 | 46.5% | +$4.18 | Always winning |
+| Time stops | 583 | 53.2% | -$2.46 | Always losing |
+| Resolution | 3 | 0.3% | -$0.40 | Rare |
 
 ---
 
@@ -140,17 +149,17 @@ if skip_high_entry and winner_ask >= 0.90:
 
 **Important:** Skip rule ONLY applies to PHASE 1 (new entries). PHASE 2 (hedging) is NEVER blocked.
 
-### Cross-Validation Results (149.4 hours, TIME180s_SKIP + OBI)
+### Cross-Validation Results (167 hours, EWMA_1000 + TS30 + OBI + DEDUP)
 
 | Dataset | Hours | Trades | $/hr | Win% | Status |
 |---------|-------|--------|------|------|--------|
-| IS+OOS2 | 23.4 | 90 | $0.68 | 55.6% | Training |
-| OOS3+4 | 47.1 | 300 | $5.36 | 56.0% | Validated |
-| OOS5 | 41.7 | 234 | $0.58 | 59.8% | Validated |
-| OOS7 | 18.95 | 232 | $13.78 | 54.3% | Validated |
-| OOS8 | 18.12 | 267 | $9.17 | 53.2% | Validated |
+| IS+OOS2 | 62.7 | 309 | $2.60 | 51.5% | Training |
+| OOS3+4 | 42.4 | 704 | $17.91 | 51.7% | Validated |
+| OOS7 | 19.0 | 798 | $27.00 | 50.0% | Validated |
+| OOS8 | 18.1 | 912 | $22.75 | 50.4% | Validated |
+| OOS9 | 24.9 | 1095 | $27.78 | 46.3% | Validated |
 
-*Source: timestop_offset_v2_results.csv + oos8_grid_results.csv (CURRENT_TS180_NOSL_NOMML)*
+*Source: aggressive_main_backtest_summary.csv (Feb 3, 2026) - with deduplication*
 
 ---
 
@@ -222,6 +231,42 @@ OBI as standalone signal has **negative edge** (-5.6pp at 100 ticks). Same patte
 
 ---
 
+## Deduplication (Feb 3, 2026)
+
+### Why Deduplication Matters
+
+Raw BTC data from Binance has ~67% duplicate timestamps (multiple messages in same millisecond). This significantly affects EWMA spike detection:
+
+| Scenario | EWMA Update Rate | Signal Quality |
+|----------|------------------|----------------|
+| **Without dedup** | Every message (~180Hz) | EWMA catches up too fast, fewer spikes detected |
+| **With dedup** | Once per unique timestamp (~60Hz) | EWMA adapts at correct rate, more valid signals |
+
+### Impact on Results
+
+| Metric | Without Dedup | With Dedup |
+|--------|---------------|------------|
+| Total Trades (167h) | ~2,380 | 3,818 |
+| Total PnL Net | ~$1,644 | $2,538 |
+| $/hr | ~$9.84 | $15.20 |
+
+### Live Trading Requirement
+
+**CRITICAL:** To replicate backtest results in live trading, EWMA must update at 60Hz (once per unique price), not at the 5-second trading loop rate.
+
+Current live code updates EWMA only when `get_quotes()` is called (every 5s). This needs to be changed to update EWMA on every Binance tick, filtering duplicate prices.
+
+```python
+# In BinanceClient: already filters by price (line 223-231)
+last_price = self._spike_price_history[-1] if self._spike_price_history else None
+if last_price is None or price != last_price:
+    self._spike_price_history.append(price)  # Only unique prices
+```
+
+The strategy's EWMA state should be updated at this same rate, not at the 5-second loop rate.
+
+---
+
 ## Implementation Notes
 
 ### LiveZScoreTracker
@@ -239,10 +284,10 @@ if not tracker.should_trade():
     return  # Skip - z-score out of bounds
 ```
 
-### Time-Stop Logic (180s)
+### Time-Stop Logic (30s)
 
 ```python
-if elapsed_seconds >= 180.0:  # Updated Jan 31, 2026
+if elapsed_seconds >= 30.0:  # Updated Feb 3, 2026 (EWMA winner)
     # Only exit if NOT in profit
     in_profit = current_winner_bid >= winner_entry
     if not in_profit:

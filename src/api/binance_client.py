@@ -151,6 +151,14 @@ class BinanceClient:
         self._last_diagnostic_tick_count: int = 0  # Tick count at last diagnostic log
         self._last_diagnostic_time: float = 0.0  # Time of last diagnostic log
 
+        # EWMA spike detection state (Feb 3, 2026)
+        # CRITICAL: EWMA must update on every unique price tick (~60Hz) to match backtest behavior.
+        # Backtest deduplicates by timestamp_ms, we deduplicate by price value (similar effect).
+        # Alpha = 1 - 0.5 ** (1.0 / (halflife_ms / 16.67)) for 60Hz data
+        # EWMA_1000 (1000ms half-life): alpha ≈ 0.0115
+        self._ewma_price: Optional[float] = None  # Current EWMA state
+        self._ewma_alpha: float = 1 - 0.5 ** (1.0 / (1000 / 16.67))  # ~0.0115 for EWMA_1000
+
     async def connect(self) -> None:
         """Connect to Binance WebSocket stream and start receiving prices."""
         if self._running:
@@ -229,6 +237,14 @@ class BinanceClient:
                         self._spike_price_history.append(price)
                         if len(self._spike_price_history) > self._spike_history_size:
                             self._spike_price_history = self._spike_price_history[-self._spike_history_size:]
+
+                        # Update EWMA on every unique price tick (Feb 3, 2026)
+                        # CRITICAL: This makes EWMA update at ~60Hz to match backtest behavior.
+                        # Strategy's _detect_spike_ewma() will read from this state.
+                        if self._ewma_price is None:
+                            self._ewma_price = price
+                        else:
+                            self._ewma_price = self._ewma_alpha * price + (1 - self._ewma_alpha) * self._ewma_price
 
                     # Increment tick counter for diagnostics (counts all ticks, not just unique)
                     self._tick_count += 1
@@ -726,6 +742,34 @@ class BinanceClient:
             List of recent BTC prices updated at WebSocket rate (~60Hz)
         """
         return self._spike_price_history
+
+    @property
+    def ewma_price(self) -> Optional[float]:
+        """
+        Get current EWMA price state (Feb 3, 2026).
+
+        CRITICAL: This EWMA is updated at ~60Hz (on every unique price tick) to match
+        backtest behavior. Strategies should use this instead of maintaining their own
+        EWMA state that only updates at the 5-second trading loop rate.
+
+        Returns:
+            Current EWMA price, or None if not yet initialized
+        """
+        return self._ewma_price
+
+    @property
+    def ewma_alpha(self) -> float:
+        """Get EWMA alpha (decay rate) for diagnostics."""
+        return self._ewma_alpha
+
+    def reset_ewma_state(self) -> None:
+        """
+        Reset EWMA state for new market or reconnection.
+
+        Call this when switching markets or after a long gap in data.
+        """
+        self._ewma_price = None
+        logger.debug("Reset EWMA state")
 
     def get_buffer_diagnostics(self) -> dict:
         """

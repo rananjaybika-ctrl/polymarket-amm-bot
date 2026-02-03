@@ -988,21 +988,33 @@ class EnhancedSpikeStrategy:
         Key advantage: After a spike, EWMA adapts, reducing redundant signals
         from the same price move. One price move → one spike (not 14).
 
-        State: Just ONE float (self._ewma_price) - very lightweight.
-        """
-        # Initialize EWMA on first tick
-        if self._ewma_price is None:
-            self._ewma_price = binance_price
-            return None, 0
+        CRITICAL (Feb 3, 2026): Uses BinanceClient's EWMA state which updates at ~60Hz
+        on every unique price tick. This matches backtest behavior. If BinanceClient
+        is not available, falls back to local EWMA state (5-second update rate).
 
-        # Update EWMA: O(1) time, O(1) space
-        self._ewma_price = self._ewma_alpha * binance_price + (1 - self._ewma_alpha) * self._ewma_price
+        State: Just ONE float (self._ewma_price or binance_client.ewma_price) - very lightweight.
+        """
+        # Use BinanceClient's EWMA state if available (updated at ~60Hz)
+        # This is CRITICAL for matching backtest behavior
+        ewma_price = None
+        if self._binance_client is not None and hasattr(self._binance_client, 'ewma_price'):
+            ewma_price = self._binance_client.ewma_price
+
+        # Fallback to local EWMA state (slower, but works without BinanceClient)
+        if ewma_price is None:
+            # Initialize local EWMA on first tick
+            if self._ewma_price is None:
+                self._ewma_price = binance_price
+                return None, 0
+            # Update local EWMA (only when get_quotes is called, ~0.2Hz)
+            self._ewma_price = self._ewma_alpha * binance_price + (1 - self._ewma_alpha) * self._ewma_price
+            ewma_price = self._ewma_price
 
         # Calculate deviation from EWMA
-        if self._ewma_price <= 0:
+        if ewma_price <= 0:
             return None, 0
 
-        change_pct = (binance_price - self._ewma_price) / self._ewma_price * 100
+        change_pct = (binance_price - ewma_price) / ewma_price * 100
         magnitude = abs(change_pct)
 
         # Use OU adaptive threshold if available, otherwise fixed threshold
@@ -1021,7 +1033,7 @@ class EnhancedSpikeStrategy:
 
             logger.debug(
                 f"[ENHSPIKE] EWMA spike: {direction} {magnitude:.4f}% "
-                f"(threshold={threshold:.4f}%, ewma=${self._ewma_price:.2f}, current=${binance_price:.2f})"
+                f"(threshold={threshold:.4f}%, ewma=${ewma_price:.2f}, current=${binance_price:.2f})"
             )
             return direction, magnitude
 

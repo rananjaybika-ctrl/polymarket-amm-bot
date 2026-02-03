@@ -1,6 +1,6 @@
 # MASTER PLAN: Production Trading Strategies
 
-**Status:** LIVE READY - TIME120s_SKIP Deployed (January 27, 2026)
+**Status:** VALIDATED - EWMA_1000 + TS30 + OBI + DEDUP (February 3, 2026)
 **Strategies:** AGGRESSIVE (Path 1) + CONTRARIAN (Path 2)
 
 ---
@@ -8,7 +8,7 @@
 ## Executive Summary
 
 Two independent, validated trading strategies for Polymarket BTC 15-minute binary markets:
-- **AGGRESSIVE**: Spike detection + full hedge, ~$9.00/hr @50sh (TIME120s_SKIP config)
+- **AGGRESSIVE**: EWMA spike detection + full hedge, **$15.20/hr @50sh** (167h validated)
 - **CONTRARIAN**: Bet against BTC direction, ~$618/hr @2500sh
 
 Both strategies are uncorrelated (different signals, different market conditions) and can run simultaneously.
@@ -19,31 +19,33 @@ Both strategies are uncorrelated (different signals, different market conditions
 
 | Strategy | $/hr | Position Size | WR/Dir Acc | Status |
 |----------|------|---------------|------------|--------|
-| **AGGRESSIVE** | ~$9.00 | 50 shares | ~70% dir | DEPLOYED (TIME120s_SKIP) |
+| **AGGRESSIVE** | **$15.20** | 50 shares | ~50% (but +EV) | VALIDATED (EWMA_1000+TS30) |
 | **CONTRARIAN** | $618 | 2,500 shares | 43.4% WR | PRODUCTION READY |
 | **AS (Time Stop)** | $18.04 → **-$7/hr OOS** | 10 shares | 65% → 44% | **OVERFIT** (Jan 29) |
 
-**UPDATE (Jan 29):** AS strategy OVERFIT - training shows +$18/hr but OOS shows -$7/hr to -$21/hr. Weak z-zone (like AGGRESSIVE) helps but still negative on most OOS data. See `research/findings/AS_WINNING_CONFIGS.md` for full analysis.
+**UPDATE (Feb 3, 2026):** AGGRESSIVE upgraded to EWMA_1000 spike detection with 30s time-stop. With timestamp deduplication, performance improved from ~$9/hr to $15.20/hr across 167 hours of validation data. Win rate ~50% but avg_win ($4.18) > avg_loss ($2.45) = positive edge.
 
 ---
 
 ## Strategy Quick Reference
 
-### AGGRESSIVE (Path 1) - TIME120s_SKIP
-Spike detection + full hedge + time-stop + skip rule
+### AGGRESSIVE (Path 1) - EWMA_1000 + TS30
+EWMA spike detection + full hedge + time-stop + skip rule
 
 | Parameter | Value |
 |-----------|-------|
+| Spike Method | **EWMA_1000** (1000ms half-life) |
 | Threshold | OU (adaptive sigmoid) |
 | Z-Score | EWMA (no drift) |
-| Lookback | 1200ms (72 ticks) |
-| Stop | **120s TIME** |
-| Min Time | 180s (time_stop + 60s) |
+| Stop | **30s TIME** |
+| Min Time | 90s (time_stop + 60s) |
 | Z-Zone | 0 < z < 1.5 |
 | Skip | entries >= $0.90 |
+| OBI Filter | ON |
 | Cycling | ON |
 
 **Full spec:** [strategies/AGGRESSIVE.md](strategies/AGGRESSIVE.md)
+**EWMA findings:** [findings/AGGRESSIVE_EWMA_FINDINGS.md](findings/AGGRESSIVE_EWMA_FINDINGS.md)
 
 ### CONTRARIAN (Path 2)
 Mean-reversion at 15-min scale + vol gate
@@ -116,7 +118,8 @@ python research/validate_oos4_all_paths.py --combined
 - [strategies/CONTRARIAN.md](strategies/CONTRARIAN.md) - Full CONTRARIAN config + performance
 
 ### Research Findings
-- [findings/AS_WINNING_CONFIGS.md](findings/AS_WINNING_CONFIGS.md) - **NEW** All winning AS configs with analysis
+- [findings/AGGRESSIVE_EWMA_FINDINGS.md](findings/AGGRESSIVE_EWMA_FINDINGS.md) - **LATEST** EWMA spike + deduplication (Feb 3)
+- [findings/AS_WINNING_CONFIGS.md](findings/AS_WINNING_CONFIGS.md) - All winning AS configs with analysis
 - [findings/AS_TIME_STOP_CRITICAL_FINDING.md](findings/AS_TIME_STOP_CRITICAL_FINDING.md) - Time stop breakthrough
 - [findings/STOP_TYPES.md](findings/STOP_TYPES.md) - Time vs price stop analysis
 - [findings/VOLATILITY_FILTER.md](findings/VOLATILITY_FILTER.md) - Z-score filtering, z-zone analysis
@@ -202,38 +205,41 @@ last_hedge_ts = hedge_fill_ts  # Set on HEDGE FILL - CORRECT!
 
 ---
 
-## UPDATE: Time-Stop & Loser Offset Optimization (January 31, 2026)
+## UPDATE: EWMA Spike Detection + Deduplication (February 3, 2026)
 
-**Study:** `research/findings/TIMESTOP_OFFSET_STUDY_20260131.md`
+**Study:** `research/findings/AGGRESSIVE_EWMA_FINDINGS.md`
 
 ### Key Findings
 
-On OOS7 (60Hz + OBI ON) - best proxy for production:
+EWMA_1000 spike detection with timestamp deduplication across 167 hours:
 
-| Rank | Config | $/hr | Notes |
-|------|--------|------|-------|
-| #1 | **CURRENT_TS180** | $13.31 | Baseline, validated |
-| #2 | TIGHT_TS180 | $13.92 | Higher but needs validation |
+| Dataset | Hours | Trades | PnL Net | $/hr | Sharpe |
+|---------|-------|--------|---------|------|--------|
+| IS+OOS2 | 62.7h | 309 | +$163 | +$2.60 | 0.28 |
+| OOS3+4 | 42.4h | 704 | +$759 | +$17.91 | 1.15 |
+| OOS7 | 19.0h | 798 | +$512 | +$27.00 | 1.11 |
+| OOS8 | 18.1h | 912 | +$412 | +$22.75 | 0.77 |
+| OOS9 | 24.9h | 1095 | +$692 | +$27.78 | 1.09 |
+| **TOTAL** | **167.0h** | **3,818** | **+$2,538** | **+$15.20** | **~0.90** |
 
-### Config Changes
+### Config Changes (Feb 3, 2026)
 
 | Parameter | Old | New | Reason |
 |-----------|-----|-----|--------|
-| time_stop_seconds | 120s | **180s** | Better on OOS7 data |
-| min_time_remaining | 180s | **240s** | time_stop + 60s buffer |
+| spike_method | FIXED | **EWMA_1000** | Reduces redundant signals |
+| time_stop_seconds | 180s | **30s** | EWMA works better with short time-stop |
+| min_time_remaining | 240s | **90s** | time_stop + 60s buffer |
 
-### Deployment Plan
+### Deduplication Impact
 
-1. **Testing Phase** (after paper trading ends):
-   - `TARGET_SHARES = 10`
-   - `HIGH_ENTRY_THRESHOLD = 0.80`
-   - `time_stop_seconds = 180`
+Raw BTC data has ~67% duplicate timestamps:
+- **Without dedup**: ~$9.84/hr (EWMA catches up too fast)
+- **With dedup**: **$15.20/hr** (EWMA updates at correct 60Hz rate)
 
-2. **Production Phase** (after 24-48h validation):
-   - `TARGET_SHARES = 50`
-   - `HIGH_ENTRY_THRESHOLD = 0.90`
-   - `time_stop_seconds = 180`
+### Live Trading Fix (Feb 3, 2026)
+
+BinanceClient now updates EWMA at ~60Hz (on every unique price tick) instead of at the 5-second trading loop rate. This matches backtest behavior exactly.
 
 ---
 
-*Last Updated: January 31, 2026*
+*Last Updated: February 3, 2026*

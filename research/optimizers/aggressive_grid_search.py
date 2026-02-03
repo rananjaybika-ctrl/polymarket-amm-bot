@@ -40,6 +40,8 @@ Features:
 - OU adaptive threshold (per TRADING_CONFIGS.py)
 - Binary OBI filter (simple: obi > 0 = confirm, obi <= 0 = reject)
 - Direction consistency check for multi-cycle modes
+- EWMA spike detection with timestamp deduplication (Feb 3, 2026)
+- Gap detection and EWMA reset at gaps > 30 minutes
 
 Datasets (~130h total):
 - IS+OOS2 - 23h (partial)
@@ -518,11 +520,14 @@ def precompute_spikes_fixed(btc_df: pd.DataFrame, lookback: int = SPIKE_LOOKBACK
     return df
 
 
-def precompute_spikes_ewma(btc_df: pd.DataFrame, halflife_ms: int) -> pd.DataFrame:
+def precompute_spikes_ewma(btc_df: pd.DataFrame, halflife_ms: int, gap_threshold_ms: int = 30 * 60 * 1000) -> pd.DataFrame:
     """EWMA: Compare current price to exponentially weighted moving average.
 
     Key advantage: After a spike, the EWMA adapts, reducing redundant signals
     from the same price move. One price move → one spike (not 14 spikes).
+
+    CRITICAL (Feb 3, 2026): Includes timestamp deduplication and gap detection
+    to match main backtest behavior exactly.
     """
     halflife_ticks = halflife_ms / 16.67  # ~60Hz data
     alpha = 1 - 0.5 ** (1.0 / halflife_ticks)
@@ -532,13 +537,30 @@ def precompute_spikes_ewma(btc_df: pd.DataFrame, halflife_ms: int) -> pd.DataFra
     df = btc_df.copy()
     df = df.sort_values('timestamp_ms').reset_index(drop=True)
 
-    # Compute EWMA of price
+    # Deduplicate by timestamp to ensure consistent spike detection (Feb 3, 2026)
+    original_len = len(df)
+    df = df.drop_duplicates(subset=['timestamp_ms'], keep='first').reset_index(drop=True)
+    if len(df) < original_len:
+        print(f"    [EWMA_{halflife_ms}] Deduplicated: {original_len:,} → {len(df):,} rows")
+
+    # Compute EWMA of price with gap detection
     prices = df['price'].values
+    timestamps = df['timestamp_ms'].values
     ewma_prices = np.zeros(len(prices))
     ewma_prices[0] = prices[0]
 
+    gap_count = 0
     for i in range(1, len(prices)):
-        ewma_prices[i] = alpha * prices[i] + (1 - alpha) * ewma_prices[i-1]
+        time_diff = timestamps[i] - timestamps[i-1]
+        if time_diff > gap_threshold_ms:
+            # Gap detected - reset EWMA to current price
+            ewma_prices[i] = prices[i]
+            gap_count += 1
+        else:
+            ewma_prices[i] = alpha * prices[i] + (1 - alpha) * ewma_prices[i-1]
+
+    if gap_count > 0:
+        print(f"    [EWMA_{halflife_ms}] Reset EWMA at {gap_count} gap(s) > 30min")
 
     df['ewma_price'] = ewma_prices
     df['change_pct'] = (df['price'] - df['ewma_price']) / df['ewma_price'] * 100

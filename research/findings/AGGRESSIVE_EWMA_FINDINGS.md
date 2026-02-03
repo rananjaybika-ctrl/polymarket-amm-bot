@@ -37,41 +37,36 @@
 
 ## Performance (VALIDATED Feb 3, 2026)
 
-### Full 60Hz Dataset Validation (OBI ON, skip >= $0.90)
+### Full 60Hz Dataset Validation (OBI ON, skip >= $0.90, proper gap handling, WITH DEDUPLICATION)
 
-| Dataset | Hours | Trades | PnL Net | $/hr | Sharpe |
-|---------|-------|--------|---------|------|--------|
-| IS+OOS2 | 23.44h | 119 | +$29.26 | +$1.25 | 0.13 |
-| OOS3+4 | 47.15h | 384 | +$400.91 | +$8.50 | 0.77 |
-| OOS7 | 18.95h | 322 | +$177.05 | +$9.34 | 0.60 |
-| OOS8 | 18.12h | 460 | +$344.95 | +$19.03 | 0.93 |
-| OOS9.1 | 7.74h | 166 | +$96.43 | +$12.45 | 0.67 |
-| **Combined** | **115.4h** | **1451** | **+$1,048.61** | **+$9.09/hr** | - |
+| Dataset | Hours | Trades | PnL Net | $/hr | Sharpe | Win% |
+|---------|-------|--------|---------|------|--------|------|
+| IS+OOS2 | 62.7h | 309 | +$163.17 | +$2.60 | 0.28 | 51.5% |
+| OOS3+4 | 42.4h | 704 | +$759.12 | +$17.91 | 1.15 | 51.7% |
+| OOS7 | 19.0h | 798 | +$511.69 | +$27.00 | 1.11 | 50.0% |
+| OOS8 | 18.1h | 912 | +$412.23 | +$22.75 | 0.77 | 50.4% |
+| OOS9 | 24.9h | 1095 | +$691.88 | +$27.78 | 1.09 | 46.3% |
+| **TOTAL** | **167.0h** | **3818** | **+$2,538.09** | **+$15.20/hr** | **~0.90** | **49.7%** |
 
-### OOS7+OOS8+OOS9.1 Only (matches grid search test)
-| Combined | 44.81h | 948 | +$618.43 | **+$13.80/hr** | - |
+*Note: OOS9 = combined OOS9.1 + OOS9.2 (Feb 1-3 data with 20.68h gap removed)*
+
+### Deduplication Impact (Feb 3, 2026)
+
+Raw BTC data has ~67% duplicate timestamps (same millisecond). Deduplication affects EWMA:
+- **Without dedup**: Duplicate ticks cause EWMA to catch up faster → fewer spike signals
+- **With dedup**: EWMA updates once per unique timestamp → more valid spikes survive threshold
+
+To replicate in live trading: Must update EWMA at 60Hz (on each unique price tick), not at 5-second trading loop rate.
 
 ### Why 60Hz Only?
 - EWMA spike detection relies on high-frequency price updates
 - OOS5 has only 1.3Hz data (observer binance_price, not 60Hz HF stream)
 - Results would be misleading if low-frequency data is mixed in
 
----
-
-## Test Config Impact Analysis (skip >= $0.80)
-
-For low-risk testing, we use `high_entry_threshold=0.80` instead of production $0.90.
-
-| Metric | All Trades | Below $0.80 | >= $0.80 |
-|--------|-----------|-------------|----------|
-| Trades | 1451 | 1307 (90.1%) | 144 (9.9%) |
-| PnL | $1,048.61 | $882.18 | $166.42 |
-| $/hr | $9.09 | **$7.64** | $1.44 |
-| Win Rate | 51.1% | 46.2% | 95.1% |
-| Avg PnL/trade | $0.72 | $0.67 | $1.16 |
-
-**Test config ($0.80 skip) reduces hourly by 16%** but acceptable for low-risk validation.
-**NOTE**: High-entry trades (>= $0.80) are actually MORE profitable - consider raising threshold to $0.85 after testing.
+### Gap Handling (Feb 3, 2026)
+- Backtest now properly detects gaps > 30 minutes
+- OOS9 has a 20.68h gap between Feb 1 and Feb 2 data
+- Actual trading hours = span - gaps (24.9h, not 45.6h)
 
 ---
 
