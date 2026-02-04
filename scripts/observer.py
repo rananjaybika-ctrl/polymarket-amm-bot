@@ -280,15 +280,17 @@ class GridState:
         return None, 0
 
     def calculate_spike_loser_bid(self, loser_ask: float, winner_entry: float,
-                                   regime: str = "MEDIUM") -> float:
+                                   regime: str = "MEDIUM") -> float:  # regime kept for API compat, NOT used
         """Calculate loser bid based on spike magnitude (v2)."""
         if self.last_spike_magnitude <= 0:
             return 0.0
-        regime_bonus = DROP_REGIME_BONUS.get(regime, 0.01)
-        expected_drop = DROP_MULTIPLIER * self.last_spike_magnitude + DROP_INTERCEPT + regime_bonus
+        # NOTE: regime_bonus REMOVED Feb 5, 2026 to match backtest/grid search
+        expected_drop = DROP_MULTIPLIER * self.last_spike_magnitude + DROP_INTERCEPT
         expected_drop = max(0.02, min(0.20, expected_drop))
         max_loser = TARGET_PAIR_COST - winner_entry
-        loser_bid = min(loser_ask - expected_drop, max_loser)
+        # FIX Feb 5, 2026: Use theoretical loser (1.0 - winner_entry), NOT loser_ask
+        theoretical_loser = 1.0 - winner_entry
+        loser_bid = min(theoretical_loser - expected_drop, max_loser)
         return max(0.01, loser_bid)
 
     def is_posted(self) -> bool:
@@ -827,11 +829,8 @@ class SpreadCaptureObserver:
         spike_loser_bid = 0.0
         expected_drop = 0.0
         if spike_detected:
-            # Use velocity zone as proxy for regime (v2 formula)
-            zone_name = get_velocity_zone(velocity_bps)
-            regime = "HIGH" if zone_name in ["strong", "extreme"] else "MEDIUM" if zone_name == "moderate" else "LOW"
-            regime_bonus = DROP_REGIME_BONUS.get(regime, 0.01)
-            expected_drop = DROP_MULTIPLIER * spike_magnitude + DROP_INTERCEPT + regime_bonus
+            # NOTE: regime_bonus REMOVED Feb 5, 2026 to match backtest/grid search
+            expected_drop = DROP_MULTIPLIER * spike_magnitude + DROP_INTERCEPT
             expected_drop = max(0.02, min(0.20, expected_drop))
             # Determine winner/loser based on spike
             if spike_direction == "UP":

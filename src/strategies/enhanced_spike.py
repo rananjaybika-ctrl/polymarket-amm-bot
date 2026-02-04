@@ -175,7 +175,7 @@ DEFAULT_TARGET_SHARES = 50       # Updated from optimizer: 50 > 30 > 15
 DEFAULT_MIN_PROFIT = 0.005
 DEFAULT_MAX_SHARE_PRICE = 0.95
 DEFAULT_ENABLE_CYCLING = True
-DEFAULT_HIGH_ENTRY_THRESHOLD = 0.80  # TESTING: Skip entries >= $0.80 (revert to 0.90 for production)
+DEFAULT_HIGH_ENTRY_THRESHOLD = 0.80  # Skip entries >= $0.80 (matches TRADING_CONFIGS) *revert to >=0.90 if test validated
 
 # Zone filtering (LEGACY - spike threshold is the new filter)
 DEFAULT_MIN_VELOCITY_BPS = 0.50
@@ -334,7 +334,7 @@ class MultiCycleManager:
         self,
         max_cycles: int = 1,              # PRODUCTION: 1 (single-cycle)
         shares_per_cycle: int = 50,       # PRODUCTION: 50 shares
-        time_stop_seconds: float = 180.0,
+        time_stop_seconds: float = 30.0,  # Matches TRADING_CONFIGS.AGGRESSIVE
         enable_multicycle: bool = False,  # DEPRECATED: always False
     ):
         self.max_cycles = max_cycles if enable_multicycle else 1
@@ -820,7 +820,7 @@ class EnhancedSpikeStrategy:
         enable_cycling: bool = DEFAULT_ENABLE_CYCLING,
         stop_loss_pct: Optional[float] = DEFAULT_STOP_LOSS_PCT,
         # Time-stop: Exit if position held too long without profit
-        time_stop_seconds: float = 180.0,  # 3 minutes default
+        time_stop_seconds: float = 30.0,  # Matches TRADING_CONFIGS.AGGRESSIVE
         # OU adaptive threshold (optional - use for production)
         ou_adaptive_threshold: Optional["OUAdaptiveThreshold"] = None,
         # Z-score volatility filter (Jan 22, 2026)
@@ -831,9 +831,9 @@ class EnhancedSpikeStrategy:
         zscore_hi: Optional[float] = DEFAULT_ZSCORE_HI,
         # TIME120s_SKIP parameters (Jan 27, 2026 optimization)
         # Skip entries >= $0.90 (unhedgeable due to Polymarket $1 minimum)
-        skip_high_entry: bool = False,
+        skip_high_entry: bool = True,  # Matches TRADING_CONFIGS.AGGRESSIVE
         high_entry_threshold: float = DEFAULT_HIGH_ENTRY_THRESHOLD,
-        min_time_remaining: float = 60.0,  # Configurable (was hardcoded MIN_TIME_REMAINING)
+        min_time_remaining: float = 90.0,  # Matches TRADING_CONFIGS.AGGRESSIVE
         # MULTI-CYCLE DEPRECATED (Jan 31, 2026)
         # Multi-cycle destroyed profitability: 39.8% win rate vs 54.3% single
         # PRODUCTION: enable_multicycle=False, max_cycles=1, shares_per_cycle=50
@@ -1104,26 +1104,26 @@ class EnhancedSpikeStrategy:
         magnitude_pct: float,
         loser_ask: float,
         winner_entry: float,
-        regime: str = "MEDIUM",
+        regime: str = "MEDIUM",  # Kept for API compatibility, NOT used
     ) -> float:
         """
         Calculate optimal loser bid based on BTC spike magnitude (v2).
 
         Uses recalibrated model from hedge_pricing_analysis.py:
-        expected_drop = 0.50 * magnitude_pct + 0.08 + regime_bonus
+        expected_drop = 0.50 * magnitude_pct + 0.08
 
         Args:
             magnitude_pct: Absolute BTC % change (e.g., 0.05 for 0.05%)
-            loser_ask: Current loser side ask price
+            loser_ask: Current loser side ask price (kept for API compatibility, NOT used)
             winner_entry: Price we paid for winner
-            regime: Volatility regime ('LOW', 'MEDIUM', 'HIGH')
+            regime: Volatility regime (kept for API compatibility, NOT used)
 
         Returns:
             Optimal loser bid price
         """
         # Expected drop from recalibrated model (v2)
-        regime_bonus = DROP_REGIME_BONUS.get(regime, 0.01)
-        expected_drop = DROP_MULTIPLIER * magnitude_pct + DROP_INTERCEPT + regime_bonus
+        # NOTE: regime_bonus REMOVED Feb 5, 2026 to match backtest/grid search
+        expected_drop = DROP_MULTIPLIER * magnitude_pct + DROP_INTERCEPT
         expected_drop = max(0.02, min(0.20, expected_drop))  # Clamp to reasonable range
 
         # Maximum we can pay and still achieve target pair cost
@@ -1868,6 +1868,7 @@ class EnhancedSpikeStrategy:
                         'size': self.base_size,
                         'is_time_stop': True,
                         'is_market_order': True,
+                        'is_hedge': True,  # FIX Feb 4: Prevent skip_threshold from rejecting time-stop hedges
                     }]
                 else:
                     logger.debug(
@@ -2610,7 +2611,7 @@ def calculate_magnitude_loser_bid(
     loser_ask: float,
     winner_entry: float,
     target_pair: float = 0.99,
-    regime: str = "MEDIUM",
+    regime: str = "MEDIUM",  # Kept for API compatibility, NOT used
 ) -> float:
     """
     Standalone loser bid calculation based on spike magnitude (v2).
@@ -2620,13 +2621,13 @@ def calculate_magnitude_loser_bid(
         loser_ask: Current loser side ask price (kept for API compatibility, NOT used)
         winner_entry: Price we paid for winner
         target_pair: Target pair cost (default $0.99)
-        regime: Volatility regime ('LOW', 'MEDIUM', 'HIGH')
+        regime: Volatility regime (kept for API compatibility, NOT used)
 
     Returns:
         Optimal loser bid price
     """
-    regime_bonus = DROP_REGIME_BONUS.get(regime, 0.01)
-    expected_drop = DROP_MULTIPLIER * magnitude_pct + DROP_INTERCEPT + regime_bonus
+    # NOTE: regime_bonus REMOVED Feb 5, 2026 to match backtest/grid search
+    expected_drop = DROP_MULTIPLIER * magnitude_pct + DROP_INTERCEPT
     expected_drop = max(0.02, min(0.20, expected_drop))
     max_loser = target_pair - winner_entry
     # FIX Feb 2, 2026: Use theoretical loser (1.0 - winner_entry), NOT loser_ask

@@ -212,15 +212,15 @@ class LatencyArbStrategy:
         return None, 0.0
 
     def calculate_loser_bid(self, magnitude_pct: float, loser_ask: float, winner_entry: float,
-                             regime: str = "MEDIUM") -> float:
+                             regime: str = "MEDIUM") -> float:  # regime kept for API compat, NOT used
         """
         Calculate optimal loser bid based on spike magnitude (v2).
 
-        Formula: expected_drop = 0.50 * magnitude + 0.08 + regime_bonus
+        Formula: expected_drop = 0.50 * magnitude + 0.08
         See research/HEDGE_PRICING_FINDINGS.md for analysis.
         """
-        regime_bonus = DROP_REGIME_BONUS.get(regime, 0.01)
-        expected_drop = DROP_MULTIPLIER * magnitude_pct + DROP_INTERCEPT + regime_bonus
+        # NOTE: regime_bonus REMOVED Feb 5, 2026 to match backtest/grid search
+        expected_drop = DROP_MULTIPLIER * magnitude_pct + DROP_INTERCEPT
         expected_drop = max(0.02, min(0.20, expected_drop))
         max_loser = TARGET_PAIR_COST - winner_entry
         # FIX Feb 2, 2026: Use theoretical loser (1.0 - winner_entry), NOT loser_ask

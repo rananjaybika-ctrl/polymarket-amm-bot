@@ -77,7 +77,7 @@ BTC 60Hz Price Feed
 | Component | Formula | Current Value |
 |-----------|---------|---------------|
 | **Winner Entry** | `min(bid + 0.01, ask - 0.01)` | Aggressive fill |
-| **Loser Bid** | `0.50 × magnitude + 0.08 + regime_bonus` | 9-15¢ below ask |
+| **Loser Bid** | `0.50 × magnitude + 0.08` | 9-15¢ below ask |
 | **Target Pair Cost** | Winner + Loser | < $0.99 |
 | **Position Size** | Fixed | 50 shares |
 | **Time-Stop** | Exit if unprofitable after N seconds | 180s |

@@ -103,12 +103,12 @@ For a typical 3% spike: `expected_drop = 0.68 * 0.03 + 0.01 = 0.030`
 
 ### New Formula (Recommended)
 ```python
-expected_drop = 0.08 + 0.50 * spike_mag / 100 + regime_bonus
+expected_drop = 0.08 + 0.50 * spike_mag
 ```
 
-Where `regime_bonus` = {LOW: 0.0, MEDIUM: 0.01, HIGH: 0.02}
+NOTE: regime_bonus was REMOVED Feb 5, 2026 to match backtest/grid search.
 
-For a typical 3% spike in MEDIUM regime: `expected_drop = 0.08 + 0.015 + 0.01 = 0.105`
+For a typical 3% spike: `expected_drop = 0.08 + 0.015 = 0.095`
 
 **Result:** Matches actual mean of 0.101 within 4%.
 
@@ -150,21 +150,21 @@ DROP_INTERCEPT = 0.01
 # New values (v2)
 DROP_MULTIPLIER = 0.50   # Reduced - spike has weak predictive power
 DROP_INTERCEPT = 0.08    # Increased - matches actual mean drop
-DROP_REGIME_BONUS = {'LOW': 0.0, 'MEDIUM': 0.01, 'HIGH': 0.02}
+# NOTE: DROP_REGIME_BONUS removed Feb 5, 2026 to match backtest
 ```
 
 **Function updated: `calc_loser_bid()`**
 ```python
-def calc_loser_bid(winner_entry: float, spike_mag: float, regime: str = "MEDIUM") -> float:
+def calc_loser_bid(winner_entry: float, spike_mag: float) -> float:
     """
     Calculate loser side bid price (v2).
     Based on hedge_pricing_analysis.py regression results.
+    NOTE: regime_bonus removed Feb 5, 2026 to match backtest.
     """
     base_drop = DROP_INTERCEPT  # 0.08
-    spike_term = DROP_MULTIPLIER * spike_mag / 100  # 0.50 * spike%
-    regime_bonus = DROP_REGIME_BONUS.get(regime, 0.01)
+    spike_term = DROP_MULTIPLIER * spike_mag  # 0.50 * spike%
 
-    expected_drop = base_drop + spike_term + regime_bonus
+    expected_drop = base_drop + spike_term
     expected_drop = max(0.02, min(0.20, expected_drop))
 
     max_loser = TARGET_PAIR_COST - winner_entry
@@ -238,7 +238,7 @@ However, the analysis revealed that the **current formula severely underpredicts
 
 The recommended new formula:
 ```python
-expected_drop = 0.08 + 0.50 * spike_mag / 100 + regime_bonus
+expected_drop = 0.08 + 0.50 * spike_mag
 ```
 
 This should improve passive hedge fill rates and reduce pair costs.
