@@ -1906,7 +1906,7 @@ class PaperTradingBot:
                 sim_config = SimulationConfig(
                     fill_probability=1.0,   # Takers always fill
                     partial_fill_rate=0.0,  # No partial fills for takers
-                    slippage_bps=5.0,
+                    slippage_bps=0.0,       # No slippage - we trade at displayed ask
                     competition_factor=0.0,  # No sniping on taker orders
                 )
             self._engine = PaperTradingEngine(
