@@ -580,6 +580,15 @@ class BreakevenMonitor:
             True if monitoring started successfully
         """
         async with self._lock:
+            # CRITICAL FIX (Feb 4, 2026): Clear stale exit flag from previous position
+            # Position keys are reused (e.g., btc-updown-15m-X_DOWN). If a previous
+            # position with this key was added to _exited_positions, the new position
+            # would inherit that stale flag and time-stop would be blocked forever.
+            async with self._exit_lock:
+                if position_key in self._exited_positions:
+                    logger.info(f"[BREAKEVEN] Clearing stale exit flag for {position_key}")
+                    self._exited_positions.discard(position_key)
+
             # Ensure WebSocket is running
             if not self._running:
                 if not await self.start():
