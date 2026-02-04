@@ -5119,7 +5119,7 @@ class PaperTradingBot:
             # Get fresh orderbook prices
             opportunity = None
             try:
-                position = await self._engine.get_position(market) if hasattr(self._engine, 'get_position') else None
+                position = self._engine.get_position(market) if hasattr(self._engine, 'get_position') else None
                 current_up = position.up_size if position else 0
                 current_down = position.down_size if position else 0
 
