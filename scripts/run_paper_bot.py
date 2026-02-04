@@ -1901,10 +1901,13 @@ class PaperTradingBot:
                     competition_factor=0.0,  # Disable competition sniping
                 )
             else:
+                # AGGRESSIVE mode: taker entries should always get full fills
+                # partial_fill_rate=0.0 disables partial fills (Feb 4, 2026)
                 sim_config = SimulationConfig(
-                    fill_probability=0.90,
-                    partial_fill_rate=0.10,
+                    fill_probability=1.0,   # Takers always fill
+                    partial_fill_rate=0.0,  # No partial fills for takers
                     slippage_bps=5.0,
+                    competition_factor=0.0,  # No sniping on taker orders
                 )
             self._engine = PaperTradingEngine(
                 config=sim_config,
