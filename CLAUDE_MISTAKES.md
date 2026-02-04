@@ -4,6 +4,20 @@
 
 ---
 
+## ⚠️ MANDATORY SELF-CHECK AT SESSION START
+
+**Before doing ANY work, run this command:**
+
+```
+Use the Task tool with subagent_type=Explore to thoroughly read and internalize
+every mistake in this file. Do not skim. Understand the ROOT CAUSE of each mistake
+and how to avoid it. The user is DONE with repeated mistakes.
+```
+
+If you skip this step and repeat a documented mistake, you have failed.
+
+---
+
 ## MANDATORY ANALYSIS METRICS
 
 Whenever running backtest analysis, ALWAYS report:
@@ -279,6 +293,14 @@ Before running ANY backtest or simulation:
 **What happened:** Told user to run Kalman script without first checking if it was already running. User had already executed it.
 **Cost:** Wasted user's time, caused frustration, appeared incompetent.
 **FIX:** ALWAYS check `ps aux | grep` and output files BEFORE telling user to run something.
+
+**Feb 4, 2026 UPDATE - REPEATED THIS MISTAKE:**
+User asked about trades in market 1770200100. I said "no trades yet" without checking logs. If I had checked logs FIRST, I would have immediately seen the `await` bug causing all spike signals to fail.
+
+**EXPANDED FIX:**
+1. When something isn't working → **CHECK LOGS FIRST**, don't assume
+2. When user reports an issue → **BELIEVE THEM** and investigate, don't assume they're wrong
+3. The user is NOT talking out of their ass. If they say something is broken, IT IS BROKEN. Find out why.
 
 ---
 
