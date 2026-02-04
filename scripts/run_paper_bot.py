@@ -684,6 +684,39 @@ class BreakevenMonitor:
         positions_to_exit = []
         current_time = time.time()
 
+        # Debug: log every N updates to trace WebSocket activity
+        if not hasattr(self, '_update_count'):
+            self._update_count = 0
+            self._last_status_log = 0
+        self._update_count += 1
+
+        # Log detailed status every 60 seconds if we have active positions
+        if self._active_positions and (current_time - self._last_status_log) >= 60:
+            self._last_status_log = current_time
+            for pk, p in self._active_positions.items():
+                logger.info(
+                    f"[BREAKEVEN] STATUS: {pk} | entry=${p.entry_price:.4f} | "
+                    f"watching token={p.winner_token_id[:12]}... | "
+                    f"elapsed={current_time - p.entry_time:.0f}s"
+                )
+
+        # Check if this update matches any monitored position
+        matching_pos = None
+        for pk, p in self._active_positions.items():
+            if update.token_id == p.winner_token_id:
+                matching_pos = p
+                break
+
+        if matching_pos and update.best_bid is not None:
+            elapsed = current_time - matching_pos.entry_time
+            if elapsed >= self.min_hold_seconds:
+                # Log when close to breakeven threshold
+                if update.best_bid <= matching_pos.entry_price * 1.05:  # Within 5% of entry
+                    logger.info(
+                        f"[BREAKEVEN] APPROACHING: winner_bid=${update.best_bid:.4f} vs entry=${matching_pos.entry_price:.4f} "
+                        f"(diff=${update.best_bid - matching_pos.entry_price:.4f})"
+                    )
+
         for pos_key, pos in list(self._active_positions.items()):
             if update.token_id == pos.winner_token_id:
                 # Check minimum hold time first (prevents instant exit from bid/ask spread)
