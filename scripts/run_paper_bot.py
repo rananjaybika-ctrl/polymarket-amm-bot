@@ -2960,7 +2960,7 @@ class PaperTradingBot:
     async def run(
         self,
         duration_minutes: float = None,
-        check_interval: float = 5.0,
+        check_interval: float = 0.5,  # Event-driven mode: 0.5s loop (was 5.0s)
         end_time: datetime = None,
     ) -> None:
         """
@@ -2968,7 +2968,7 @@ class PaperTradingBot:
 
         Args:
             duration_minutes: How long to run (ignored if end_time is provided)
-            check_interval: Seconds between opportunity checks
+            check_interval: Seconds between opportunity checks (0.5s for event-driven mode)
             end_time: Specific datetime to stop (overrides duration_minutes)
         """
         self._running = True
