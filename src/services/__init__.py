@@ -50,6 +50,10 @@ from src.services.volatility_tracker import (
     create_balanced_tracker,
     create_conservative_tracker,
 )
+from src.services.spike_event_handler import (
+    SpikeEventHandler,
+    SpikeSignal,
+)
 
 __all__ = [
     "MarketFinder",
@@ -87,4 +91,6 @@ __all__ = [
     "create_aggressive_tracker",
     "create_balanced_tracker",
     "create_conservative_tracker",
+    "SpikeEventHandler",
+    "SpikeSignal",
 ]

@@ -137,6 +137,15 @@ class TradingConfig:
     # NOTE: Set to None to auto-calculate as int(shares_per_cycle * 1.1)
     hard_max_imbalance: Optional[int] = None  # Auto-calculated from shares_per_cycle
 
+    # Event-driven spike detection (Feb 4, 2026)
+    # Reduces response latency from ~5000ms (polling) to ~500ms (event-driven)
+    # BinanceClient fires EWMA spike callbacks at ~60Hz, SpikeEventHandler validates
+    # and queues signals for the 0.5s trading loop to execute.
+    # Key latency improvement: worst-case from ~5700ms to ~1350ms
+    event_driven_mode: bool = True       # Feature flag for event-driven spike detection
+    event_loop_interval_ms: int = 500    # Trading loop interval (was 5000ms with polling)
+    event_signal_max_age_ms: int = 1000  # Drop signals older than this (stale protection)
+
     def __post_init__(self):
         """Calculate derived fields after initialization."""
         if self.hard_max_imbalance is None:

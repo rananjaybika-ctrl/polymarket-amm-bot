@@ -47,9 +47,10 @@ class PriceStats:
 
 
 # Type for spike detection callbacks
-# callback(direction: str, magnitude_pct: float, price: float)
-SpikeCallback = Callable[[str, float, float], None]
-AsyncSpikeCallback = Callable[[str, float, float], 'asyncio.coroutine']
+# callback(direction: str, magnitude_pct: float, price: float, ewma_price: float)
+# ewma_price added in Feb 2026 for event-driven spike detection
+SpikeCallback = Callable[[str, float, float, float], None]
+AsyncSpikeCallback = Callable[[str, float, float, float], 'asyncio.coroutine']
 
 
 class BinanceClient:
@@ -254,8 +255,9 @@ class BinanceClient:
                         self._check_velocity_and_fire()
 
                     # EVENT-DRIVEN: Check spike on every tick (fires callbacks)
+                    # Uses EWMA-based detection for better signal quality
                     if self._spike_callbacks:
-                        self._check_spike_and_fire(price)
+                        self._check_spike_ewma_and_fire(price)
 
             except (json.JSONDecodeError, KeyError, ValueError) as e:
                 logger.debug(f"Failed to parse Binance message: {e}")
@@ -804,7 +806,8 @@ class BinanceClient:
         """
         Check for spike and fire callbacks when threshold exceeded.
 
-        Called on every Binance WebSocket tick.
+        Called on every Binance WebSocket tick. Uses fixed lookback window.
+        DEPRECATED: Use _check_spike_ewma_and_fire for better signal quality.
         """
         import time
 
@@ -820,6 +823,7 @@ class BinanceClient:
             return  # Still in cooldown
 
         # Fire callbacks
+        ewma_price = self._ewma_price or price  # Use current price if EWMA not ready
         logger.info(
             f"[EVENT] Spike detected: {direction} {magnitude:.4f}% | "
             f"price=${price:,.2f}"
@@ -829,9 +833,65 @@ class BinanceClient:
         for callback in self._spike_callbacks:
             try:
                 # Handle both sync and async callbacks
-                result = callback(direction, magnitude, price)
+                # Pass ewma_price as 4th argument for new callback signature
+                result = callback(direction, magnitude, price, ewma_price)
                 if asyncio.iscoroutine(result):
                     # Schedule async callback without blocking
                     asyncio.create_task(result)
             except Exception as e:
                 logger.error(f"Spike callback error: {e}")
+
+    def _check_spike_ewma_and_fire(self, price: float) -> None:
+        """
+        Check for EWMA-based spike and fire callbacks when threshold exceeded.
+
+        Uses EWMA deviation for spike detection instead of fixed lookback window.
+        This provides better signal quality as EWMA adapts after spikes, reducing
+        redundant signals from the same price move.
+
+        Key advantages over fixed lookback:
+        - One price move → one spike (not 14 duplicate signals)
+        - EWMA_1000 (1000ms half-life) validated as winner on OOS7-9
+
+        Called on every unique Binance WebSocket tick (~60Hz).
+        """
+        import time
+
+        # Need EWMA to be initialized
+        if self._ewma_price is None:
+            return
+
+        # Calculate deviation from EWMA
+        change_pct = (price - self._ewma_price) / self._ewma_price * 100
+        magnitude = abs(change_pct)
+
+        # Check if spike exceeds threshold
+        if magnitude < self._spike_threshold:
+            return
+
+        # Determine direction
+        direction = "UP" if change_pct > 0 else "DOWN"
+
+        # Cooldown to prevent callback spam (0.5s between callbacks)
+        now = time.time()
+        if (now - self._last_spike_callback_time) < self._spike_callback_cooldown_secs:
+            return  # Still in cooldown
+
+        # Fire callbacks
+        ewma_price = self._ewma_price
+        logger.info(
+            f"[SPIKE_EVENT] EWMA spike: {direction} {magnitude:.4f}% | "
+            f"price=${price:,.2f}, ewma=${ewma_price:,.2f}"
+        )
+        self._last_spike_callback_time = now
+
+        for callback in self._spike_callbacks:
+            try:
+                # Handle both sync and async callbacks
+                # Signature: callback(direction, magnitude_pct, price, ewma_price)
+                result = callback(direction, magnitude, price, ewma_price)
+                if asyncio.iscoroutine(result):
+                    # Schedule async callback without blocking
+                    asyncio.create_task(result)
+            except Exception as e:
+                logger.error(f"EWMA spike callback error: {e}")

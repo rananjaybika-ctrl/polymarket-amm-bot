@@ -1041,6 +1041,14 @@ class PaperTradingBot:
         self._event_pull_market: Optional[str] = None  # Current market for event callbacks
         self._event_pull_callback: Optional[Callable] = None  # Stored callback reference
 
+        # Event-driven spike detection (Feb 2026)
+        # Reduces response latency from ~5000ms (polling) to ~500ms (event-driven)
+        from src.services.spike_event_handler import SpikeEventHandler, SpikeSignal
+        self._spike_event_handler: Optional[SpikeEventHandler] = None
+        self._signal_queue: asyncio.Queue = asyncio.Queue(maxsize=10)  # Bounded queue
+        self._event_driven_mode: bool = True  # Feature flag for event-driven spike detection
+        self._spike_callback: Optional[Callable] = None  # Stored spike callback reference
+
         # User WebSocket for instant fill notifications (replaces 2-second polling)
         self._user_ws: Optional[UserWebSocketClient] = None
         self._user_ws_task: Optional[asyncio.Task] = None
@@ -3129,6 +3137,13 @@ class PaperTradingBot:
                     # Record heartbeat at start of each cycle
                     health_monitor.record_heartbeat(self.strategy_name)
 
+                    # EVENT-DRIVEN: Process queued spike signals first (Feb 2026)
+                    # This enables ~500ms response latency vs ~5000ms with polling
+                    if self.accum_mode == "aggressive" and self._event_driven_mode:
+                        market = self._rotator.current_market if self._rotator else None
+                        if market:
+                            await self._process_spike_signals(market)
+
                     # Run trading cycle
                     await self._accumulation_trading_cycle()
 
@@ -3296,6 +3311,11 @@ class PaperTradingBot:
 
                 # Set up event-driven quote pulling for 100-200ms reaction time
                 self._setup_event_driven_pull(market.slug)
+
+                # Set up event-driven spike detection (Feb 2026)
+                # Reduces entry latency from ~5000ms (polling) to ~500ms (event-driven)
+                if self.accum_mode == "aggressive" and self._event_driven_mode:
+                    self._setup_event_driven_spike(market)
 
             # Subscribe orderbook WebSocket to new market's tokens
             if self._orderbook_manager:
@@ -4964,6 +4984,224 @@ class PaperTradingBot:
         self._event_pull_market = None
 
     # =========================================================================
+    # EVENT-DRIVEN SPIKE DETECTION (Feb 2026)
+    # Reduces response latency from ~5000ms (polling) to ~500ms (event-driven)
+    # =========================================================================
+
+    def _setup_event_driven_spike(self, market) -> None:
+        """
+        Set up event-driven spike detection for a market.
+
+        Registers a callback with BinanceClient that fires when EWMA spike
+        is detected (~60Hz). Valid signals are queued for the trading loop
+        to execute with ~500ms latency instead of ~5000ms with polling.
+
+        Only active in AGGRESSIVE mode with event_driven_mode=True.
+
+        Args:
+            market: The market to set up event-driven spike detection for
+        """
+        # Only for aggressive mode with event-driven enabled
+        if self.accum_mode != "aggressive" or not self._event_driven_mode:
+            return
+        if not self._binance_client:
+            return
+        if not self._aggressive_strategy:
+            return
+
+        # Import here to avoid circular imports at module level
+        from src.services.spike_event_handler import SpikeEventHandler
+
+        # Clear any existing spike callback
+        self._teardown_event_driven_spike()
+
+        # Create spike event handler if not exists
+        if self._spike_event_handler is None:
+            self._spike_event_handler = SpikeEventHandler(
+                strategy=self._aggressive_strategy,
+                trend_detector=self._trend_detector,
+                signal_queue=self._signal_queue,
+                high_entry_threshold=self.high_entry_threshold,
+                min_time_remaining=AGGRESSIVE_CONFIG.min_time_remaining,
+                max_signal_age_ms=1000.0,  # Drop signals older than 1 second
+            )
+
+        # Set market context
+        self._spike_event_handler.set_market_context(
+            market=market,
+            time_remaining_getter=market.time_remaining,
+        )
+
+        # Create async callback wrapper
+        async def on_spike_callback(direction: str, magnitude: float, price: float, ewma_price: float):
+            """Async callback fired when EWMA spike is detected."""
+            if self._spike_event_handler:
+                await self._spike_event_handler.on_spike_detected(
+                    direction=direction,
+                    magnitude=magnitude,
+                    price=price,
+                    ewma_price=ewma_price,
+                )
+
+        # Register the callback with BinanceClient
+        self._spike_callback = on_spike_callback
+        self._binance_client.on_spike_detected(on_spike_callback)
+        logger.info(f"[SPIKE_EVENT] Event-driven spike detection enabled for {market.slug}")
+
+    def _teardown_event_driven_spike(self) -> None:
+        """Remove event-driven spike detection callback."""
+        if self._spike_callback and self._binance_client:
+            self._binance_client.remove_spike_callback(self._spike_callback)
+            logger.debug("[SPIKE_EVENT] Disabled event-driven spike detection")
+        self._spike_callback = None
+
+        # Clear market context
+        if self._spike_event_handler:
+            self._spike_event_handler.clear_market_context()
+
+    async def _process_spike_signals(self, market) -> None:
+        """
+        Process queued spike signals from event-driven detection.
+
+        Dequeues valid signals and executes entry trades with fresh orderbook
+        prices. This is called at the start of each trading loop iteration.
+
+        Latency budget:
+        - Signal queued: T=0
+        - Trading loop picks up signal: T+0-500ms (worst case)
+        - Fresh orderbook fetch: T+150ms
+        - Order submitted: T+150ms
+        - Polymarket taker delay: T+500ms (exchange-enforced)
+        - Total: ~800-1350ms (vs ~5700ms with 5s polling)
+
+        Args:
+            market: Current market being traded
+        """
+        if not self._event_driven_mode or self._signal_queue.empty():
+            return
+
+        if not self._aggressive_strategy:
+            return
+
+        strategy = self._aggressive_strategy
+        signals_processed = 0
+        max_signals_per_loop = 3  # Limit to prevent blocking
+
+        while not self._signal_queue.empty() and signals_processed < max_signals_per_loop:
+            try:
+                signal = self._signal_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+            signals_processed += 1
+
+            # Check if signal is stale (>1s old)
+            if signal.is_stale(max_age_ms=1000.0):
+                logger.debug(f"[SPIKE_EVENT] Dropped stale signal: {signal.direction} (age={signal.age_ms():.0f}ms)")
+                continue
+
+            # Check if position already taken (race condition guard)
+            if strategy.state.first_fill_side is not None:
+                logger.debug(f"[SPIKE_EVENT] Skipped signal: position already open")
+                continue
+
+            # Get fresh orderbook prices
+            opportunity = None
+            try:
+                position = await self._engine.get_position(market) if hasattr(self._engine, 'get_position') else None
+                current_up = position.up_size if position else 0
+                current_down = position.down_size if position else 0
+
+                opportunity = await self._analyzer.analyze_asymmetric_opportunity(
+                    market=market,
+                    current_up_size=current_up,
+                    current_down_size=current_down,
+                    current_up_cost=position.up_cost if position else 0,
+                    current_down_cost=position.down_cost if position else 0,
+                    pair_cost_threshold=1.00,
+                )
+            except Exception as e:
+                logger.warning(f"[SPIKE_EVENT] Failed to get orderbook: {e}")
+                continue
+
+            if not opportunity:
+                continue
+
+            # Determine entry side and price
+            entry_side = signal.direction
+            entry_ask = opportunity.up_ask if entry_side == "UP" else opportunity.down_ask
+
+            if entry_ask is None:
+                continue
+
+            # Check high entry threshold
+            if entry_ask >= self.high_entry_threshold:
+                logger.info(
+                    f"[SPIKE_EVENT] Skipped: {entry_side} ask ${entry_ask:.4f} >= "
+                    f"${self.high_entry_threshold:.2f} threshold"
+                )
+                continue
+
+            # Execute entry trade
+            entry_size = self.spread_base_size
+            logger.info(
+                f"[SPIKE_EVENT] Executing: {entry_side} {entry_size} @ ${entry_ask:.4f} | "
+                f"signal_age={signal.age_ms():.0f}ms, score={signal.enhanced_score:.3f}"
+            )
+
+            try:
+                exec_kwargs = {
+                    "market": market,
+                    "side": entry_side,
+                    "price": entry_ask,
+                    "size": entry_size,
+                    "best_ask": entry_ask,
+                }
+                if self.trading_mode == "paper":
+                    exec_kwargs["is_hedge"] = False
+                    exec_kwargs["is_market_order"] = True  # Taker for speed
+                    exec_kwargs["use_pending_orders"] = True
+
+                result = await self._engine.execute_single_side_trade(**exec_kwargs)
+
+                if result.get("success"):
+                    filled_size = result.get("filled_size", 0)
+                    filled_price = result.get("filled_price", entry_ask)
+
+                    if filled_size > 0:
+                        strategy.on_fill(side=entry_side, price=filled_price, size=int(filled_size))
+                        self._trade_count += 1
+                        self._send_web_update()
+
+                        logger.info(
+                            f"[SPIKE_EVENT] Entry filled: {entry_side} {filled_size} @ ${filled_price:.4f} | "
+                            f"total_latency={signal.age_ms():.0f}ms"
+                        )
+
+                        # Start breakeven monitoring
+                        if self._breakeven_monitor:
+                            winner_token = market.up_token_id if entry_side == "UP" else market.down_token_id
+                            loser_token = market.down_token_id if entry_side == "UP" else market.up_token_id
+                            loser_side = "DOWN" if entry_side == "UP" else "UP"
+                            position_key = f"{market.slug}_{entry_side}"
+                            await self._breakeven_monitor.start_monitoring(
+                                position_key=position_key,
+                                market_slug=market.slug,
+                                winner_token_id=winner_token,
+                                loser_token_id=loser_token,
+                                entry_price=filled_price,
+                                entry_side=entry_side,
+                                loser_side=loser_side,
+                                size=int(filled_size),
+                            )
+
+            except Exception as e:
+                logger.error(f"[SPIKE_EVENT] Execution error: {e}")
+
+        if signals_processed > 0:
+            logger.debug(f"[SPIKE_EVENT] Processed {signals_processed} signals this loop")
+
+    # =========================================================================
     # SPREAD CAPTURE STRATEGY CYCLE
     # =========================================================================
 
@@ -5361,12 +5599,14 @@ class PaperTradingBot:
                     is_hedge = quote.get("is_hedge", False)
                     is_market_order = quote.get("is_market_order", False)
                     exec_kwargs["is_hedge"] = is_hedge
-                    # Entry (taker): instant fill at ask
-                    # Hedge (maker): pending order, waits for price-touch
-                    # TIME-STOP FIX (Feb 2, 2026): Market orders (time-stop) fill instantly at ask
-                    # Without this, time-stop hedge goes to pending orders with strict price-touch,
-                    # defeating the purpose of forcing a hedge before market resolution
-                    exec_kwargs["use_pending_orders"] = is_hedge and not is_market_order
+                    exec_kwargs["is_market_order"] = is_market_order
+                    # FILL FIX (Feb 4, 2026): All orders use pending mode
+                    # - Maker (passive hedge): no delay, strict price-touch
+                    # - Taker (entry, time-stop, breakeven): 500ms delay, fill at current ask
+                    exec_kwargs["use_pending_orders"] = True
+                    # Pass skip threshold for entry orders - reject fill if price moves against us
+                    if not is_hedge:
+                        exec_kwargs["skip_threshold"] = self.high_entry_threshold
 
                 result = await self._engine.execute_single_side_trade(**exec_kwargs)
 
@@ -5776,12 +6016,14 @@ class PaperTradingBot:
                     is_hedge = quote.get("is_hedge", False)
                     is_market_order = quote.get("is_market_order", False)
                     exec_kwargs["is_hedge"] = is_hedge
-                    # Entry (taker): instant fill at ask
-                    # Hedge (maker): pending order, waits for price-touch
-                    # TIME-STOP FIX (Feb 2, 2026): Market orders (time-stop) fill instantly at ask
-                    # Without this, time-stop hedge goes to pending orders with strict price-touch,
-                    # defeating the purpose of forcing a hedge before market resolution
-                    exec_kwargs["use_pending_orders"] = is_hedge and not is_market_order
+                    exec_kwargs["is_market_order"] = is_market_order
+                    # FILL FIX (Feb 4, 2026): All orders use pending mode
+                    # - Maker (passive hedge): no delay, strict price-touch
+                    # - Taker (entry, time-stop, breakeven): 500ms delay, fill at current ask
+                    exec_kwargs["use_pending_orders"] = True
+                    # Pass skip threshold for entry orders - reject fill if price moves against us
+                    if not is_hedge:
+                        exec_kwargs["skip_threshold"] = self.high_entry_threshold
 
                 result = await self._engine.execute_single_side_trade(**exec_kwargs)
 
@@ -6373,12 +6615,14 @@ class PaperTradingBot:
                     is_hedge = quote.get("is_hedge", False)
                     is_market_order = quote.get("is_market_order", False)
                     exec_kwargs["is_hedge"] = is_hedge
-                    # Entry (taker): instant fill at ask
-                    # Hedge (maker): pending order, waits for price-touch
-                    # TIME-STOP FIX (Feb 2, 2026): Market orders (time-stop) fill instantly at ask
-                    # Without this, time-stop hedge goes to pending orders with strict price-touch,
-                    # defeating the purpose of forcing a hedge before market resolution
-                    exec_kwargs["use_pending_orders"] = is_hedge and not is_market_order
+                    exec_kwargs["is_market_order"] = is_market_order
+                    # FILL FIX (Feb 4, 2026): All orders use pending mode
+                    # - Maker (passive hedge): no delay, strict price-touch
+                    # - Taker (entry, time-stop, breakeven): 500ms delay, fill at current ask
+                    exec_kwargs["use_pending_orders"] = True
+                    # Pass skip threshold for entry orders - reject fill if price moves against us
+                    if not is_hedge:
+                        exec_kwargs["skip_threshold"] = self.high_entry_threshold
 
                 result = await self._engine.execute_single_side_trade(**exec_kwargs)
 
@@ -6757,6 +7001,9 @@ class PaperTradingBot:
 
         # Teardown event-driven quote pulling for old market
         self._teardown_event_driven_pull()
+
+        # Teardown event-driven spike detection for old market (Feb 2026)
+        self._teardown_event_driven_spike()
 
         # Clear breakeven monitor for this market (prevent stale exits)
         if self._breakeven_monitor:
