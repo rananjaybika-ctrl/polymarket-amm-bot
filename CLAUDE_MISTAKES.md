@@ -32,6 +32,17 @@ Keep frontend dead until user explicitly asks to restart it.
 
 ---
 
+## CRITICAL MISTAKES - Feb 4, 2026
+
+### EVENT-DRIVEN SPIKE BYPASSED min_time_remaining CHECK
+**What happened:** Event-driven spike detection (`_process_spike_signals`) didn't re-check `min_time_remaining` before executing queued signals. A signal could be queued when time_remaining=95s (passes SpikeEventHandler check at 90s) but executed when time_remaining=85s (after trading loop delay).
+**Symptoms:** Trades entered in the last 90 seconds despite `min_time_remaining=90` config.
+**Root cause:** `SpikeEventHandler.on_spike_detected()` checks time_remaining when queuing, but `_process_spike_signals()` didn't re-check before executing.
+**Fix:** Added time_remaining re-check in `_process_spike_signals()` at line ~5107 before orderbook fetch.
+**Lesson:** When implementing async queuing patterns, always re-validate time-sensitive conditions at execution time, not just queue time.
+
+---
+
 ## CRITICAL MISTAKES - Jan 28, 2026
 
 ### OOS6 DATA COLLECTION - USED WRONG SCRIPT

@@ -5105,6 +5105,17 @@ class PaperTradingBot:
                 logger.debug(f"[SPIKE_EVENT] Skipped signal: position already open")
                 continue
 
+            # Re-check time_remaining before execution
+            # Signal may have been queued when >90s remaining but executed when <90s
+            # BUG FIX (Feb 4, 2026): Prevent entries in last min_time_remaining seconds
+            time_remaining = market.time_remaining()
+            min_time = AGGRESSIVE_CONFIG.min_time_remaining
+            if time_remaining < min_time:
+                logger.debug(
+                    f"[SPIKE_EVENT] Skipped signal: time_remaining {time_remaining:.0f}s < {min_time:.0f}s min"
+                )
+                continue
+
             # Get fresh orderbook prices
             opportunity = None
             try:
