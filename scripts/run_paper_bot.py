@@ -719,10 +719,20 @@ class BreakevenMonitor:
 
         # Execute callback OUTSIDE lock (don't hold lock during slow operations)
         try:
-            await self._on_breakeven_hit(pos_key, pos, current_bid)
+            success = await self._on_breakeven_hit(pos_key, pos, current_bid)
+            if not success:
+                # Hedge failed silently (market mismatch, no fill, etc.)
+                # CRITICAL: Clear from _exited_positions so time-stop can take over
+                async with self._exit_lock:
+                    self._exited_positions.discard(pos_key)
+                logger.warning(f"[BREAKEVEN] ⚠️ Hedge failed for {pos_key} - time-stop will handle")
         except Exception as e:
-            logger.error(f"[BREAKEVEN] Exit failed for {pos_key}: {e}")
-            # Don't remove from _exited_positions - position state is uncertain
+            logger.error(f"[BREAKEVEN] Exit exception for {pos_key}: {e}")
+            # CRITICAL FIX: Remove from _exited_positions so time-stop can take over
+            # Previously left it set which blocked the safety net forever
+            async with self._exit_lock:
+                self._exited_positions.discard(pos_key)
+            logger.warning(f"[BREAKEVEN] ⚠️ Cleared {pos_key} from exited set - time-stop will handle")
 
     async def try_acquire_for_timestop(self, position_key: str) -> bool:
         """
@@ -5845,7 +5855,7 @@ class PaperTradingBot:
         position_key: str,
         position: BreakevenPosition,
         current_winner_bid: float,
-    ) -> None:
+    ) -> bool:
         """
         Handle breakeven hit - exit immediately before loss grows.
 
@@ -5857,9 +5867,14 @@ class PaperTradingBot:
             position_key: Unique identifier for the position
             position: Position details including entry price, sides, etc.
             current_winner_bid: Current bid price that triggered the breakeven
+
+        Returns:
+            True if hedge was executed successfully, False otherwise.
+            CRITICAL: Caller must clear _exited_positions if False is returned!
         """
         if not self._aggressive_strategy:
-            return
+            logger.error(f"[BREAKEVEN] No strategy available for {position_key}")
+            return False
 
         strategy = self._aggressive_strategy
 
@@ -5872,11 +5887,11 @@ class PaperTradingBot:
         # Get current market from rotator
         market = self._rotator.current_market if self._rotator else None
         if not market or market.slug != position.market_slug:
-            logger.warning(
+            logger.error(
                 f"[BREAKEVEN] Market mismatch: expected {position.market_slug}, "
-                f"current is {market.slug if market else 'None'} - skipping exit"
+                f"current is {market.slug if market else 'None'} - CANNOT HEDGE!"
             )
-            return
+            return False
 
         # 1. Cancel any pending hedge order
         if self.trading_mode == "live" and hasattr(self._engine, 'cancel_all_pending'):
@@ -5929,6 +5944,10 @@ class PaperTradingBot:
                 filled_size = result.get("filled_size", 0)
                 filled_price = result.get("filled_price", loser_ask)
 
+                if filled_size == 0:
+                    logger.error(f"[BREAKEVEN] Hedge succeeded but filled_size=0 for {position_key}")
+                    return False
+
                 if filled_size > 0:
                     # Track if we had a position before fill
                     had_position = strategy.state.first_fill_side is not None
@@ -5976,13 +5995,15 @@ class PaperTradingBot:
                                 pair_cost=cycle_pair_cost,
                                 source="BREAKEVEN_EXIT"
                             )
+                    # Successfully hedged
+                    return True
             else:
                 logger.error(f"[BREAKEVEN] Hedge execution failed: {result}")
+                return False
 
         except Exception as e:
             logger.error(f"[BREAKEVEN] Failed to place market hedge: {e}")
-            # Note: We do NOT clear _exited_positions here - position state is uncertain
-            # Time-stop will also be blocked, which is safer than double-hedging
+            return False
 
     async def _auto_merge_after_cycle(
         self,
