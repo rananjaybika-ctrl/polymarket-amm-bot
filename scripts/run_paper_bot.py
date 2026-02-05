@@ -964,6 +964,7 @@ class PaperTradingBot:
         self._csv_dir = Path(csv_path).parent or Path(".")
         self._csv_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         self.csv_path = self._csv_dir / f"{self._csv_base_name}_{self._csv_date}.csv"
+        self._csv_write_failures = 0  # Track consecutive CSV write failures (Feb 5, 2026)
         self.discord_interval = timedelta(minutes=discord_interval_minutes)
 
         # Retry configuration for network resilience
@@ -2274,32 +2275,51 @@ class PaperTradingBot:
         # Check for daily rotation before writing
         self._check_csv_rotation()
 
-        with open(self.csv_path, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                datetime.now(timezone.utc).isoformat(),
-                market_slug,
-                event_type,
-                trade_side,
-                trade_mode,
-                f"{size_requested:.0f}",
-                f"{size_filled:.0f}",
-                f"{price:.4f}",
-                f"{cost:.4f}",
-                f"{pos_up_size:.0f}",
-                f"{pos_up_avg:.4f}",
-                f"{pos_down_size:.0f}",
-                f"{pos_down_avg:.4f}",
-                f"{pos_pairs:.0f}",
-                f"{pos_pair_cost:.4f}",
-                f"{pos_locked:.4f}",
-                f"{pos_imbalance:.2f}",
-                f"{min_pnl:.4f}",
-                f"{max_pnl:.4f}",
-                f"{pnl_realized:.4f}",
-                f"{self._engine.balance:.2f}",
-                status,
-            ])
+        # CRITICAL (Feb 5, 2026): CSV logging must succeed or trading stops
+        # Previously, failures were silent and trading continued without logging
+        try:
+            with open(self.csv_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    datetime.now(timezone.utc).isoformat(),
+                    market_slug,
+                    event_type,
+                    trade_side,
+                    trade_mode,
+                    f"{size_requested:.0f}",
+                    f"{size_filled:.0f}",
+                    f"{price:.4f}",
+                    f"{cost:.4f}",
+                    f"{pos_up_size:.0f}",
+                    f"{pos_up_avg:.4f}",
+                    f"{pos_down_size:.0f}",
+                    f"{pos_down_avg:.4f}",
+                    f"{pos_pairs:.0f}",
+                    f"{pos_pair_cost:.4f}",
+                    f"{pos_locked:.4f}",
+                    f"{pos_imbalance:.2f}",
+                    f"{min_pnl:.4f}",
+                    f"{max_pnl:.4f}",
+                    f"{pnl_realized:.4f}",
+                    f"{self._engine.balance:.2f}",
+                    status,
+                ])
+            # Reset failure counter on success
+            self._csv_write_failures = 0
+        except Exception as e:
+            # Track consecutive failures
+            if not hasattr(self, '_csv_write_failures'):
+                self._csv_write_failures = 0
+            self._csv_write_failures += 1
+            logger.error(f"🚨 CSV WRITE FAILED ({self._csv_write_failures}x): {e}")
+
+            # After 3 consecutive failures, stop trading (data integrity critical)
+            if self._csv_write_failures >= 3:
+                logger.error("=" * 50)
+                logger.error("🛑 CSV LOGGING BROKEN - STOPPING TRADING")
+                logger.error("Trading without logging = lost data. Fix CSV issue and restart.")
+                logger.error("=" * 50)
+                self.loss_limit_reached = True  # Use existing stop mechanism
 
         # Save state after every trade event
         if event_type in ("TRADE", "RESOLUTION"):

@@ -204,7 +204,12 @@ class DataCollectionManager:
                 else:
                     logger.error("Auto-restart DISABLED. Observer stopped. Data collection incomplete.")
                     logger.error("To enable auto-restart, use --auto-restart flag")
-                    # Don't set self.running = False, let price logger continue
+                    # FIXED (Feb 5, 2026): Stop BOTH when observer crashes
+                    # Previous behavior let price logger continue alone = incomplete data
+                    logger.error("STOPPING PRICE LOGGER TOO - incomplete data is useless")
+                    self.running = False
+                    if self._price_logger_task and not self._price_logger_task.done():
+                        self._price_logger_task.cancel()
                     break
 
     async def _run_price_logger_with_error_handling(self, duration_hours: float = None):
@@ -226,6 +231,11 @@ class DataCollectionManager:
             if self._observer_task and self._observer_task.done():
                 logger.info("Observer task completed. Stopping health monitor and exiting.")
                 self.running = False
+                # FIXED (Feb 5, 2026): Also stop price logger when observer completes
+                # Both must run together for complete data
+                if self._price_logger_task and not self._price_logger_task.done():
+                    logger.info("Stopping price logger since observer completed.")
+                    self._price_logger_task.cancel()
                 break
 
             try:
