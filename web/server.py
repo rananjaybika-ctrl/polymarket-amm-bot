@@ -29,6 +29,14 @@ from zoneinfo import ZoneInfo
 # IMPORTANT: Use project directory, NOT /tmp (which is cleared on reboot)
 KILL_SWITCH_FILE = Path(__file__).parent.parent / ".kill_switch"
 
+# =============================================================================
+# AUTO DATA COLLECTION (Feb 5, 2026)
+# =============================================================================
+# When enabled, paper trading automatically starts observer + 60Hz Binance logger
+# for the same duration. Both stop together when trading stops.
+# Toggle this flag to enable/disable (not visible on frontend)
+ENABLE_AUTO_DATA_COLLECTION = True  # Set to False to disable
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import secrets
@@ -1534,8 +1542,13 @@ async def run_aggressive_bot(config: AggressiveBotConfig, strategy: StrategyStat
 
     Uses EnhancedSpikeStrategy with spike detection, velocity confirmation,
     OU adaptive threshold, and time-stop exit logic.
+
+    If ENABLE_AUTO_DATA_COLLECTION is True, also starts observer + 60Hz logger
+    for the same duration. Both stop together when trading stops.
     """
     restart_configs["aggressive"] = config.dict()
+    data_collection_manager = None
+    data_collection_task = None
 
     try:
         from scripts.run_paper_bot import PaperTradingBot
@@ -1558,7 +1571,26 @@ async def run_aggressive_bot(config: AggressiveBotConfig, strategy: StrategyStat
         await broadcast_status()
 
         duration_minutes = (end_dt_utc - start_dt_utc).total_seconds() / 60.0
+        duration_hours = duration_minutes / 60.0
         web_callback = create_web_callback_for_strategy("aggressive")
+
+        # AUTO DATA COLLECTION (Feb 5, 2026)
+        # Start observer + 60Hz logger alongside paper trading
+        if ENABLE_AUTO_DATA_COLLECTION and config.mode == "paper":
+            try:
+                from scripts.run_data_collection import DataCollectionManager
+                data_collection_manager = DataCollectionManager(
+                    output_dir="research",
+                    auto_restart=True  # Auto-restart on transient failures
+                )
+                logger.info(f"[aggressive] Starting auto data collection for {duration_hours:.2f} hours")
+                data_collection_task = asyncio.create_task(
+                    data_collection_manager.run(duration_hours=duration_hours)
+                )
+            except Exception as e:
+                logger.warning(f"[aggressive] Failed to start data collection: {e}")
+                data_collection_manager = None
+                data_collection_task = None
 
         bot = PaperTradingBot.from_aggressive_config(
             config.dict(),
@@ -1601,14 +1633,31 @@ async def run_aggressive_bot(config: AggressiveBotConfig, strategy: StrategyStat
         logger.error(f"[aggressive] Traceback: {traceback.format_exc()}")
         await broadcast_status()
         restart_configs.pop("aggressive", None)
+    finally:
+        # ALWAYS stop data collection when trading stops (any reason)
+        if data_collection_manager:
+            logger.info("[aggressive] Stopping auto data collection...")
+            data_collection_manager.stop()
+        if data_collection_task and not data_collection_task.done():
+            data_collection_task.cancel()
+            try:
+                await data_collection_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("[aggressive] Data collection stopped")
 
 
 async def run_contrarian_bot(config: ContrarianBotConfig, strategy: StrategyState):
     """Run the CONTRARIAN (Path 2) trading bot asynchronously.
 
     Bets against BTC direction at 15-min scale when reversal detected.
+
+    If ENABLE_AUTO_DATA_COLLECTION is True, also starts observer + 60Hz logger
+    for the same duration. Both stop together when trading stops.
     """
     restart_configs["contrarian"] = config.dict()
+    data_collection_manager = None
+    data_collection_task = None
 
     try:
         from scripts.run_paper_bot import PaperTradingBot
@@ -1631,7 +1680,25 @@ async def run_contrarian_bot(config: ContrarianBotConfig, strategy: StrategyStat
         await broadcast_status()
 
         duration_minutes = (end_dt_utc - start_dt_utc).total_seconds() / 60.0
+        duration_hours = duration_minutes / 60.0
         web_callback = create_web_callback_for_strategy("contrarian")
+
+        # AUTO DATA COLLECTION (Feb 5, 2026)
+        if ENABLE_AUTO_DATA_COLLECTION and config.mode == "paper":
+            try:
+                from scripts.run_data_collection import DataCollectionManager
+                data_collection_manager = DataCollectionManager(
+                    output_dir="research",
+                    auto_restart=True
+                )
+                logger.info(f"[contrarian] Starting auto data collection for {duration_hours:.2f} hours")
+                data_collection_task = asyncio.create_task(
+                    data_collection_manager.run(duration_hours=duration_hours)
+                )
+            except Exception as e:
+                logger.warning(f"[contrarian] Failed to start data collection: {e}")
+                data_collection_manager = None
+                data_collection_task = None
 
         bot = PaperTradingBot.from_contrarian_config(
             config.dict(),
@@ -1674,6 +1741,18 @@ async def run_contrarian_bot(config: ContrarianBotConfig, strategy: StrategyStat
         logger.error(f"[contrarian] Traceback: {traceback.format_exc()}")
         await broadcast_status()
         restart_configs.pop("contrarian", None)
+    finally:
+        # ALWAYS stop data collection when trading stops (any reason)
+        if data_collection_manager:
+            logger.info("[contrarian] Stopping auto data collection...")
+            data_collection_manager.stop()
+        if data_collection_task and not data_collection_task.done():
+            data_collection_task.cancel()
+            try:
+                await data_collection_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("[contrarian] Data collection stopped")
 
 
 async def run_volume_weighted_bot(config: VolumeWeightedBotConfig, strategy: StrategyState):
