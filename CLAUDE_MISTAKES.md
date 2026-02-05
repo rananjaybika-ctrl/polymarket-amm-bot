@@ -876,8 +876,34 @@ File: `/src/api/binance_client.py` lines 155-165, 232-256
 
 ---
 
+### 46. MAX LOSS LIMIT NOT ENFORCED IN AGGRESSIVE/CONTRARIAN/SPREADCAP ✅ FIXED
+**What happened:** Feb 5 paper trading lost $79.71 despite MAX_LOSS=$10 limit. The loss limit warning was logged repeatedly but trading continued.
+
+**ROOT CAUSE:**
+- `loss_limit_reached` flag was checked ONLY in the ACCUM strategy path (line ~3751)
+- AGGRESSIVE, CONTRARIAN, and SPREADCAP have dedicated `_run_*_cycle()` functions
+- These dedicated functions had NO check for `loss_limit_reached`
+- Result: Loss limit warning logged but trading continued indefinitely
+
+**Impact:**
+- Loss of $79.71 instead of stopping at $10
+- ~8x more loss than configured limit
+- All dedicated strategy modes affected
+
+**FIX APPLIED (Feb 5, 2026):**
+Added `loss_limit_reached` check to all dedicated cycle functions:
+- `_run_aggressive_cycle()` - line ~5770
+- `_run_contrarian_cycle()` - line ~6597
+- `_run_spread_capture_cycle()` - line ~5293
+
+Check allows hedging to complete but blocks new entries when limit hit.
+
+**Source:** Feb 5, 2026 - Paper trading lost $79.71 with $10 max loss configured
+
+---
+
 **Last updated:** Feb 5, 2026
-**Mistakes documented:** 45
+**Mistakes documented:** 46
 **Note:** Use `sudo systemctl stop polymarket-bot` to kill AWS frontend (not kill PID)
 
 **Note:** Multi-cycle findings moved to `research/findings/SINGLE_CYCLE_OPTIMAL_20260131.md` (research finding, not Claude mistake)

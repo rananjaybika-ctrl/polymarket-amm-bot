@@ -776,20 +776,29 @@ class BreakevenMonitor:
                 self._exited_positions.discard(pos_key)
             logger.warning(f"[BREAKEVEN] ⚠️ Cleared {pos_key} from exited set - time-stop will handle")
 
-    async def try_acquire_for_timestop(self, position_key: str) -> bool:
+    async def try_acquire_for_timestop(self, position_key: str, force: bool = False) -> bool:
         """
         Try to acquire exit lock for time-stop execution.
 
         Returns True if time-stop should proceed, False if breakeven already handling it.
         If True is returned, the position is marked as exited and time-stop MUST execute.
 
+        Args:
+            position_key: The position identifier
+            force: If True, override stale breakeven lock (time-stop at 30s always executes)
+
         This is the LOCK-BASED coordination that prevents race conditions:
         - Breakeven callback and time-stop both call this before hedging
         - Whoever gets the lock first, wins
         - Loser sees position in _exited_positions and skips
+        - UNLESS force=True, then time-stop overrides stale BE lock
         """
         async with self._exit_lock:
             if position_key in self._exited_positions:
+                if force:
+                    # Time-stop override - BE lock is stale, we take over
+                    logger.warning(f"[TIMESTOP] Force override: BE lock stale for {position_key}")
+                    return True
                 # Breakeven already won - skip time-stop
                 return False
 
@@ -812,6 +821,35 @@ class BreakevenMonitor:
     def clear_exited(self, position_key: str) -> None:
         """Clear exited status for a position (called on cycle reset)."""
         self._exited_positions.discard(position_key)
+
+    async def cleanup_after_cycle(self, market_slug: str, entry_side: Optional[str] = None) -> None:
+        """
+        Complete cleanup after any cycle completion.
+
+        Called after time-stop, breakeven, or normal hedge fills.
+        Ensures no lingering state for the next cycle.
+
+        Args:
+            market_slug: The market that completed a cycle
+            entry_side: If known, the entry side (UP/DOWN) for precise cleanup.
+                        If None, cleans up both possible position keys.
+        """
+        async with self._lock:
+            if entry_side:
+                position_keys = [f"{market_slug}_{entry_side}"]
+            else:
+                position_keys = [f"{market_slug}_UP", f"{market_slug}_DOWN"]
+
+            for pos_key in position_keys:
+                # Remove from active monitoring
+                if pos_key in self._active_positions:
+                    del self._active_positions[pos_key]
+                    logger.debug(f"[CLEANUP] Removed {pos_key} from active monitoring")
+
+                # Clear exited flag
+                if pos_key in self._exited_positions:
+                    self._exited_positions.discard(pos_key)
+                    logger.debug(f"[CLEANUP] Cleared {pos_key} from exited set")
 
 
 class PaperTradingBot:
@@ -3395,6 +3433,16 @@ class PaperTradingBot:
                                 price=fill_price,
                                 size=int(fill_size)
                             )
+
+                            # FIX Feb 4: Log to CSV (WS fill queue)
+                            await self._log_trade({
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "market_slug": market.slug,
+                                "side": fill_side,
+                                "price": fill_price,
+                                "size": fill_size,
+                                "mode": "spread_capture",
+                            })
                         fills_processed += 1
                 except asyncio.QueueEmpty:
                     break
@@ -5189,6 +5237,16 @@ class PaperTradingBot:
                             f"total_latency={signal.age_ms():.0f}ms"
                         )
 
+                        # FIX Feb 4: Log to CSV (was missing!)
+                        await self._log_trade({
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "market_slug": market.slug,
+                            "side": entry_side,
+                            "price": filled_price,
+                            "size": filled_size,
+                            "mode": "aggressive",
+                        })
+
                         # Start breakeven monitoring
                         if self._breakeven_monitor:
                             winner_token = market.up_token_id if entry_side == "UP" else market.down_token_id
@@ -5237,6 +5295,20 @@ class PaperTradingBot:
         strategy = self._spread_capture_strategy
         time_remaining_secs = market.time_remaining()
 
+        # MAX LOSS LIMIT CHECK (Feb 5, 2026 FIX)
+        # Allow hedging to complete, but block new entries
+        is_actively_hedging = strategy.state.phase.value in ("hedge_pending", "entry_filled")
+        if self.loss_limit_reached and not is_actively_hedging:
+            if not hasattr(self, '_last_loss_limit_log') or time.time() - self._last_loss_limit_log > 30:
+                logger.warning(
+                    f"🛑 [SPREADCAP] MAX LOSS LIMIT: ${abs(self.cumulative_pnl):.2f} >= ${self.max_daily_loss:.2f} - "
+                    f"Blocking new entries (hedging allowed)"
+                )
+                self._last_loss_limit_log = time.time()
+            if self._rotator and self._rotator.should_rotate():
+                await self._handle_market_rotation(market)
+            return
+
         # =========================================================================
         # HARD STOP ENFORCEMENT FOR SPREAD CAPTURE
         # =========================================================================
@@ -5276,6 +5348,15 @@ class PaperTradingBot:
                         strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
                         fills_processed += 1
                         logger.info(f"[WS_FILL] {fill_side} {fill_size} @ ${fill_price:.4f}")
+                        # FIX Feb 4: Log to CSV (was missing!)
+                        await self._log_trade({
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "market_slug": market.slug,
+                            "side": fill_side,
+                            "price": fill_price,
+                            "size": fill_size,
+                            "mode": "spread_capture",
+                        })
                 except asyncio.QueueEmpty:
                     break
                 except Exception as e:
@@ -5478,6 +5559,15 @@ class PaperTradingBot:
                         logger.info(
                             f"[SPREADCAP] Fill detected: {fill_side} {fill_size} @ ${fill_price:.4f}"
                         )
+                        # FIX Feb 4: Log to CSV (was missing!)
+                        await self._log_trade({
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "market_slug": market.slug,
+                            "side": fill_side,
+                            "price": fill_price,
+                            "size": fill_size,
+                            "mode": "spread_capture",
+                        })
             except Exception as e:
                 logger.warning(f"[SPREADCAP] Error checking fills: {e}")  # Promoted from debug
 
@@ -5589,10 +5679,10 @@ class PaperTradingBot:
                 # Position key: entry side is OPPOSITE of hedge side
                 entry_side = "DOWN" if side == "UP" else "UP"
                 position_key = f"{market.slug}_{entry_side}"
-                # Try to acquire lock - returns False if breakeven already handling it
-                if not await self._breakeven_monitor.try_acquire_for_timestop(position_key):
-                    logger.info(
-                        f"[SPREADCAP] Skipping time-stop: breakeven already handling {position_key}"
+                # Force=True: time-stop at 30s ALWAYS executes (FIX Feb 4, 2026)
+                if not await self._breakeven_monitor.try_acquire_for_timestop(position_key, force=True):
+                    logger.error(
+                        f"[SPREADCAP] Time-stop blocked even with force=True: {position_key}"
                     )
                     continue
                 # Lock acquired - time-stop will execute
@@ -5634,6 +5724,7 @@ class PaperTradingBot:
                                 "size": size,
                                 "price": price,
                                 "strategy": "spread_capture",
+                                "market_slug": market.slug,  # FIX Feb 4: For REST verify CSV logging
                             }
                         else:
                             self._live_confirmed_fills.add(order_id)
@@ -5692,6 +5783,22 @@ class PaperTradingBot:
 
         strategy = self._aggressive_strategy
 
+        # MAX LOSS LIMIT CHECK (Feb 5, 2026 FIX)
+        # This was MISSING - AGGRESSIVE kept trading even when loss limit was hit!
+        # Allow hedging to complete, but block new entries
+        is_actively_hedging = strategy.state.first_fill_side is not None
+        if self.loss_limit_reached and not is_actively_hedging:
+            if not hasattr(self, '_last_loss_limit_log') or time.time() - self._last_loss_limit_log > 30:
+                logger.warning(
+                    f"🛑 [AGGRESSIVE] MAX LOSS LIMIT: ${abs(self.cumulative_pnl):.2f} >= ${self.max_daily_loss:.2f} - "
+                    f"Blocking new entries (hedging allowed)"
+                )
+                self._last_loss_limit_log = time.time()
+            # Still allow market rotation so existing positions can resolve
+            if self._rotator and self._rotator.should_rotate():
+                await self._handle_market_rotation(market)
+            return
+
         # BINANCE SAFETY GATE: Block NEW entries if Binance unhealthy
         # BUT allow hedging to continue if we already have a position (first_fill_side is set)
         is_actively_hedging = strategy.state.first_fill_side is not None
@@ -5736,6 +5843,16 @@ class PaperTradingBot:
                         strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
                         logger.info(f"[AGGRESSIVE] Fill: {fill_side} {fill_size} @ ${fill_price:.4f}")
 
+                        # FIX Feb 4: Log to CSV (was missing!)
+                        await self._log_trade({
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "market_slug": market.slug,
+                            "side": fill_side,
+                            "price": fill_price,
+                            "size": fill_size,
+                            "mode": "aggressive",
+                        })
+
                         # ENTRY FILL: Start breakeven monitoring
                         # (had_position=False means this was an entry, not a hedge)
                         if not had_position and self._breakeven_monitor:
@@ -5757,12 +5874,9 @@ class PaperTradingBot:
                         # CYCLE COMPLETION: If cycle just completed, cancel orders and merge
                         if had_position and strategy.state.first_fill_side is None:
                             await self._cancel_pending_after_cycle_reset(market, "WS_FILL")
-                            # Stop breakeven monitoring (cycle complete via passive hedge)
+                            # Clean slate: clear all breakeven state for this market
                             if self._breakeven_monitor:
-                                # Try both possible position keys since fill_side could be entry or hedge
-                                for pos_side in ["UP", "DOWN"]:
-                                    position_key = f"{market.slug}_{pos_side}"
-                                    await self._breakeven_monitor.stop_monitoring(position_key)
+                                await self._breakeven_monitor.cleanup_after_cycle(market.slug)
 
                             # Auto-merge if a new cycle was recorded
                             if len(strategy._completed_pairs) > completed_pairs_before:
@@ -5859,6 +5973,16 @@ class PaperTradingBot:
                         self._send_web_update()
                         logger.info(f"[AGGRESSIVE] Paper fill: {fill_side} {fill_size} @ ${fill_price:.4f}")
 
+                        # FIX Feb 4: Log to CSV (was missing!)
+                        await self._log_trade({
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "market_slug": market.slug,
+                            "side": fill_side,
+                            "price": fill_price,
+                            "size": fill_size,
+                            "mode": "aggressive",
+                        })
+
                         # ENTRY FILL: Start breakeven monitoring
                         # (had_position=False means this was an entry, not a hedge)
                         if not had_position and self._breakeven_monitor:
@@ -5880,10 +6004,9 @@ class PaperTradingBot:
                         # CYCLE COMPLETION: If cycle just completed, cancel orders and merge
                         if had_position and strategy.state.first_fill_side is None:
                             await self._cancel_pending_after_cycle_reset(market, "PAPER_FILL")
-                            # Stop breakeven monitoring (cycle complete)
+                            # Clean slate: clear all breakeven state for this market
                             if self._breakeven_monitor:
-                                position_key = f"{market.slug}_{fill_side}"
-                                await self._breakeven_monitor.stop_monitoring(position_key)
+                                await self._breakeven_monitor.cleanup_after_cycle(market.slug)
 
                             # Auto-merge if a new cycle was recorded
                             if len(strategy._completed_pairs) > completed_pairs_before:
@@ -6009,9 +6132,10 @@ class PaperTradingBot:
             if is_time_stop and self._breakeven_monitor:
                 entry_side = "DOWN" if side == "UP" else "UP"
                 position_key = f"{market.slug}_{entry_side}"
-                if not await self._breakeven_monitor.try_acquire_for_timestop(position_key):
-                    logger.info(
-                        f"[AGGRESSIVE] Skipping time-stop: breakeven already handling {position_key}"
+                # Force=True: time-stop at 30s ALWAYS executes (FIX Feb 4, 2026)
+                if not await self._breakeven_monitor.try_acquire_for_timestop(position_key, force=True):
+                    logger.error(
+                        f"[AGGRESSIVE] Time-stop blocked even with force=True: {position_key}"
                     )
                     continue
 
@@ -6082,15 +6206,14 @@ class PaperTradingBot:
                                 size=int(filled_size),
                             )
 
-                        # CYCLE COMPLETION: If cycle just completed, cancel orders and merge
+                        # CYCLE COMPLETION: Full cleanup (FIX Feb 4, 2026)
                         if had_position and strategy.state.first_fill_side is None:
+                            # Cancel pending orders (works for both live and paper now)
                             await self._cancel_pending_after_cycle_reset(market, "EXEC_FILL")
-                            # Stop breakeven monitoring (cycle complete)
+
+                            # Clean slate: clear all breakeven state for this market
                             if self._breakeven_monitor:
-                                # Try both possible position keys since side could be entry or hedge
-                                for pos_side in ["UP", "DOWN"]:
-                                    position_key = f"{market.slug}_{pos_side}"
-                                    await self._breakeven_monitor.stop_monitoring(position_key)
+                                await self._breakeven_monitor.cleanup_after_cycle(market.slug)
 
                             # Auto-merge if a new cycle was recorded
                             if len(strategy._completed_pairs) > completed_pairs_before:
@@ -6131,8 +6254,12 @@ class PaperTradingBot:
             source: Where the cancellation was triggered from (for logging)
         """
         if self.trading_mode != "live":
-            # Paper mode doesn't need explicit cancellation - pending orders are simulated
-            logger.debug(f"[CYCLE_CANCEL] Paper mode - skipping cancellation ({source})")
+            # Paper mode: clear simulated pending orders too (FIX Feb 4, 2026)
+            # Previously returned early, leaving stale pending orders in dict
+            if hasattr(self._engine, 'cancel_all_pending'):
+                cancelled = await self._engine.cancel_all_pending(market_slug=market.slug)
+                if cancelled > 0:
+                    logger.info(f"[CYCLE_CANCEL] Paper: cleared {cancelled} pending order(s) ({source})")
             return
 
         if not hasattr(self._engine, 'cancel_all_pending'):
@@ -6260,6 +6387,16 @@ class PaperTradingBot:
                     self._trade_count += 1
                     self._send_web_update()
 
+                    # FIX Feb 4: Log to CSV (was missing!)
+                    await self._log_trade({
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "market_slug": market.slug,
+                        "side": position.loser_side,
+                        "price": filled_price,
+                        "size": filled_size,
+                        "mode": "aggressive",
+                    })
+
                     pair_cost = position.entry_price + filled_price
                     logger.info(
                         f"[BREAKEVEN] ✅ HEDGED: {position.loser_side} {filled_size} @ ${filled_price:.4f} | "
@@ -6269,6 +6406,9 @@ class PaperTradingBot:
                     # CYCLE COMPLETION: merge and reset
                     if had_position and strategy.state.first_fill_side is None:
                         await self._cancel_pending_after_cycle_reset(market, "BREAKEVEN_EXIT")
+                        # Clean slate: clear all breakeven state for this market
+                        if self._breakeven_monitor:
+                            await self._breakeven_monitor.cleanup_after_cycle(market.slug, entry_side=position.entry_side)
 
                         if len(strategy._completed_pairs) > completed_pairs_before:
                             last_cycle = strategy._completed_pairs[-1]
@@ -6471,6 +6611,20 @@ class PaperTradingBot:
         strategy = self._contrarian_strategy
         time_remaining_secs = market.time_remaining()
 
+        # MAX LOSS LIMIT CHECK (Feb 5, 2026 FIX)
+        # Allow hedging to complete, but block new entries
+        is_actively_hedging = strategy.state.first_fill_side is not None
+        if self.loss_limit_reached and not is_actively_hedging:
+            if not hasattr(self, '_last_loss_limit_log') or time.time() - self._last_loss_limit_log > 30:
+                logger.warning(
+                    f"🛑 [CONTRARIAN] MAX LOSS LIMIT: ${abs(self.cumulative_pnl):.2f} >= ${self.max_daily_loss:.2f} - "
+                    f"Blocking new entries (hedging allowed)"
+                )
+                self._last_loss_limit_log = time.time()
+            if self._rotator and self._rotator.should_rotate():
+                await self._handle_market_rotation(market)
+            return
+
         # Process WebSocket fills (live mode)
         if self.trading_mode == "live" and hasattr(self, '_ws_fill_queue'):
             while not self._ws_fill_queue.empty():
@@ -6483,6 +6637,15 @@ class PaperTradingBot:
                     if fill_side and fill_size > 0:
                         strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
                         logger.info(f"[CONTRARIAN] Fill: {fill_side} {fill_size} @ ${fill_price:.4f}")
+                        # FIX Feb 4: Log to CSV (was missing!)
+                        await self._log_trade({
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "market_slug": market.slug,
+                            "side": fill_side,
+                            "price": fill_price,
+                            "size": fill_size,
+                            "mode": "contrarian",
+                        })
                 except asyncio.QueueEmpty:
                     break
 
@@ -6530,6 +6693,15 @@ class PaperTradingBot:
                         self._trade_count += 1
                         self._send_web_update()
                         logger.info(f"[CONTRARIAN] Paper fill: {fill_side} {fill_size} @ ${fill_price:.4f}")
+                        # FIX Feb 4: Log to CSV (was missing!)
+                        await self._log_trade({
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "market_slug": market.slug,
+                            "side": fill_side,
+                            "price": fill_price,
+                            "size": fill_size,
+                            "mode": "contrarian",
+                        })
             except Exception as e:
                 logger.warning(f"[CONTRARIAN] Error checking fills: {e}")
 
@@ -6608,9 +6780,10 @@ class PaperTradingBot:
             if is_time_stop and self._breakeven_monitor:
                 entry_side = "DOWN" if side == "UP" else "UP"
                 position_key = f"{market.slug}_{entry_side}"
-                if not await self._breakeven_monitor.try_acquire_for_timestop(position_key):
-                    logger.info(
-                        f"[CONTRARIAN] Skipping time-stop: breakeven already handling {position_key}"
+                # Force=True: time-stop at 30s ALWAYS executes (FIX Feb 4, 2026)
+                if not await self._breakeven_monitor.try_acquire_for_timestop(position_key, force=True):
+                    logger.error(
+                        f"[CONTRARIAN] Time-stop blocked even with force=True: {position_key}"
                     )
                     continue
 
@@ -6837,6 +7010,16 @@ class PaperTradingBot:
                                 size=fill_size
                             )
                             self._live_confirmed_fills.add(order_id)
+
+                            # FIX Feb 4: Log to CSV (REST verify fallback)
+                            await self._log_trade({
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "market_slug": order_info.get("market_slug", "unknown"),
+                                "side": order_info["side"],
+                                "price": fill_price,
+                                "size": fill_size,
+                                "mode": order_info.get("strategy", "unknown"),
+                            })
                         orders_to_remove.append(order_id)
 
                     elif order_status == "CANCELLED":
