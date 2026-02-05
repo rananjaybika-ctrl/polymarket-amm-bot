@@ -902,8 +902,41 @@ Check allows hedging to complete but blocks new entries when limit hit.
 
 ---
 
+### 47. DATA COLLECTION: OBSERVER AND LOGGER NOT COUPLED ✅ FIXED
+**What happened:** Observer stopped at 02:42 UTC but Binance logger continued until 03:35 UTC. Result: partial data useless for backtesting.
+
+**ROOT CAUSE:**
+- `run_data_collection.py` line 207 had explicit comment: "Don't set self.running = False, let price logger continue"
+- Price logger ignores `self.running` flag, runs for its own duration
+- When observer crashes/finishes, logger keeps going alone
+
+**FIX APPLIED (Feb 5, 2026):**
+- When observer crashes without auto-restart: NOW cancel price_logger_task
+- When observer completes normally: NOW cancel price_logger_task
+- Both must run/stop together for complete data
+
+---
+
+### 48. CSV LOGGING FAILS SILENTLY ✅ FIXED
+**What happened:** Paper trading CSV stopped at 02:39 UTC (159 cycles) but frontend showed 394 cycles and trading continued.
+
+**ROOT CAUSE:**
+- `_log_event_csv()` had NO exception handling around file write
+- If disk full, permission error, etc. - exception bubbled up and was swallowed
+- Trading continued but CSV logging stopped = lost data
+
+**FIX APPLIED (Feb 5, 2026):**
+- Added try/except around CSV write
+- Track consecutive failures with `_csv_write_failures`
+- After 3 failures: set `loss_limit_reached = True` to stop trading
+- Log critical error so it's obvious what happened
+
+**Source:** Feb 5, 2026 - 235 cycles lost (394 traded but only 159 logged)
+
+---
+
 **Last updated:** Feb 5, 2026
-**Mistakes documented:** 46
+**Mistakes documented:** 48
 **Note:** Use `sudo systemctl stop polymarket-bot` to kill AWS frontend (not kill PID)
 
 **Note:** Multi-cycle findings moved to `research/findings/SINGLE_CYCLE_OPTIMAL_20260131.md` (research finding, not Claude mistake)
