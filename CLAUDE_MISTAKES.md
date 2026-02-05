@@ -980,8 +980,54 @@ BREAKEVEN_MIN_HOLD_MS = getattr(AGGRESSIVE_CONFIG, 'breakeven_min_hold_ms', 1000
 
 ---
 
-**Last updated:** Feb 5, 2026
-**Mistakes documented:** 49
+---
+
+### 50. BACKTEST STUDY MISSING SIGNAL DEDUPLICATION (REPEAT PATTERN OF #29)
+**What happened:** AGGRESSIVE_M V2 study (`aggressive_m_v2_ewma_study.py`) had NO cooldown deduplication. Reported 39,221 signals when actual deduplicated count is ~476 (30s cooldown). User caught the mistake.
+
+**Root cause:**
+- Spike signals cluster in bursts (98.5% within 5s of each other)
+- Study counted EVERY spike that passed filters, no cooldown
+- This inflated signal counts ~80x (1,500+/hr vs actual ~30/hr)
+- Same pattern as mistake #29 (missing dedup on API data)
+
+**Cost:**
+- Updated findings with WRONG numbers
+- Wasted time on invalid analysis
+- Had to redo study with proper deduplication
+
+**Evidence of clustering:**
+```
+Median gap between signals in same market: 0 seconds
+98.5% of gaps < 5 seconds
+Signals come in BURSTS, not independent events
+```
+
+**FIX:**
+1. ALL backtest studies MUST implement cooldown deduplication
+2. Standard cooldown: 30 seconds per (market, direction) pair
+3. Track `last_signal_ts` and skip if `current_ts - last_signal_ts < cooldown_ms`
+
+**MANDATORY FOR NEW BACKTESTS:**
+```python
+COOLDOWN_SECONDS = 30
+cooldown_ms = COOLDOWN_SECONDS * 1000
+
+# Track last signal time per (direction) for deduplication
+last_signal_ts = {'UP': 0, 'DOWN': 0}
+
+# In signal loop:
+if spike_ts - last_signal_ts[spike_dir] >= cooldown_ms:
+    results.append(signal_data)
+    last_signal_ts[spike_dir] = spike_ts
+```
+
+**Source:** Feb 6, 2026 - AGGRESSIVE_M V2 OBI study revealed original study was missing dedup
+
+---
+
+**Last updated:** Feb 6, 2026
+**Mistakes documented:** 50
 **Note:** Use `sudo systemctl stop polymarket-bot` to kill AWS frontend (not kill PID)
 
 **Note:** Multi-cycle findings moved to `research/findings/SINGLE_CYCLE_OPTIMAL_20260131.md` (research finding, not Claude mistake)
