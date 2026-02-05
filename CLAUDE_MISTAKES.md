@@ -801,8 +801,83 @@ if z_score < Z_LO or z_score > Z_HI:
 
 ---
 
-**Last updated:** Feb 2, 2026
-**Mistakes documented:** 43
+---
+
+### 44. CHANGED FIRST GREP RESULT WITHOUT CHECKING ALL OCCURRENCES (REPEAT OF #30)
+**What happened:** User asked to fix `high_entry_threshold` from 0.90 to 0.80. I grepped, found the value at line 107 (class default) and line 211 (AGGRESSIVE instance). I ONLY fixed line 107 and called it done. Line 211 (the ACTUAL production value) was still 0.90.
+
+**This is a REPEAT of mistake #30** (Updated config values inconsistently across files).
+
+**Root cause:**
+- Grep returned multiple results
+- Fixed the FIRST result without checking ALL results
+- Didn't verify the fix by grepping AFTER the change
+- Didn't understand that class defaults vs instance values are DIFFERENT
+
+**Cost:**
+- Bot was running with WRONG threshold (0.90 instead of 0.80)
+- User had to ask me to "CHECK THOROUGHLY" to catch my own mistake
+- Entries at $0.85 were still being allowed
+
+**The pattern:**
+```
+Line 107: high_entry_threshold: float = 0.80  # Class DEFAULT (edited)
+Line 211: high_entry_threshold=0.90,          # AGGRESSIVE INSTANCE (MISSED!)
+```
+
+**FIX - ALREADY DOCUMENTED IN #30 BUT I DIDN'T FOLLOW IT:**
+1. Grep ALL occurrences BEFORE changing
+2. Understand WHAT each occurrence is (class default vs instance)
+3. Change ALL relevant occurrences
+4. Grep AFTER to verify ALL are fixed
+5. Don't declare "done" after changing the first match
+
+**MANDATORY SELF-CHECK:**
+When editing config values:
+```bash
+grep -n "high_entry_threshold" research/reference/TRADING_CONFIGS.py
+# Count results, understand each one, fix ALL relevant ones
+```
+
+**Source:** Feb 4, 2026 - skip_high_entry threshold fix
+
+---
+
+### 45. BACKTEST vs PAPER TRADING DISCREPANCY - EWMA DEDUPLICATION MISMATCH ✅ FIXED
+**What happened:** Feb 5 paper trading lost money while backtest showed +$10/hr profit on IDENTICAL data (OOS10.1).
+
+**ROOT CAUSE - EWMA Deduplication Mismatch:**
+- Backtest deduplicates BTC prices by `timestamp_ms` (72% removed) BEFORE EWMA calculation
+- Live was deduplicating by consecutive price value (WRONG approach)
+- Result: Backtest produces 346 trades, live got different spike signals
+
+**The Problem:**
+- Backtest: `df.drop_duplicates(subset=['timestamp_ms'])` - one tick per millisecond
+- Live: `if price != last_price` - only skips if price exactly same as previous
+- These are DIFFERENT deduplication approaches with different EWMA values
+
+**NOT A BUG (clarified):**
+- Fill price logic is CORRECT: when market ask drops to our bid, we fill at our bid price
+- This is correct limit order behavior
+
+**FIX APPLIED (Feb 5, 2026):**
+File: `/src/api/binance_client.py` lines 155-165, 232-256
+- Added `_last_ewma_timestamp_ms` field to track last processed timestamp
+- Changed deduplication from consecutive price to timestamp_ms based:
+  ```python
+  timestamp_ms = int(now.timestamp() * 1000)
+  if timestamp_ms != self._last_ewma_timestamp_ms:
+      # Only update EWMA once per unique millisecond
+  ```
+- Now matches backtest behavior exactly
+
+**Source:** Feb 5, 2026 - OOS10.1 paper trading validation failure
+**Details:** research/findings/BACKTEST_LIVE_DISCREPANCY_FEB5.md
+
+---
+
+**Last updated:** Feb 5, 2026
+**Mistakes documented:** 45
 **Note:** Use `sudo systemctl stop polymarket-bot` to kill AWS frontend (not kill PID)
 
 **Note:** Multi-cycle findings moved to `research/findings/SINGLE_CYCLE_OPTIMAL_20260131.md` (research finding, not Claude mistake)

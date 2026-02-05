@@ -153,12 +153,14 @@ class BinanceClient:
         self._last_diagnostic_time: float = 0.0  # Time of last diagnostic log
 
         # EWMA spike detection state (Feb 3, 2026)
-        # CRITICAL: EWMA must update on every unique price tick (~60Hz) to match backtest behavior.
-        # Backtest deduplicates by timestamp_ms, we deduplicate by price value (similar effect).
+        # CRITICAL: EWMA must update on every unique TIMESTAMP tick (~60Hz) to match backtest behavior.
+        # Backtest deduplicates by timestamp_ms - we MUST do the same (Feb 5, 2026 FIX).
+        # Previous approach (dedup by price value) was WRONG - caused 2.4x trade count mismatch.
         # Alpha = 1 - 0.5 ** (1.0 / (halflife_ms / 16.67)) for 60Hz data
         # EWMA_1000 (1000ms half-life): alpha ≈ 0.0115
         self._ewma_price: Optional[float] = None  # Current EWMA state
         self._ewma_alpha: float = 1 - 0.5 ** (1.0 / (1000 / 16.67))  # ~0.0115 for EWMA_1000
+        self._last_ewma_timestamp_ms: int = 0  # Last timestamp_ms when EWMA was updated
 
     async def connect(self) -> None:
         """Connect to Binance WebSocket stream and start receiving prices."""
@@ -225,21 +227,25 @@ class BinanceClient:
 
                 if price is not None:
                     now = datetime.now(timezone.utc)
+                    timestamp_ms = int(now.timestamp() * 1000)
 
                     self._current_price = price
                     self._price_history.append(PricePoint(timestamp=now, price=price))
 
-                    # ONLY update spike price history when price CHANGES (Feb 2, 2026)
-                    # Binance bookTicker sends ~180 msg/sec but most are duplicates
-                    # We only want unique price changes for spike detection
-                    # This ensures 72 ticks = ~72 actual price movements
-                    last_price = self._spike_price_history[-1] if self._spike_price_history else None
-                    if last_price is None or price != last_price:
+                    # TIMESTAMP-BASED DEDUPLICATION (Feb 5, 2026 FIX)
+                    # Backtest deduplicates by timestamp_ms: df.drop_duplicates(subset=['timestamp_ms'])
+                    # We MUST do the same for EWMA updates to match backtest behavior.
+                    # Previous approach (dedup by price value) caused 2.4x trade count mismatch.
+                    # At 60Hz, we expect ~16.67ms between unique timestamps.
+                    if timestamp_ms != self._last_ewma_timestamp_ms:
+                        self._last_ewma_timestamp_ms = timestamp_ms
+
+                        # Update spike price history (one price per unique timestamp)
                         self._spike_price_history.append(price)
                         if len(self._spike_price_history) > self._spike_history_size:
                             self._spike_price_history = self._spike_price_history[-self._spike_history_size:]
 
-                        # Update EWMA on every unique price tick (Feb 3, 2026)
+                        # Update EWMA on every unique timestamp tick
                         # CRITICAL: This makes EWMA update at ~60Hz to match backtest behavior.
                         # Strategy's _detect_spike_ewma() will read from this state.
                         if self._ewma_price is None:
@@ -771,6 +777,7 @@ class BinanceClient:
         Call this when switching markets or after a long gap in data.
         """
         self._ewma_price = None
+        self._last_ewma_timestamp_ms = 0
         logger.debug("Reset EWMA state")
 
     def get_buffer_diagnostics(self) -> dict:
