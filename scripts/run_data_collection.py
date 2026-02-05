@@ -11,14 +11,15 @@ Both run for the same duration and stop together.
 Features:
 - Health monitoring: Detects if observer stops writing data
 - Error handling: Logs errors without silent failures
-- Optional auto-restart: Disabled by default, enable with --auto-restart
+- Auto-restart: ENABLED by default (3 attempts max), disable with --no-auto-restart
+- Coupled stop: If observer fails permanently, price logger stops too (Feb 5, 2026)
 - Graceful shutdown: Handles SIGINT/SIGTERM properly
 
 Usage:
     python scripts/run_data_collection.py --hours 6
     python scripts/run_data_collection.py --until 21:30  # Stop at 9:30 PM local
     python scripts/run_data_collection.py --continuous   # Run until Ctrl+C
-    python scripts/run_data_collection.py --hours 24 --auto-restart  # With auto-restart
+    python scripts/run_data_collection.py --hours 24 --no-auto-restart  # Disable auto-restart
 """
 
 import asyncio
@@ -57,7 +58,7 @@ MAX_RESTART_ATTEMPTS = 3  # Maximum restart attempts before giving up
 class DataCollectionManager:
     """Manages concurrent observer and price logger with health monitoring."""
 
-    def __init__(self, output_dir: str = "research", auto_restart: bool = False):
+    def __init__(self, output_dir: str = "research", auto_restart: bool = True):
         self.output_dir = Path(output_dir)
         self.observer_dir = self.output_dir / "observer"
         self.binance_dir = self.output_dir / "binance_hf"
@@ -185,10 +186,14 @@ class DataCollectionManager:
                     self._observer_restart_attempts += 1
                     if self._observer_restart_attempts > MAX_RESTART_ATTEMPTS:
                         logger.error(f"Observer exceeded max restart attempts ({MAX_RESTART_ATTEMPTS}). Giving up.")
+                        logger.error("STOPPING PRICE LOGGER TOO - incomplete data is useless")
                         self.running = False
+                        # FIXED (Feb 5, 2026): Stop price logger when restarts exhausted
+                        if self._price_logger_task and not self._price_logger_task.done():
+                            self._price_logger_task.cancel()
                         break
 
-                    logger.warning(f"Auto-restart enabled. Attempting restart {self._observer_restart_attempts}/{MAX_RESTART_ATTEMPTS} in {RESTART_BACKOFF_SECS}s...")
+                    logger.warning(f"Auto-restart: Attempting restart {self._observer_restart_attempts}/{MAX_RESTART_ATTEMPTS} in {RESTART_BACKOFF_SECS}s...")
                     await asyncio.sleep(RESTART_BACKOFF_SECS)
 
                     # Reinitialize observer
@@ -202,10 +207,8 @@ class DataCollectionManager:
 
                     self._init_observer(remaining_hours or self._duration_hours)
                 else:
+                    # Auto-restart explicitly disabled via --no-auto-restart
                     logger.error("Auto-restart DISABLED. Observer stopped. Data collection incomplete.")
-                    logger.error("To enable auto-restart, use --auto-restart flag")
-                    # FIXED (Feb 5, 2026): Stop BOTH when observer crashes
-                    # Previous behavior let price logger continue alone = incomplete data
                     logger.error("STOPPING PRICE LOGGER TOO - incomplete data is useless")
                     self.running = False
                     if self._price_logger_task and not self._price_logger_task.done():
@@ -314,7 +317,7 @@ async def main():
         epilog="""
 Examples:
     python scripts/run_data_collection.py --hours 6
-    python scripts/run_data_collection.py --hours 24 --auto-restart
+    python scripts/run_data_collection.py --hours 24 --no-auto-restart
     python scripts/run_data_collection.py --until 21:30
     python scripts/run_data_collection.py --continuous
         """
@@ -327,8 +330,9 @@ Examples:
                         help='Run until manually stopped')
     parser.add_argument('--output', type=str, default='research',
                         help='Output base directory')
-    parser.add_argument('--auto-restart', action='store_true',
-                        help='Auto-restart observer on crash (OFF by default)')
+    parser.add_argument('--no-auto-restart', dest='auto_restart', action='store_false',
+                        help='Disable auto-restart on crash (ON by default)')
+    parser.set_defaults(auto_restart=True)
     args = parser.parse_args()
 
     manager = DataCollectionManager(
