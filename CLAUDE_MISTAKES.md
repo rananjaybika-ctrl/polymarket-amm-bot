@@ -935,8 +935,53 @@ Check allows hedging to complete but blocks new entries when limit hit.
 
 ---
 
+### 49. HARDCODED WRONG BREAKEVEN VALUE IN SAME COMMIT THAT DOCUMENTED CORRECT VALUE ✅ FIXED
+**What happened:** In commit a025ba9 (Feb 4, 2026), I created the breakeven exit feature. **IN THE SAME COMMIT:**
+- TRADING_CONFIGS.py: `breakeven_min_hold_ms = 10000` (correct - 10s)
+- BREAKEVEN_SWEEP_FINDINGS.md: "BE_10000ms WINNER, BE_2000ms worse" (correct - 10s)
+- aggressive_main_backtest.py: `BREAKEVEN_MIN_HOLD_MS = 2000` (WRONG - 2s hardcoded)
+
+The findings document I created EXPLICITLY says:
+> "TESTED: 0ms=DISASTER (98% taker), 2s=worse, 5s=good, 10s=BEST"
+
+Yet I hardcoded 2000ms instead of importing from TRADING_CONFIGS.
+
+**This is a REPEAT of mistakes #30 and #35:**
+- #30: Updated config values inconsistently across files
+- #35: TRADING_CONFIGS.py NOT WIRED - config had correct value but code hardcoded wrong value
+
+**Cost:**
+- Backtest showed -$3.72/hr on OOS10.2 (with 2s hold)
+- After fix: +$18.20/hr on OOS10.2 (with 10s hold)
+- **Every backtest run since Feb 4 was using WRONG parameters**
+- All "validation" runs were invalid
+
+**Root cause:**
+- Hardcoded value instead of importing from TRADING_CONFIGS
+- Didn't verify backtest params matched TRADING_CONFIGS after implementation
+- Commit message said "10s hold" but I typed 2000 instead of 10000
+
+**FIX (Feb 5, 2026):**
+```python
+# FROM:
+BREAKEVEN_MIN_HOLD_MS = 2000
+
+# TO:
+BREAKEVEN_MIN_HOLD_MS = getattr(AGGRESSIVE_CONFIG, 'breakeven_min_hold_ms', 10000)
+```
+
+**PREVENTION (ADDING TO MANDATORY CHECKLIST):**
+1. NEVER hardcode config values in backtests - ALWAYS import from TRADING_CONFIGS
+2. After implementing feature, grep to verify ALL files use same value
+3. Read your own findings document before hardcoding values
+4. If commit message says "10s", verify code actually has 10000ms not 2000ms
+
+**Source:** Feb 5, 2026 - User asked to investigate discrepancy, found Claude's mistake
+
+---
+
 **Last updated:** Feb 5, 2026
-**Mistakes documented:** 48
+**Mistakes documented:** 49
 **Note:** Use `sudo systemctl stop polymarket-bot` to kill AWS frontend (not kill PID)
 
 **Note:** Multi-cycle findings moved to `research/findings/SINGLE_CYCLE_OPTIMAL_20260131.md` (research finding, not Claude mistake)

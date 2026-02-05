@@ -117,6 +117,18 @@ DEFAULT_DROP_MULTIPLIER = 0.50
 DEFAULT_DROP_INTERCEPT = 0.08
 TARGET_PAIR_COST = 0.99
 
+# =============================================================================
+# ENTRY FILL DELAY - Simulate realistic taker order execution (Feb 5, 2026)
+# =============================================================================
+# In live trading, entry orders have a delay before filling:
+# - 500ms Polymarket taker delay (exchange-enforced for crossing orders)
+# - 42ms AWS Ireland → Polymarket network latency (from test_latency.py)
+# Total: 542ms from order submit to fill
+#
+# Observer data is at ~5Hz (200ms intervals), so 542ms ≈ 2.7 rows ≈ 3 rows
+ENTRY_FILL_DELAY_MS = 542  # Total taker delay (500ms exchange + 42ms network)
+ENTRY_DELAY_ROWS = 3       # 542ms / 200ms = 2.7 → round to 3 rows (conservative)
+
 # Cycling
 MIN_CYCLE_GAP_MS = 50  # Faster cycling (was 200)
 
@@ -146,7 +158,9 @@ class TestConfig:
     stop_loss_pct: Optional[float] = None  # None = disabled, 0.15/0.20/0.30 = exit if drop >= X%
     max_market_losses: Optional[int] = None  # None = disabled, 2/3 = stop trading after N losses in market
     # Breakeven exit (Feb 3, 2026) - exit when winner_bid <= entry_price
-    breakeven_min_hold_ms: Optional[int] = None  # None = disabled, 2000/5000/10000 = min hold before BE check
+    # VALIDATED WINNER: 10000ms from test_breakeven_sweep.py (+$15.35/hr vs $13.61/hr baseline)
+    # See: research/findings/BREAKEVEN_SWEEP_FINDINGS.md
+    breakeven_min_hold_ms: Optional[int] = 10000  # 10s hold before BE check (sweep winner)
 
     @property
     def total_shares(self) -> int:
@@ -705,7 +719,7 @@ def simulate_market_single(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                 else:
                     loser_ask = obs_row['down_ask']
 
-                # Check passive fill
+                # Check passive fill: when market ask drops to our bid, we get filled at OUR bid price
                 if pd.notna(loser_ask) and loser_ask <= loser_target:
                     pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
                         winner_entry, loser_target, config.shares_per_cycle,
@@ -1033,10 +1047,28 @@ def simulate_market_single(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                 spike_idx += 1
                 continue
 
+        # ENTRY DELAY FIX (Feb 5, 2026): Simulate 542ms taker delay
+        # Look ahead in observer data to get the fill price AFTER delay
+        delayed_obs_idx = min(obs_idx + ENTRY_DELAY_ROWS, len(mdf) - 1)
+        delayed_obs_row = mdf.iloc[delayed_obs_idx]
+
+        # Get the delayed fill price (what we actually pay after 542ms)
+        if winner_side == "UP":
+            winner_ask_delayed = delayed_obs_row['up_ask']
+        else:
+            winner_ask_delayed = delayed_obs_row['down_ask']
+
+        # SKIP RULE RE-CHECK: If delayed price is too high, reject entry
+        # This matches paper trading behavior where fills are rejected if
+        # market moves against us during the delay
+        if pd.isna(winner_ask_delayed) or winner_ask_delayed >= HIGH_ENTRY_THRESHOLD:
+            spike_idx += 1
+            continue
+
         # ENTRY - use config's loser bid calculation
         cycle_num += 1
         loser_side = "DOWN" if winner_side == "UP" else "UP"
-        winner_entry = winner_ask
+        winner_entry = winner_ask_delayed  # USE DELAYED PRICE, not instant
         loser_target = config.calculate_loser_bid(winner_entry, spike_mag)
 
         in_position = True
@@ -1125,7 +1157,7 @@ def simulate_market_multicycle(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
             else:
                 loser_ask = obs_row['down_ask']
 
-            # Check passive fill
+            # Check passive fill: when market ask drops to our bid, we get filled at OUR bid price
             if pd.notna(loser_ask) and loser_ask <= cycle.loser_target:
                 pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
                     cycle.winner_entry, cycle.loser_target, shares,
@@ -1266,16 +1298,31 @@ def simulate_market_multicycle(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                     can_enter = False
 
             if can_enter:
+                # ENTRY DELAY FIX (Feb 5, 2026): Simulate 542ms taker delay
+                delayed_obs_idx = min(obs_idx + ENTRY_DELAY_ROWS, len(mdf) - 1)
+                delayed_obs_row = mdf.iloc[delayed_obs_idx]
+
+                # Get the delayed fill price
+                if winner_side == "UP":
+                    winner_ask_delayed = delayed_obs_row['up_ask']
+                else:
+                    winner_ask_delayed = delayed_obs_row['down_ask']
+
+                # SKIP RULE RE-CHECK with delayed price
+                if pd.isna(winner_ask_delayed) or winner_ask_delayed >= HIGH_ENTRY_THRESHOLD:
+                    spike_idx += 1
+                    continue
+
                 cycle_num += 1
                 loser_side = "DOWN" if winner_side == "UP" else "UP"
-                loser_target = config.calculate_loser_bid(winner_ask, spike_mag)
+                loser_target = config.calculate_loser_bid(winner_ask_delayed, spike_mag)
 
                 active_cycles.append(BacktestCycle(
                     cycle_id=cycle_num,
                     entry_ts=spike_ts,
                     winner_side=winner_side,
                     loser_side=loser_side,
-                    winner_entry=winner_ask,
+                    winner_entry=winner_ask_delayed,  # USE DELAYED PRICE
                     loser_target=loser_target,
                     entry_time_rem=time_rem,
                     spike_magnitude=spike_mag,

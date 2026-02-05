@@ -87,14 +87,29 @@ TARGET_PAIR_COST = 0.99
 MIN_CYCLE_GAP_MS = getattr(AGGRESSIVE_CONFIG, 'min_cycle_gap_ms', 50)  # 50ms (faster cycling)
 
 # =============================================================================
+# ENTRY FILL DELAY - Simulate realistic taker order execution
+# =============================================================================
+# In live trading, entry orders have a delay before filling:
+# - 500ms Polymarket taker delay (exchange-enforced for crossing orders)
+# - 42ms AWS Ireland → Polymarket network latency (from test_latency.py Feb 5, 2026)
+# Total: 542ms from order submit to fill
+#
+# During this delay, the market moves. The backtest must simulate this by
+# using the ask price AFTER the delay, not at spike detection time.
+#
+# Observer data is at ~5Hz (200ms intervals), so 542ms ≈ 2.7 rows ≈ 3 rows
+ENTRY_FILL_DELAY_MS = 542  # Total taker delay (500ms exchange + 42ms network)
+ENTRY_DELAY_ROWS = 3       # 542ms / 200ms = 2.7 → round to 3 rows (conservative)
+
+# =============================================================================
 # BREAKEVEN EXIT - Real-time profit threshold monitoring
 # =============================================================================
 # When enabled, checks every tick if winner_bid <= entry_price (breakeven/loss).
 # If so, exits immediately at market (loser_ask) instead of waiting for time-stop.
 # This catches exits at ~$1.00 pair cost instead of $1.04 from 5s polling delay.
 BREAKEVEN_EXIT_ENABLED = True  # Set False to compare with/without breakeven exit
-BREAKEVEN_MIN_HOLD_MS = 2000   # Minimum hold time (ms) before checking breakeven
-                               # Prevents instant exit from bid/ask spread on entry
+BREAKEVEN_MIN_HOLD_MS = getattr(AGGRESSIVE_CONFIG, 'breakeven_min_hold_ms', 10000)  # From TRADING_CONFIGS (10s winner)
+                               # FIXED Feb 5: Was hardcoded 2000ms, should be 10000ms from validated findings
 
 # -----------------------------------------------------------------------------
 # Z-SCORE VOLATILITY FILTER - CRITICAL DISCREPANCY!
@@ -271,6 +286,28 @@ DATASETS = {
         "use_obi": True,
         "expected_hours": 25.0,
         "is_60hz": True,  # 60Hz+ - include in spike testing
+    },
+    "OOS10.1": {
+        "name": "OOS10.1 (Feb 5, paper trading validation)",
+        "btc_file": "research/binance_hf/btc_prices_20260204_190733.csv",
+        "obs_files": [
+            "research/observer/grid_obs_20260205.csv",
+        ],
+        "resolutions_file": "research/observer/resolutions_20260205.csv",
+        "use_obi": True,
+        "expected_hours": 2.6,
+        "is_60hz": True,
+    },
+    "OOS10.2": {
+        "name": "OOS10.2 (Feb 5, 2hr session 04:00-06:00 UTC)",
+        "btc_file": "research/binance_hf/btc_prices_oos10_2.csv",
+        "obs_files": [
+            "research/observer/grid_obs_oos10_2.csv",
+        ],
+        "resolutions_file": "research/observer/resolutions_oos10_2.csv",
+        "use_obi": True,
+        "expected_hours": 2.0,
+        "is_60hz": True,
     },
 }
 
@@ -499,7 +536,7 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                 else:
                     loser_ask = obs_row['down_ask']
 
-                # Check passive fill
+                # Check passive fill: when market ask drops to our bid, we get filled at OUR bid price
                 if pd.notna(loser_ask) and loser_ask <= loser_target:
                     pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
                         winner_entry, loser_target, TARGET_SHARES,
@@ -759,9 +796,27 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                     continue
 
         # ENTRY - use local loser bid calculation (matches grid search)
+        # ENTRY DELAY FIX (Feb 5, 2026): Simulate 542ms taker delay
+        # Look ahead in observer data to get the fill price AFTER delay
+        delayed_obs_idx = min(obs_idx + ENTRY_DELAY_ROWS, len(mdf) - 1)
+        delayed_obs_row = mdf.iloc[delayed_obs_idx]
+
+        # Get the delayed fill price (what we actually pay after 542ms)
+        if winner_side == "UP":
+            winner_ask_delayed = delayed_obs_row['up_ask']
+        else:
+            winner_ask_delayed = delayed_obs_row['down_ask']
+
+        # SKIP RULE RE-CHECK: If delayed price is too high, reject entry
+        # This matches paper trading behavior where fills are rejected if
+        # market moves against us during the delay
+        if pd.isna(winner_ask_delayed) or winner_ask_delayed >= HIGH_ENTRY_THRESHOLD:
+            spike_idx += 1
+            continue
+
         cycle_num += 1
         loser_side = "DOWN" if winner_side == "UP" else "UP"
-        winner_entry = winner_ask
+        winner_entry = winner_ask_delayed  # USE DELAYED PRICE, not instant
         loser_target = calculate_loser_bid(winner_entry, spike_mag)
 
         in_position = True
@@ -834,10 +889,20 @@ def load_dataset(dataset_key: str) -> Tuple[Optional[pd.DataFrame], Optional[pd.
             print(f"  ERROR: No price data available")
             return None, None, {}, 0
 
-    # Load resolutions
-    res_path = base_dir / "research/observer/market_resolutions_verified.csv"
-    res_df = pd.read_csv(res_path)
-    res_map = dict(zip(res_df['slug'], res_df['winner']))
+    # Load resolutions - use custom file if specified, else default
+    if 'resolutions_file' in config:
+        res_path = base_dir / config['resolutions_file']
+        res_df = pd.read_csv(res_path)
+        # OOS10+ format: market_slug, resolution
+        if 'market_slug' in res_df.columns:
+            res_map = dict(zip(res_df['market_slug'], res_df['resolution']))
+        else:
+            res_map = dict(zip(res_df['slug'], res_df['winner']))
+        print(f"  Resolutions: {res_path.name} ({len(res_map)} markets)")
+    else:
+        res_path = base_dir / "research/observer/market_resolutions_verified.csv"
+        res_df = pd.read_csv(res_path)
+        res_map = dict(zip(res_df['slug'], res_df['winner']))
 
     # Find overlap
     btc_start, btc_end = btc_df['timestamp_ms'].min(), btc_df['timestamp_ms'].max()

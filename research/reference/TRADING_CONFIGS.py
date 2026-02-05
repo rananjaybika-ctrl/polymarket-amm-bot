@@ -103,8 +103,8 @@ class TradingConfig:
     min_cycle_gap_ms: int = 50  # Minimum gap between cycles (ms)
 
     # TIME120s_SKIP parameters (Jan 27, 2026)
-    skip_high_entry: bool = False  # Skip entries >= high_entry_threshold
-    high_entry_threshold: float = 0.90  # PRODUCTION: $0.90
+    skip_high_entry: bool = True  # Skip entries >= high_entry_threshold
+    high_entry_threshold: float = 0.80  # Skip entries >= $0.80 *revert to >=0.90 if test validated
     min_time_remaining: float = 60.0  # Minimum seconds before market end
 
     # OBI (Orderbook Imbalance) filter (Jan 28, 2026)
@@ -208,7 +208,7 @@ AGGRESSIVE = TradingConfig(
 
     # TS30 parameters (Feb 3, 2026 - updated for EWMA winner)
     skip_high_entry=True,        # Skip entries >= threshold (unhedgeable)
-    high_entry_threshold=0.90,   # PRODUCTION: $0.90
+    high_entry_threshold=0.80,   # Skip >= $0.80 *revert to >=0.90 if test validated
     min_time_remaining=90.0,     # time_stop + 60s buffer = 30 + 60 = 90
 
     # SINGLE-CYCLE ONLY (Jan 31, 2026 - multi-cycle abandoned)

@@ -187,7 +187,31 @@ class CycleRecord:
     time_remaining_at_complete: float
 
 
-# Spike detection - CANONICAL from TRADING_CONFIGS.py (Jan 27, 2026)
+# =============================================================================
+# SPIKE DETECTION - FIXED LOOKBACK (Observer Only)
+# =============================================================================
+# IMPORTANT: Observer uses FIXED lookback, NOT the EWMA used by live trading!
+#
+# Observer (this file):
+#   Method: FIXED - compares current price to price 72 ticks ago
+#   Buffer: 82 prices (SPIKE_LOOKBACK + 10 margin)
+#   Update rate: ~5Hz (observer sample loop)
+#   Result: ~14 redundant signals per price move
+#
+# Live Trading (binance_client.py + enhanced_spike.py):
+#   Method: EWMA_1000 - exponential weighted moving average, 1000ms half-life
+#   Buffer: NONE - just 1 float (ewma_price)
+#   Update rate: ~60Hz (WebSocket)
+#   Result: ~1 clean signal per price move
+#
+# WHY DIFFERENT?
+# - Observer is for data collection/observation, not trading decisions
+# - Observer runs at 5Hz, live runs at 60Hz - EWMA behaves differently
+# - Observer spike_detected column is NOT representative of live trading signals
+# - For backtest validation, use the 60Hz Binance logger data with EWMA precomputation
+#
+# See: research/findings/AGGRESSIVE_EWMA_FINDINGS.md for EWMA validation
+# =============================================================================
 SPIKE_LOOKBACK = 72          # 72 ticks ≈ 1200ms (CANONICAL)
 SPIKE_THRESHOLD = 0.02       # 0.02% minimum to trigger
 # Hedge pricing (v2: recalibrated Jan 18, 2026)
@@ -248,16 +272,23 @@ class GridState:
 
     def detect_spike(self, binance_price: float) -> Tuple[Optional[str], float]:
         """
-        Detect raw Binance price spike over last N ticks.
+        Detect raw Binance price spike using FIXED LOOKBACK method.
 
-        This is 4x faster than velocity-based detection.
+        NOTE: This is NOT the same as live trading which uses EWMA_1000!
+        - Observer: FIXED lookback (current vs 72-ticks-ago)
+        - Live: EWMA with 1000ms half-life at 60Hz
+
+        Observer spike_detected is for logging/observation only, not trading.
 
         Returns:
             (direction, magnitude_pct) or (None, 0) if no spike
         """
         self.spike_price_history.append(binance_price)
-        if len(self.spike_price_history) > 50:
-            self.spike_price_history = self.spike_price_history[-50:]
+        # BUG FIX Feb 5, 2026: Buffer was 50 but SPIKE_LOOKBACK+1=73 needed
+        # Old code: spike detection could NEVER trigger (50 < 73 always True)
+        spike_buffer_size = SPIKE_LOOKBACK + 10  # 82 (gives margin)
+        if len(self.spike_price_history) > spike_buffer_size:
+            self.spike_price_history = self.spike_price_history[-spike_buffer_size:]
 
         if len(self.spike_price_history) < SPIKE_LOOKBACK + 1:
             return None, 0

@@ -1,0 +1,196 @@
+================================================================================
+FEBRUARY 4, 2026 - PAPER TRADING SESSION VOLATILITY ANALYSIS
+================================================================================
+Log File: /Users/rananjaybika/polymarket-amm-bot/logs/server_aws_feb4.log
+Analysis Date: Feb 4, 2026
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+Total Volatility Measurements: 205
+Total Trades Executed: 88
+  - Wins:   21 (23.9%)
+  - Losses: 67 (76.1%)
+OBI Rejections: 2,103 (filter working actively)
+
+BTC Price Range: $75,768 - $76,333 (~0.75% daily range)
+
+================================================================================
+2. TRADE OUTCOMES BREAKDOWN
+================================================================================
+
+WIN Distribution (21 trades):
+  +$1.20 PnL: 2 trades
+  +$1.10 PnL: 8 trades (most common win)
+  +$1.00 PnL: 6 trades  
+  +$0.20 PnL: 1 trade
+  +$0.10 PnL: 4 trades
+
+LOSS Distribution (67 trades):
+  $0.00 PnL:  7 trades (breakeven)
+  -$0.10 PnL: 16 trades (most common loss)
+  -$0.20 PnL: 6 trades
+  -$0.30 PnL: 13 trades
+  -$0.40 PnL: 4 trades
+  -$0.50 PnL: 8 trades
+  -$0.60 PnL: 5 trades
+  -$0.70 PnL: 3 trades
+  -$1.00 PnL: 1 trade
+  -$1.10 PnL: 2 trades
+  -$1.20 PnL: 1 trade
+  -$1.30 PnL: 1 trade
+
+================================================================================
+3. VOLATILITY MEASUREMENTS ([VOL] LINES)
+================================================================================
+
+Sample volatility readings (move % vs dynamic threshold):
+  - Highest: move=0.0808% (ABOVE threshold)
+  - Typical ABOVE: 0.02% - 0.06%
+  - Typical below: 0.00% - 0.015%
+
+ABOVE Threshold Moves (triggered signals):
+  move=0.0808% | move=0.0704% | move=0.0652% | move=0.0644%
+  move=0.0625% | move=0.0621% | move=0.0609% | move=0.0606%
+  move=0.0597% | move=0.0528% | move=0.0523% | move=0.0481%
+
+Dynamic Threshold Range: 0.0150% - 0.0230%
+Buffer Status: Typically 150/73 shared (above minimum)
+
+================================================================================
+4. SPIKE DETECTION MAGNITUDES
+================================================================================
+
+Top Spike Magnitudes (frequency):
+  mag=0.0288% (97 occurrences)
+  mag=0.0372% (90 occurrences)
+  mag=0.0262% (78 occurrences)
+  mag=0.0212% (77 occurrences)
+  mag=0.0356% (76 occurrences)
+  mag=0.0294% (72 occurrences)
+  mag=0.0500% (68 occurrences)
+  mag=0.0455% (66 occurrences)
+
+Spike Magnitude Distribution:
+  Low (0.02-0.03%):   Most frequent, mixed results
+  Medium (0.03-0.05%): Common, better win rate
+  High (0.05%+):       Less frequent, highest conviction
+
+================================================================================
+5. ENHANCED SPIKE SCORES
+================================================================================
+
+Score Distribution for Accepted Spikes:
+  score=0.634: 115 occurrences (most common)
+  score=0.540: 101 occurrences
+  score=0.569: 74 occurrences
+  score=0.565: 74 occurrences
+  score=0.720: 58 occurrences
+  score=0.950: 52 occurrences (high conviction)
+  score=0.829: 49 occurrences
+  score=0.826: 48 occurrences
+
+Velocity Confirmation:
+  v=0.000: 138 (no velocity - risky)
+  v=0.079-0.131: Most common moderate velocity
+  v=0.263-0.473: High velocity signals (better confirmation)
+
+================================================================================
+6. MARKET WINDOWS TRADED
+================================================================================
+
+Session Time Windows (UTC):
+  - 2026-01-06 13:00-13:15 (legacy test)
+  - 2026-02-04 10:17-11:00 (main session today)
+
+Market Slugs Traded (by activity):
+  btc-updown-15m-1770201000: 3,458 events (most active)
+  btc-updown-15m-1770212700: 3,347 events
+  btc-updown-15m-1770201900: 3,204 events
+  btc-updown-15m-1770210000: 3,076 events
+  btc-updown-15m-1770204600: 2,963 events
+  btc-updown-15m-1770202800: 2,574 events
+  btc-updown-15m-1770203700: 1,839 events
+  btc-updown-15m-1770211800: 1,799 events
+  btc-updown-15m-1770210900: 1,281 events
+  btc-updown-15m-1770200100: 1,236 events
+  btc-updown-15m-1767704400: 1,322 events
+  btc-updown-15m-1767703500: 9 events
+
+Session Durations:
+  - 15 min sessions: 2
+  - 22 min session: 1
+  - 29 min session: 1
+  - 39 min session: 1
+  - 43 min session: 1
+  - 90 min session: 1
+  - 266 min session: 1 (main session)
+
+================================================================================
+7. VOLATILITY vs TRADE OUTCOME ANALYSIS
+================================================================================
+
+WINNING TRADES CHARACTERISTICS:
+  - Average pair_cost: ~$0.89-0.90 (favorable entry)
+  - Spike magnitudes associated with wins: 0.0273%-0.0557%
+  - Velocity range: v=0.168 to v=0.473
+  - Score range: 0.496-0.891
+  - Typically on PAPER_FILL exit type
+
+LOSING TRADES CHARACTERISTICS:
+  - Average pair_cost: ~$1.01-1.07 (unfavorable entry)
+  - Lower spike magnitudes or rejected spikes
+  - Many BREAKEVEN_EXIT outcomes (close to $1.00)
+  - Score typically lower (<0.65)
+
+KEY FINDING:
+  Winning trades correlated with:
+    1. Lower pair_cost (<$0.95)
+    2. Higher spike scores (>0.70)
+    3. Velocity confirmation (v>0.20)
+    4. Spike magnitude >0.035%
+
+================================================================================
+8. FILTER EFFECTIVENESS (OBI REJECT)
+================================================================================
+
+Total OBI Rejections: 2,103
+  - Pattern: "UP spike rejected: up_imbalance=-X.XXX <= 0"
+  - These prevent trades when order book doesn't confirm spike direction
+  - Example rejections:
+    * up_imbalance=-0.536 (strong negative)
+    * up_imbalance=-0.106 (moderate negative)
+    * up_imbalance=-0.068 (weak negative)
+    * up_imbalance=-0.001 (marginal rejection)
+
+Filter is aggressively rejecting signals - potentially filtering out
+some viable trades but reducing false positives.
+
+================================================================================
+9. RECOMMENDATIONS
+================================================================================
+
+Based on Feb 4 volatility analysis:
+
+1. ENTRY CRITERIA:
+   - Require spike magnitude >= 0.035% for higher win rate
+   - Require velocity >= 0.20 for trend confirmation
+   - Target pair_cost < $0.95 for positive expectancy
+
+2. SCORE THRESHOLD:
+   - Current scores accepting too many low-conviction signals
+   - Consider raising minimum score from ~0.49 to 0.65
+
+3. OBI FILTER TUNING:
+   - OBI rejection rate high (2103 rejections)
+   - May be too aggressive - consider threshold adjustment
+   - Test: allow imbalance >= -0.05 instead of > 0
+
+4. VOLATILITY MONITORING:
+   - Most profitable when move% > 0.04% (2x threshold)
+   - Low volatility periods (move < 0.015%) should skip trading
+
+================================================================================
+END OF ANALYSIS
+================================================================================

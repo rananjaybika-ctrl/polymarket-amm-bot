@@ -73,7 +73,13 @@ class SimulationConfig:
     dynamic_fill_enabled: bool = True  # Enable dynamic fill probability
     price_volatility: float = 0.03  # 3% expected price swing during order lifetime
     competition_factor: float = 0.25  # 25% chance of being sniped by competition
-    min_fill_delay_ms: float = 500.0  # 500ms minimum before fill (queue simulation)
+    min_fill_delay_ms: float = 0.0  # No delay for hedge (maker) - fills on price-touch
+    entry_fill_delay_ms: float = 500.0  # 500ms delay for entry (taker) - matches Polymarket taker delay
+    # Network latency from AWS Ireland eu-west-1 → Polymarket CLOB (Feb 5, 2026 test_latency.py):
+    # - Polymarket REST: 42ms avg (24-63ms range)
+    # - Total taker delay = 500ms (exchange) + 42ms (network) = 542ms
+    # - Binance WS latency: 107ms (affects spike detection freshness)
+    network_latency_ms: float = 42.0  # AWS Ireland → Polymarket (from scripts/test_latency.py)
 
     # Fill price improvement when market crosses our limit (ask < limit)
     # When market offers better than our limit, fill between ask and limit
@@ -607,6 +613,8 @@ class PaperTradingEngine:
         best_ask: Optional[float] = None,
         use_pending_orders: bool = False,
         is_hedge: bool = False,
+        is_market_order: bool = False,
+        skip_threshold: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Execute a single-side paper trade (UP or DOWN only).
@@ -623,7 +631,9 @@ class PaperTradingEngine:
             best_ask: Current best ask price (for fill probability simulation)
             use_pending_orders: If True, add to pending orders for tick-based fills
                                instead of instant fill determination
-            is_hedge: If True, this is a hedge order (uses strict price-touch fills)
+            is_hedge: If True, this is a hedge order (passive maker, price-touch fill)
+            is_market_order: If True, this is a taker order (time-stop, breakeven)
+            skip_threshold: For entry orders, reject fill if current ask >= this price
 
         Returns:
             Dict with trade result:
@@ -690,7 +700,9 @@ class PaperTradingEngine:
                 "market_slug": market.slug,
                 "side": side_upper,
                 "best_ask": best_ask or price,
-                "is_hedge": is_hedge,  # For strict price-touch fills
+                "is_hedge": is_hedge,  # For strict price-touch fills (passive maker)
+                "is_market_order": is_market_order,  # For taker fills (time-stop, breakeven)
+                "skip_threshold": skip_threshold,  # For entry fill rejection (Feb 4, 2026)
             }
 
             logger.info(
@@ -1097,115 +1109,125 @@ class PaperTradingEngine:
         for key, pending in self._pending_orders.items():
             order_age = current_time - pending["placed_at"]
 
-            # Minimum delay before fills can happen (queue simulation)
-            if order_age < self.config.min_fill_delay_ms / 1000.0:
-                continue
-
             # Get current ask for this side
             side = pending["side"]
             best_ask = pending.get("best_ask", pending["price"])
             current_ask = current_prices.get(side, best_ask) if current_prices else best_ask
             is_hedge = pending.get("is_hedge", False)
+            is_market_order = pending.get("is_market_order", False)
 
-            # STRICT PRICE-TOUCH MODE for hedge orders (Feb 2, 2026)
-            # Hedge orders only fill when market ask <= our bid (price must touch)
-            if self.config.strict_hedge_fills and is_hedge:
-                if current_ask > pending["price"]:
-                    # Price hasn't touched our bid yet - no fill
-                    logger.debug(
-                        f"[PAPER_HEDGE] {side} waiting: ask=${current_ask:.4f} > bid=${pending['price']:.4f}"
-                    )
+            # MAKER vs TAKER fill mechanics (Feb 4, 2026)
+            # Maker = passive hedge (is_hedge=True, is_market_order=False) → no delay, price-touch
+            # Taker = entry, time-stop, breakeven → 500ms delay, fill at current ask
+            filled_size = None
+            filled_price = None
+            is_maker = is_hedge and not is_market_order
+
+            if is_maker:
+                # MAKER ORDERS (passive hedge): Strict price-touch mode
+                # Fill when market ask <= our bid (price must touch)
+                if order_age < self.config.min_fill_delay_ms / 1000.0:
                     continue
-                # Price touched our bid - fill immediately
-                logger.info(
-                    f"[PAPER_HEDGE] {side} TOUCHED: ask=${current_ask:.4f} <= bid=${pending['price']:.4f}"
-                )
-                cumulative_prob = 1.0  # Guaranteed fill when price touches
-            else:
-                # PROBABILISTIC MODE (original logic for entry orders)
-                # Calculate cumulative fill probability based on time
-                # P(fill by t) = 1 - (1 - base)^(t/expected_time)
-                base_prob = self.config.fill_probability
-                cumulative_prob = 1 - (1 - base_prob) ** (order_age / expected_fill_time)
 
-                # Adjust for price distance from ask
-                if pending["price"] < best_ask:
-                    # Patient order below ask - use dynamic fill calculation
-                    price_diff = best_ask - pending["price"]
-                    price_diff_pct = price_diff / best_ask if best_ask > 0 else 0
-
-                    # Price movement factor: orders closer to ask fill faster
-                    # Also consider if price moved toward our limit
-                    if current_prices:
-                        if current_ask < best_ask:
-                            # Price moved toward our limit - higher fill chance
-                            cumulative_prob *= 1.3
-                        elif current_ask > best_ask:
-                            # Price moved away - lower fill chance
-                            cumulative_prob *= 0.7
-
-                    # Distance penalty
-                    distance_factor = max(0.5, 1.0 - (price_diff * 15))
-                    cumulative_prob *= distance_factor
-
-            # NOTE: Removed per-tick competition check - it compounded to nearly 0% over many ticks
-            # Competition is already modeled in the base fill_probability (55%)
-
-            # Roll for fill
-            if random.random() < cumulative_prob:
-                # FILL!
-                fill_type = FillType.PARTIAL if random.random() < self.config.partial_fill_rate else FillType.FULL
-                filled_size = self._simulate_fill_size(pending["size"], fill_type)
-                # Use current best_ask for realistic fill price (price may have moved since order placed)
-                current_best_ask = current_prices.get(pending["side"], best_ask) if current_prices else best_ask
-                filled_price = self._simulate_price(pending["price"], is_buy=True, best_ask=current_best_ask)
-                cost = filled_size * filled_price
-
-                # Update balance
-                self._balance -= cost
-
-                # Record trade
-                trade_id = pending.get("order_id", self._generate_trade_id())
-                market = pending["market"]
-                side = pending["side"]
-
-                trade = PaperTrade(
-                    trade_id=trade_id,
-                    market_slug=market.slug,
-                    side=side,
-                    price=filled_price,
-                    size=filled_size,
-                    cost=cost,
-                    is_pair=False,
-                )
-                self._trades.append(trade)
-
-                # Update position
-                if side == "UP":
-                    self._update_position(market, filled_size, 0, cost, 0)
+                if self.config.strict_hedge_fills:
+                    if current_ask > pending["price"]:
+                        # Price hasn't touched our bid yet - no fill
+                        logger.debug(
+                            f"[PAPER_HEDGE] {side} waiting: ask=${current_ask:.4f} > bid=${pending['price']:.4f}"
+                        )
+                        continue
+                    # Price touched our bid - fill immediately
+                    logger.info(
+                        f"[PAPER_HEDGE] {side} TOUCHED: ask=${current_ask:.4f} <= bid=${pending['price']:.4f}"
+                    )
+                    filled_size = pending["size"]  # Full fill when price touches
+                    filled_price = pending["price"]  # Fill at our bid (passive)
                 else:
-                    self._update_position(market, 0, filled_size, 0, cost)
+                    # Legacy probabilistic mode for hedge (rarely used)
+                    base_prob = self.config.fill_probability
+                    cumulative_prob = 1 - (1 - base_prob) ** (order_age / expected_fill_time)
+                    if random.random() >= cumulative_prob:
+                        continue
+                    filled_size = self._simulate_fill_size(pending["size"], FillType.FULL)
+                    filled_price = self._simulate_price(pending["price"], is_buy=True, best_ask=current_ask)
+            else:
+                # TAKER ORDERS (entry, time-stop, breakeven): fill at current ask after delay
+                # Total delay = 500ms Polymarket taker delay + network latency
+                total_taker_delay_ms = self.config.entry_fill_delay_ms + self.config.network_latency_ms
+                if order_age < total_taker_delay_ms / 1000.0:
+                    continue
 
-                self._stats.total_trades += 1
+                # SKIP RULE RE-CHECK: If current ask >= threshold, reject the fill
+                # This prevents fills at bad prices after market moves against us
+                skip_threshold = pending.get("skip_threshold")
+                if skip_threshold is not None and current_ask >= skip_threshold:
+                    logger.warning(
+                        f"[PAPER_ENTRY] {side} REJECTED: ask=${current_ask:.4f} >= "
+                        f"skip_threshold=${skip_threshold:.2f} (market moved against us)"
+                    )
+                    keys_to_remove.append(key)
+                    continue
 
-                logger.info(
-                    f"[PAPER_FILL] {side} order filled after {order_age:.1f}s: "
-                    f"{filled_size}/{pending['size']} @ ${filled_price:.4f}, "
-                    f"cost=${cost:.4f}"
-                )
+                # TAKER FILL: Instant fill at current market ask
+                filled_size = pending["size"]  # Full fill (taker always fills)
+                filled_price = current_ask  # Fill at current market ask (taker)
 
-                fills.append({
-                    "success": True,
-                    "filled_size": filled_size,
-                    "filled_price": filled_price,
-                    "cost": cost,
-                    "trade_id": trade_id,
-                    "side": side,
-                    "market_slug": market.slug,
-                    "order_age": order_age,
-                })
+            # Common fill recording (both hedge and entry)
+            if filled_size is None or filled_price is None:
+                continue
 
-                keys_to_remove.append(key)
+            cost = filled_size * filled_price
+
+            # Update balance
+            self._balance -= cost
+
+            # Record trade
+            trade_id = pending.get("order_id", self._generate_trade_id())
+            market = pending["market"]
+
+            trade = PaperTrade(
+                trade_id=trade_id,
+                market_slug=market.slug,
+                side=side,
+                price=filled_price,
+                size=filled_size,
+                cost=cost,
+                is_pair=False,
+            )
+            self._trades.append(trade)
+
+            # Update position
+            if side == "UP":
+                self._update_position(market, filled_size, 0, cost, 0)
+            else:
+                self._update_position(market, 0, filled_size, 0, cost)
+
+            self._stats.total_trades += 1
+
+            if is_maker:
+                fill_type_str = "HEDGE(maker)"
+            elif is_hedge:
+                fill_type_str = "HEDGE(taker)"  # time-stop or breakeven
+            else:
+                fill_type_str = "ENTRY(taker)"
+            logger.info(
+                f"[PAPER_FILL] {side} {fill_type_str} filled after {order_age:.1f}s: "
+                f"{filled_size}/{pending['size']} @ ${filled_price:.4f}, "
+                f"cost=${cost:.4f}"
+            )
+
+            fills.append({
+                "success": True,
+                "filled_size": filled_size,
+                "filled_price": filled_price,
+                "cost": cost,
+                "trade_id": trade_id,
+                "side": side,
+                "market_slug": market.slug,
+                "order_age": order_age,
+            })
+
+            keys_to_remove.append(key)
 
         # Remove filled orders from pending
         for key in keys_to_remove:
