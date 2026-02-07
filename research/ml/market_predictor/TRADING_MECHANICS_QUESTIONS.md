@@ -11,25 +11,23 @@
 - Maker orders = 0% fees, but not guaranteed to fill
 - Taker orders = instant fill, but fees eat profits
 
-**Questions:**
+**USER ANSWERS:**
 
-1. **Fill Rate Reality:** What's the typical fill rate for maker orders at various offsets?
-   - At `expensive_ask - 0.01` (1c below)?
-   - At `expensive_ask - 0.03` (3c below)?
-   - Does this vary by market liquidity or time remaining?
+1. **Fill Rate Reality:**
+   - `best_ask - offset` is correct formula (stay below ask = maker)
+   - **Assume maker fill if ask touches our bid**
+   - Backtest with this assumption
 
-2. **Partial Fill Handling:** If we place a maker order for 50 shares and only 20 fill:
-   - Do we leave the remaining 30 open?
-   - Cancel and re-place at a new price?
-   - Accept partial and move on?
+2. **Partial Fill Handling:**
+   - Strategy dependent
+   - High conviction: put half size, cancel and replace if needed
+   - **Use websocket for fill notifications**
 
-3. **Laddering:** Should we ladder entry orders?
-   ```
-   10 shares @ expensive_ask - 0.02
-   20 shares @ expensive_ask - 0.03
-   20 shares @ expensive_ask - 0.04
-   ```
-   Or single price point?
+3. **Laddering:**
+   - Claude decides per strategy
+   - **Avoid adverse selection**
+   - Can try **asymmetric laddering favoring expensive winner after volatile move**
+   - Example: more size closer to current price on the side that moved
 
 ---
 
@@ -42,17 +40,15 @@ if pair_cost < 1.00:
     guaranteed_profit = (1.00 - pair_cost) * min(up_shares, down_shares)
 ```
 
-**Questions:**
+**USER ANSWERS:**
 
 4. **Imbalanced Pairs:** If UP fills but DOWN doesn't:
-   - We have directional risk until DOWN fills
-   - Max wait time before canceling DOWN order?
-   - Do we sell UP if DOWN never fills? (taker fee cost?)
+   - **YES - sell UP if DOWN never fills** (accept taker fee)
+   - Max wait time: strategy dependent
 
-5. **Sequential vs Parallel:** When buying both sides:
-   - Place both orders simultaneously?
-   - Or sequence them (wait for one fill, then place other)?
-   - Gabagool had 4-second gap between sides - intentional?
+5. **Sequential vs Parallel:**
+   - Strategy dependent
+   - Gabagool's 4-second gap likely intentional for price discovery
 
 ---
 
@@ -62,51 +58,98 @@ if pair_cost < 1.00:
 - A) Sell back to orderbook (maker or taker)
 - B) Buy the opposite side to hedge (creates locked pair)
 
-**Questions:**
+**USER ANSWERS:**
 
-6. **Which exit method do you prefer?**
-   - Sell directly: Immediate capital recovery, but taker fee?
-   - Buy opposite: Locks capital until resolution, but maker possible?
+6. **Exit method preference:**
+   - **If really required: LIMIT SELL ORDER** (maker exit)
+   - Avoid taker exits when possible
 
-7. **Time Stop:** Exit after N seconds regardless of price
-   - What's a reasonable N? (180s? 300s? 600s?)
-   - Should time stop trigger only if PnL is negative?
-
-8. **% Stop:** Exit when unrealized loss exceeds X%
-   - Based on entry price vs current bid?
-   - What % threshold? (10%? 20%? 30%?)
-
-9. **Trailing Stop:** Lock in profits as position moves favorably
-   - Trail by X% from peak unrealized profit?
-   - Or fixed amount (e.g., $5 buffer)?
+7-9. **Time Stop / % Stop / Trailing Stop:**
+   - All strategy dependent
+   - User didn't specify fixed values = Claude decides per strategy
+   - Use ADAPT25 pattern from AGGRESSIVE_M_V2: check after N trades, apply stops if losing
 
 ---
 
 ## 4. The Merge Function
 
-10. **What is the merge function?**
-    - Is this a Polymarket API feature?
-    - Does it combine opposing positions into cash?
-    - Example: 50 UP shares + 50 DOWN shares = $50 cash?
+**ANSWERED FROM CODEBASE:**
+
+### Merge Mechanics (scripts/merge_positions.py)
+```python
+# Burns matching UP + DOWN pairs → $1 USDC per pair
+mergePositions(USDC, 0, conditionId, [1, 2], amount)
+
+# Example: 50 UP + 50 DOWN → $50 USDC instantly
+# Can be done BEFORE resolution (exits position early)
+# Gasless via Builder Relayer (Safe wallet) or ~$0.01 gas (EOA)
+```
+
+### Merge Window (from market_rotator.py)
+- **Window:** -20s to +10s relative to market end
+- Rotation waits until merge window closes
+- Pre-fetches next market for instant rotation (<100ms)
+
+### Gabagool Behavior (from GABAGOOL_MERGE_ANALYSIS.md)
+| Pattern | Value |
+|---------|-------|
+| Merge during market | NO (batch at session end) |
+| Hold to resolution | 86% of markets |
+| Merge timing | 6 AM ET batch cleanup |
+| Net exposure | 147-1,540 shares (NOT perfectly hedged) |
+
+**USER ANSWERS:**
+
+10. **When to merge:**
+    - **Strategy dependent:**
+      - High volume, high share count → merge more (capture profits, rotate capital)
+      - High conviction → merge less (hold to resolution)
+    - **NOT using merge as stop-loss mechanism**
 
 11. **Capital Rotation:**
-    - When a market resolves, capital is freed
-    - Can we instantly redeploy to new markets?
-    - Or is there settlement delay?
+    - Merge gives instant USDC
+    - Can immediately deploy to next market
+    - Use market_rotator.py for rotation timing
 
 ---
 
 ## 5. Unified Orderbook Considerations
 
-12. **Cross-side Liquidity:** When UP is expensive (ask = $0.85):
-    - DOWN bid should be ~$0.15 (complement)
-    - Can we exploit mispricings between UP ask and DOWN bid?
-    - `if up_ask + down_ask < 1.00: buy_both()`?
+**ANSWERED FROM CODEBASE (src/services/pair_analyzer.py):**
 
-13. **Deduplication:** How do we avoid:
-    - Same signal triggering multiple entries?
-    - Buying same market multiple times?
-    - Conflicting signals (buy UP, then buy DOWN)?
+### PairOpportunity (Symmetric Arbitrage)
+```python
+pair_cost = up_ask + down_ask
+profit_per_pair = 1.00 - pair_cost
+is_profitable = pair_cost < 1.00
+executable_size = min(up_ask_size, down_ask_size)
+```
+
+### AsymmetricOpportunity (Gabagool-style)
+```python
+# Checks if buying keeps AVERAGE pair cost < threshold
+def calculate_prospective_pair_cost(side, buy_price, buy_qty):
+    # Accounts for existing position size/cost
+    # Returns what pair cost WOULD BE after this buy
+
+def should_buy_up(buy_qty) -> bool:
+    prospective = calculate_prospective_pair_cost("UP", up_ask, buy_qty)
+    return prospective < pair_cost_threshold  # default 0.99
+```
+
+### Fee Model (src/core/trading_utils.py)
+```python
+def polymarket_taker_fee(price: float) -> float:
+    return 0.0156 * (1 - abs(2 * price - 1))
+    # Max 1.56% at price=0.50, zero at extremes
+```
+
+**REMAINING QUESTIONS:**
+
+12. **Deduplication strategy:**
+    - Per-market cooldown? (e.g., 10s between entries)
+    - Max positions per market?
+    - Signal-level dedup vs position-level dedup?
 
 ---
 
@@ -140,37 +183,36 @@ if pnl_pct < -stop_pct:
     exit_position()
 ```
 
-**Questions:**
+**USER ANSWERS:**
 
-14. **Which formalization captures your intent best?**
-    - Pure arbitrage (pair_cost < 1.00)?
-    - EV-based with ML prediction?
-    - Hybrid (arbitrage base + directional tilt)?
+14. **Formalization:**
+    - Not specified = Claude decides per strategy
+    - Both HEDGED (pair arbitrage) and HYBRID (hedge + directional tilt) in scope
+    - ML model provides probability estimates to guide
 
-15. **Risk per market:** $50 max risk means:
-    - Max loss = $50? (position size adjusted by stop %)
-    - Or max position cost = $50? (could lose entire $50)
+15. **Risk per market:** $50 max risk
+    - **Interpretation:** Max position cost = $50 per side
+    - Total exposure per market = up to $100 (both sides)
+    - Could lose entire amount if strategy wrong
 
 ---
 
-## User Answers
+## User Answers Summary
 
-*(To be filled in)*
+| Q# | Topic | Answer |
+|----|-------|--------|
+| 1 | Fill rate | Assume maker fill if ask touches bid |
+| 2 | Partial fills | Strategy dependent, use websocket for notifs |
+| 3 | Laddering | Avoid adverse selection, asymmetric OK |
+| 4 | Imbalanced pairs | Sell if opposite never fills (accept taker fee) |
+| 5 | Sequential vs parallel | Strategy dependent |
+| 6 | Exit method | Limit sell order if required |
+| 7-9 | Stop types | Strategy dependent (use ADAPT25 pattern) |
+| 10 | When to merge | High volume=more, high conviction=less |
+| 11 | Capital rotation | Instant via merge, use market_rotator |
+| 12 | Unified orderbook | Already in codebase (pair_analyzer.py) |
+| 13 | Deduplication | Strategy dependent |
+| 14 | Formalization | Claude decides per strategy |
+| 15 | $50 risk | Max position cost per side |
 
-| Q# | Answer | Notes |
-|----|--------|-------|
-| 1  |        |       |
-| 2  |        |       |
-| 3  |        |       |
-| 4  |        |       |
-| 5  |        |       |
-| 6  |        |       |
-| 7  |        |       |
-| 8  |        |       |
-| 9  |        |       |
-| 10 |        |       |
-| 11 |        |       |
-| 12 |        |       |
-| 13 |        |       |
-| 14 |        |       |
-| 15 |        |       |
+**Key Principle:** Most answers are "strategy dependent" = Claude designs per strategy type.
