@@ -939,6 +939,7 @@ class PaperTradingBot:
         zscore_hi: float = AGGRESSIVE_CONFIG.z_hi,                      # From TRADING_CONFIGS.py
         time_stop_seconds: float = AGGRESSIVE_CONFIG.time_stop_seconds, # From TRADING_CONFIGS.py
         high_entry_threshold: float = AGGRESSIVE_CONFIG.high_entry_threshold,  # From TRADING_CONFIGS.py
+        max_entries_per_market: Optional[int] = getattr(AGGRESSIVE_CONFIG, 'max_entries_per_market', None),  # From TRADING_CONFIGS.py (CAP3)
         # CONTRARIAN (Path 2) specific parameters
         contrarian_pullback_threshold: float = 0.0001,  # 0.01% pullback from peak
         contrarian_retracement_min: float = 0.30,       # Must retrace 30% of move
@@ -1024,6 +1025,7 @@ class PaperTradingBot:
         self.zscore_hi = zscore_hi
         self.time_stop_seconds = time_stop_seconds
         self.high_entry_threshold = high_entry_threshold
+        self.max_entries_per_market = max_entries_per_market
 
         # CONTRARIAN (Path 2) specific parameters
         self.contrarian_pullback_threshold = contrarian_pullback_threshold
@@ -1253,6 +1255,10 @@ class PaperTradingBot:
                 enable_multicycle=AGGRESSIVE_CONFIG.enable_multicycle,  # Should be False
                 max_cycles=AGGRESSIVE_CONFIG.max_cycles,
                 shares_per_cycle=AGGRESSIVE_CONFIG.shares_per_cycle,
+                # HOUR-OF-DAY FILTER (Feb 9, 2026 - Loser Analysis)
+                skip_utc_hours=getattr(AGGRESSIVE_CONFIG, 'skip_utc_hours', None),
+                # PER-MARKET ENTRY CAP (Feb 9, 2026 - CAP3 winner)
+                max_entries_per_market=self.max_entries_per_market,
             )
             multicycle_info = ""
             if AGGRESSIVE_CONFIG.enable_multicycle:
@@ -1695,6 +1701,8 @@ class PaperTradingBot:
             # IMBALANCE LIMITS - prevent runaway one-sided accumulation
             # FROM TRADING_CONFIGS.py - single source of truth
             hard_max_imbalance=config.get("hard_max_imbalance", AGGRESSIVE_CONFIG.hard_max_imbalance),
+            # PER-MARKET ENTRY CAP (Feb 9, 2026 - CAP3 winner)
+            max_entries_per_market=config.get("max_entries_per_market") or getattr(AGGRESSIVE_CONFIG, 'max_entries_per_market', None),
             # Output
             csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_aggressive.csv",
             live_display=True,
@@ -5221,6 +5229,14 @@ class PaperTradingBot:
                 )
                 continue
 
+            # Check per-market entry cap (Feb 9, 2026 - CAP3)
+            if not strategy.can_enter_market():
+                logger.info(
+                    f"[SPIKE_EVENT] Skipped: market entry cap reached "
+                    f"({strategy._market_entry_count}/{strategy.max_entries_per_market})"
+                )
+                continue
+
             # Execute entry trade
             entry_size = self.spread_base_size
             logger.info(
@@ -5249,6 +5265,7 @@ class PaperTradingBot:
 
                     if filled_size > 0:
                         strategy.on_fill(side=entry_side, price=filled_price, size=int(filled_size))
+                        strategy.record_market_entry()  # Track for per-market cap (CAP3)
                         self._trade_count += 1
                         self._send_web_update()
 

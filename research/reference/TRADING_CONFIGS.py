@@ -1,5 +1,5 @@
 """
-Master Trading Configurations - UPDATED Feb 3, 2026
+Master Trading Configurations - UPDATED Feb 9, 2026
 
 These configs are validated against 157.4 hours of data across 456 markets.
 Stop-out effects ARE factored into PnL calculations.
@@ -137,6 +137,22 @@ class TradingConfig:
     # NOTE: Set to None to auto-calculate as int(shares_per_cycle * 1.1)
     hard_max_imbalance: Optional[int] = None  # Auto-calculated from shares_per_cycle
 
+    # Hour-of-day filter (Feb 9, 2026)
+    # Skip new entries during UTC hours where FADE accuracy drops significantly
+    # UTC 14=London close (76.1%), 20=US evening dead zone (23.3%),
+    # 8=London open stop-hunt (83.3%), 3-4=pre-Tokyo thin liquidity (0%)
+    # See: research/findings/data/loser_analysis_filters.csv (worst_5_hours_skip)
+    skip_utc_hours: Optional[list] = None  # e.g. [14, 20, 8, 4, 3]
+
+    # Per-market entry cap (Feb 9, 2026 - CAP3 winner)
+    # Limits filled entries per market to prevent cycling into losing markets.
+    # CAP3: max 3 entries × 15 shares = $42 max exposure per market.
+    # 6/6 datasets profitable, $1.69/hr, 340.40 total PnL across 201.9 hours.
+    # Prevents 78% of losses caused by repeat re-entry (cycling) into bad markets.
+    # None = unlimited entries (baseline behavior).
+    # See: research/findings/data/aggressive_m_v2_session_stops.csv
+    max_entries_per_market: Optional[int] = None
+
     # Event-driven spike detection (Feb 4, 2026)
     # Reduces response latency from ~5000ms (polling) to ~500ms (event-driven)
     # BinanceClient fires EWMA spike callbacks at ~60Hz, SpikeEventHandler validates
@@ -215,12 +231,22 @@ AGGRESSIVE = TradingConfig(
     # Multi-cycle destroyed profitability: 39.8% win rate vs 54.3% single
     enable_multicycle=False,     # DEPRECATED - always False
     max_cycles=1,                # DEPRECATED - always 1
-    shares_per_cycle=10,         # TESTING: 10 shares (revert to 50 for production)
+    shares_per_cycle=15,         # CAP3 production: 15 shares × 3 entries = $42 max/market
 
     # Session loss limit (Feb 1, 2026) - circuit breaker
-    max_session_loss=10.0,       # TESTING: $10 limit (revert to $50 for production)
+    max_session_loss=50.0,       # Production: $50 circuit breaker
 
     # hard_max_imbalance: Auto-calculated as int(shares_per_cycle * 1.1) = 11
+
+    # HOUR-OF-DAY FILTER (Feb 9, 2026 - Loser Analysis finding)
+    # Skip entries during bad UTC hours: +$1,148 PnL improvement, 20.8% trades removed
+    # OOS9 goes from -$243 to +$468 with this filter alone
+    skip_utc_hours=[14, 20, 8, 4, 3],
+
+    # PER-MARKET ENTRY CAP (Feb 9, 2026 - CAP3 winner)
+    # Max 3 entries per 15-min market. Prevents cycling into losing markets.
+    # CAP3: $1.69/hr, 6/6 profitable, $42 max exposure/market, 88.2% accuracy
+    max_entries_per_market=3,
 
     # BREAKEVEN EXIT - 10s minimum hold before checking winner_bid <= entry_price
     # Prevents instant exit from spread (0ms=98% taker DISASTER)

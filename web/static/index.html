@@ -133,11 +133,11 @@
                             </div>
                             <div class="config-field">
                                 <label>Target Shares</label>
-                                <input type="number" id="aggressive-base-size" value="10" min="5" step="5" title="Shares per trade (TESTING: 10, PRODUCTION: 50)">
+                                <input type="number" id="aggressive-base-size" value="15" min="5" step="5" title="Shares per trade (CAP3: 15 shares × 3 entries = $42 max/market)">
                             </div>
                             <div class="config-field">
                                 <label>Skip High $</label>
-                                <input type="number" id="aggressive-high-entry" value="0.80" min="0.70" max="0.95" step="0.05" title="Skip entries >= this price (TESTING: $0.80, PRODUCTION: $0.90)">
+                                <input type="number" id="aggressive-high-entry" value="0.80" min="0.70" max="0.95" step="0.05" title="Skip entries >= this price ($0.80 = FADE threshold)">
                             </div>
                             <div class="config-field">
                                 <label>Cycling</label>
@@ -145,7 +145,11 @@
                             </div>
                             <div class="config-field">
                                 <label>Max Loss $</label>
-                                <input type="number" id="aggressive-max-loss" value="10" step="1" min="0" title="Session loss limit from TRADING_CONFIGS.py (TESTING: $10, PROD: $50)">
+                                <input type="number" id="aggressive-max-loss" value="50" step="1" min="0" title="Session loss limit ($50 circuit breaker)">
+                            </div>
+                            <div class="config-field">
+                                <label>Max Entries/Mkt</label>
+                                <input type="number" id="aggressive-max-entries" value="3" step="1" min="0" title="Max entries per 15-min market (0=unlimited, 3=CAP3 winner from backtests)">
                             </div>
                         </div>
                     </div>

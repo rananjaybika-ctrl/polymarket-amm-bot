@@ -262,6 +262,7 @@ class AggressiveBotConfig(BaseModel):
     base_size: int = AGGRESSIVE_CONFIG.shares_per_cycle
     high_entry_threshold: float = AGGRESSIVE_CONFIG.high_entry_threshold
     max_daily_loss: float = AGGRESSIVE_CONFIG.max_session_loss
+    max_entries_per_market: int = getattr(AGGRESSIVE_CONFIG, 'max_entries_per_market', 0) or 0
 
 
 class ContrarianBotConfig(BaseModel):

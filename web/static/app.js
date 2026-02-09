@@ -337,6 +337,7 @@ function formatConfigTooltip(modeName, status) {
         lines.push(`Lookback: ${config.lookback_ms || '--'}ms`);
         lines.push(`Time Stop: ${config.time_stop_seconds || '--'}s`);
         lines.push(`Cycling: ${config.use_cycling ? 'Yes' : 'No'}`);
+        lines.push(`Max Entries/Mkt: ${config.max_entries_per_market || 'unlimited'}`);
     } else if (modeName === 'contrarian') {
         lines.push(`Shares: ${config.shares_per_trade || '--'}`);
         lines.push(`Pullback: ${config.pullback_threshold || '--'}`);
@@ -552,7 +553,8 @@ function getAggressiveConfig() {
         base_size: parseInt(document.getElementById('aggressive-base-size').value),
         high_entry_threshold: parseFloat(document.getElementById('aggressive-high-entry').value),
         use_cycling: document.getElementById('aggressive-cycling').checked,
-        max_daily_loss: parseFloat(document.getElementById('aggressive-max-loss').value) || 0
+        max_daily_loss: parseFloat(document.getElementById('aggressive-max-loss').value) || 0,
+        max_entries_per_market: parseInt(document.getElementById('aggressive-max-entries').value) || 0
     };
 }
 

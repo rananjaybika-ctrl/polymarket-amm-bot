@@ -37,6 +37,7 @@ import math
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
@@ -112,37 +113,37 @@ VELOCITY_ZONES = {
     'neutral': {
         'vel_min': 0.00, 'vel_max': 0.10,
         'pair_target': 0.97,
-        'winner_offset': 0.01,
-        'loser_offset': 0.01,
-        'winner_size_ratio': 0.50,
+        'spike_offset': 0.01,
+        'expensive_offset': 0.01,
+        'spike_size_ratio': 0.50,
     },
     'moderate': {
         'vel_min': 0.10, 'vel_max': 0.30,
         'pair_target': 0.97,
-        'winner_offset': 0.01,
-        'loser_offset': 0.01,
-        'winner_size_ratio': 0.55,
+        'spike_offset': 0.01,
+        'expensive_offset': 0.01,
+        'spike_size_ratio': 0.55,
     },
     'strong': {
         'vel_min': 0.30, 'vel_max': 0.50,
         'pair_target': 0.96,
-        'winner_offset': 0.00,
-        'loser_offset': 0.03,
-        'winner_size_ratio': 0.60,
+        'spike_offset': 0.00,
+        'expensive_offset': 0.03,
+        'spike_size_ratio': 0.60,
     },
     'very_strong': {
         'vel_min': 0.50, 'vel_max': 1.00,
         'pair_target': 0.95,
-        'winner_offset': -0.01,
-        'loser_offset': 0.05,
-        'winner_size_ratio': 0.70,
+        'spike_offset': -0.01,
+        'expensive_offset': 0.05,
+        'spike_size_ratio': 0.70,
     },
     'extreme': {
         'vel_min': 1.00, 'vel_max': 99.0,
         'pair_target': 0.94,
-        'winner_offset': -0.01,
-        'loser_offset': 0.05,
-        'winner_size_ratio': 0.75,
+        'spike_offset': -0.01,
+        'expensive_offset': 0.05,
+        'spike_size_ratio': 0.75,
     },
 }
 
@@ -286,8 +287,8 @@ class TradingCycle:
     spike_magnitude: float
 
     # Sides (determined by spike direction)
-    winner_side: str                 # Side we're betting on
-    loser_side: str                  # Hedge side
+    spike_side: str                 # Side we're betting on
+    expensive_side: str                  # Hedge side
 
     # Order tracking
     entry_order: Optional[CycleOrder] = None
@@ -363,8 +364,8 @@ class MultiCycleManager:
         self,
         spike_direction: str,
         spike_magnitude: float,
-        winner_ask: float,
-        loser_bid: float,
+        spike_ask: float,
+        expensive_bid: float,
     ) -> Optional[TradingCycle]:
         """
         Create new cycle and generate entry order.
@@ -378,8 +379,8 @@ class MultiCycleManager:
         cycle_id = f"cycle_{uuid.uuid4().hex[:8]}"
 
         # Determine sides based on spike direction
-        winner_side = spike_direction  # UP spike → buy UP
-        loser_side = "DOWN" if winner_side == "UP" else "UP"
+        spike_side = spike_direction  # UP spike → buy UP
+        expensive_side = "DOWN" if spike_side == "UP" else "UP"
 
         cycle = TradingCycle(
             id=cycle_id,
@@ -388,8 +389,8 @@ class MultiCycleManager:
             shares=self.shares_per_cycle,
             spike_direction=spike_direction,
             spike_magnitude=spike_magnitude,
-            winner_side=winner_side,
-            loser_side=loser_side,
+            spike_side=spike_side,
+            expensive_side=expensive_side,
             status=CycleStatus.PENDING_ENTRY,
         )
 
@@ -398,9 +399,9 @@ class MultiCycleManager:
         cycle.entry_order = CycleOrder(
             order_id=entry_order_id,
             cycle_id=cycle_id,
-            side=winner_side,
+            side=spike_side,
             order_type="entry",
-            target_price=winner_ask,
+            target_price=spike_ask,
             shares=self.shares_per_cycle,
             submitted_ts=now_ms,
         )
@@ -412,7 +413,7 @@ class MultiCycleManager:
 
         logger.debug(
             f"[MULTICYCLE] Created {cycle_id[:12]}: {spike_direction} spike, "
-            f"entry={winner_side}@${winner_ask:.3f}, shares={self.shares_per_cycle}"
+            f"entry={spike_side}@${spike_ask:.3f}, shares={self.shares_per_cycle}"
         )
 
         return cycle
@@ -465,7 +466,7 @@ class MultiCycleManager:
                 cycle.hedge_order = CycleOrder(
                     order_id=hedge_order_id,
                     cycle_id=cycle.id,
-                    side=cycle.loser_side,
+                    side=cycle.expensive_side,
                     order_type="hedge",
                     target_price=self._calculate_hedge_target(cycle, price),
                     shares=self.shares_per_cycle,
@@ -477,7 +478,7 @@ class MultiCycleManager:
                 self.total_fills_matched += 1
                 logger.info(
                     f"[MULTICYCLE] Entry filled: {cycle.id[:12]} {side}@${price:.3f}, "
-                    f"hedge target={cycle.loser_side}@${cycle.hedge_order.target_price:.3f}"
+                    f"hedge target={cycle.expensive_side}@${cycle.hedge_order.target_price:.3f}"
                 )
                 return (cycle, "entry")
 
@@ -552,9 +553,9 @@ class MultiCycleManager:
         """Calculate hedge bid price based on entry and spike magnitude."""
         # Use same formula as single-cycle mode
         expected_drop = DROP_MULTIPLIER * cycle.spike_magnitude + DROP_INTERCEPT
-        max_loser = DEFAULT_TARGET_PAIR_COST - entry_price
-        loser_bid = min((1.0 - entry_price) - expected_drop, max_loser)
-        return max(0.01, min(0.95, loser_bid))
+        max_expensive = DEFAULT_TARGET_PAIR_COST - entry_price
+        expensive_bid = min((1.0 - entry_price) - expected_drop, max_expensive)
+        return max(0.01, min(0.95, expensive_bid))
 
     def _cleanup_expired(self):
         """Mark expired cycles."""
@@ -608,7 +609,7 @@ class MultiCycleManager:
                     "id": c.id[:12],
                     "status": c.status.value,
                     "spike": c.spike_direction,
-                    "winner": c.winner_side,
+                    "spike_side": c.spike_side,
                     "entry_filled": c.entry_order.filled if c.entry_order else False,
                     "hedge_filled": c.hedge_order.filled if c.hedge_order else False,
                 }
@@ -650,10 +651,10 @@ class MultiCycleManager:
 
 def should_take_spike_enhanced(
     spike_direction: str,
-    obi_winner: float,
-    loser_spread: float = 0.05,
+    obi_spike: float,
+    expensive_spread: float = 0.05,
     time_remaining: float = 600.0,
-    winner_ask_depth: Optional[float] = None,
+    spike_ask_depth: Optional[float] = None,
 ) -> Tuple[bool, str]:
     """
     DEPRECATED: Use should_take_spike_enhanced_core from src/core instead.
@@ -664,7 +665,7 @@ def should_take_spike_enhanced(
     """
     # Delegate to canonical implementation
     return should_take_spike_enhanced_core(
-        spike_direction, obi_winner, loser_spread, time_remaining, winner_ask_depth
+        spike_direction, obi_spike, expensive_spread, time_remaining, spike_ask_depth
     )
 
 
@@ -786,17 +787,17 @@ class EnhancedSpikeStrategy:
     THE SPIKE DETECTION LOGIC:
         1. Track last N Binance prices (default N=3)
         2. When |price change| >= threshold (default 0.02%):
-           - If positive: Buy UP (predicted winner)
-           - If negative: Buy DOWN (predicted winner)
-        3. Calculate loser bid based on spike magnitude:
+           - If positive: Buy UP (predicted spike side)
+           - If negative: Buy DOWN (predicted spike side)
+        3. Calculate expensive bid based on spike magnitude:
            - expected_drop = 0.68 * magnitude + 0.01
-           - loser_bid = min(loser_ask - expected_drop, target_pair - winner_entry)
+           - expensive_bid = min(expensive_ask - expected_drop, target_pair - spike_entry)
 
     Constructor Args:
         base_size: Base order size (default 15)
         spike_lookback: Ticks to look back for spike detection (default 3)
         spike_threshold: Minimum % change to trigger (default 0.02)
-        target_pair_cost: Target pair cost for loser bid calc (default 0.99)
+        target_pair_cost: Target pair cost for expensive bid calc (default 0.99)
 
     BACKWARD COMPATIBLE with spread_capture.py parameters:
         entry_size, entry_offset, hedge_offset, min_velocity_bps
@@ -851,6 +852,14 @@ class EnhancedSpikeStrategy:
         # maintaining its own buffer that fills at the slower 5-second trading loop rate.
         # This fixes the warmup issue where move=0.0000% for ~6 minutes after start.
         binance_client: Optional[Any] = None,  # Type hint is Any to avoid circular import
+        # HOUR-OF-DAY FILTER (Feb 9, 2026 - Loser Analysis)
+        # Skip new entries during UTC hours where FADE accuracy drops
+        # Default None = no hour filtering. Set to e.g. [14, 20, 8, 4, 3]
+        skip_utc_hours: Optional[List[int]] = None,
+        # PER-MARKET ENTRY CAP (Feb 9, 2026 - CAP3 winner)
+        # Limits filled entries per market to prevent cycling into losing markets.
+        # None = unlimited. 3 = max 3 entries per 15-min market.
+        max_entries_per_market: Optional[int] = None,
     ):
         # Handle LEGACY parameter aliases
         if entry_size is not None:
@@ -884,6 +893,15 @@ class EnhancedSpikeStrategy:
         self._zscore_skip_count = 0  # Count trades skipped by z-score filter
         self._vol_log_interval = 30.0  # Log volatility every 30 seconds
         self._last_vol_log_time = 0.0  # Last time we logged volatility
+
+        # Hour-of-day filter (Feb 9, 2026)
+        self.skip_utc_hours = set(skip_utc_hours) if skip_utc_hours else set()
+        self._hour_skip_count = 0  # Count signals skipped by hour filter
+
+        # Per-market entry cap (Feb 9, 2026 - CAP3)
+        self.max_entries_per_market = max_entries_per_market
+        self._market_entry_count = 0  # Entries in current market (reset on new market)
+        self._market_cap_skip_count = 0  # Count signals skipped by market cap
 
         # Core parameters
         self.base_size = max(MIN_SHARES, base_size)
@@ -940,6 +958,8 @@ class EnhancedSpikeStrategy:
         stop_info = f"{stop_loss_pct:.0%}" if stop_loss_pct else "None"
         skip_info = f", skip_high_entry={skip_high_entry} (>=${high_entry_threshold:.2f})" if skip_high_entry else ""
         multicycle_info = f", multicycle={enable_multicycle} ({max_cycles}x{shares_per_cycle})" if enable_multicycle else ""
+        hour_info = f", skip_hours={sorted(self.skip_utc_hours)}" if self.skip_utc_hours else ""
+        cap_info = f", max_entries_per_market={self.max_entries_per_market}" if self.max_entries_per_market else ""
         spike_info = f"spike_method={spike_method}"
         if spike_method.startswith("EWMA_"):
             spike_info += f" (alpha={self._ewma_alpha:.4f})"
@@ -949,7 +969,7 @@ class EnhancedSpikeStrategy:
             f"[ENHSPIKE] Initialized: base_size={base_size}, {spike_info}, "
             f"threshold={spike_threshold:.2f}%, target_pair=${target_pair_cost:.2f}, "
             f"stop_loss={stop_info}, time_stop={time_stop_seconds}s, min_time={min_time_remaining}s, "
-            f"cycling={enable_cycling}{zscore_info}{skip_info}{multicycle_info}"
+            f"cycling={enable_cycling}{zscore_info}{skip_info}{multicycle_info}{hour_info}{cap_info}"
         )
 
     # =========================================================================
@@ -1099,27 +1119,27 @@ class EnhancedSpikeStrategy:
             return self.ou_adaptive_threshold.get_threshold()
         return self.spike_threshold
 
-    def calculate_magnitude_loser_bid(
+    def calculate_magnitude_expensive_bid(
         self,
         magnitude_pct: float,
-        loser_ask: float,
-        winner_entry: float,
+        expensive_ask: float,
+        spike_entry: float,
         regime: str = "MEDIUM",  # Kept for API compatibility, NOT used
     ) -> float:
         """
-        Calculate optimal loser bid based on BTC spike magnitude (v2).
+        Calculate optimal expensive bid based on BTC spike magnitude (v2).
 
         Uses recalibrated model from hedge_pricing_analysis.py:
         expected_drop = 0.50 * magnitude_pct + 0.08
 
         Args:
             magnitude_pct: Absolute BTC % change (e.g., 0.05 for 0.05%)
-            loser_ask: Current loser side ask price (kept for API compatibility, NOT used)
-            winner_entry: Price we paid for winner
+            expensive_ask: Current expensive side ask price (kept for API compatibility, NOT used)
+            spike_entry: Price we paid for spike side
             regime: Volatility regime (kept for API compatibility, NOT used)
 
         Returns:
-            Optimal loser bid price
+            Optimal expensive bid price
         """
         # Expected drop from recalibrated model (v2)
         # NOTE: regime_bonus REMOVED Feb 5, 2026 to match backtest/grid search
@@ -1127,21 +1147,21 @@ class EnhancedSpikeStrategy:
         expected_drop = max(0.02, min(0.20, expected_drop))  # Clamp to reasonable range
 
         # Maximum we can pay and still achieve target pair cost
-        max_loser = self.target_pair_cost - winner_entry
+        max_expensive = self.target_pair_cost - spike_entry
 
-        # FIX Feb 2, 2026: Use theoretical loser price (1.0 - winner_entry), NOT actual loser_ask
-        # Backtest uses: loser_bid = min((1.0 - winner_entry) - expected_drop, max_loser)
-        # Live was using: loser_bid = min(loser_ask - expected_drop, max_loser)
-        # When loser_ask > theoretical (due to spread), live would bid HIGHER = worse pair costs
-        theoretical_loser = 1.0 - winner_entry
-        loser_bid = min(theoretical_loser - expected_drop, max_loser)
+        # FIX Feb 2, 2026: Use theoretical expensive price (1.0 - spike_entry), NOT actual expensive_ask
+        # Backtest uses: expensive_bid = min((1.0 - spike_entry) - expected_drop, max_expensive)
+        # Live was using: expensive_bid = min(expensive_ask - expected_drop, max_expensive)
+        # When expensive_ask > theoretical (due to spread), live would bid HIGHER = worse pair costs
+        theoretical_expensive = 1.0 - spike_entry
+        expensive_bid = min(theoretical_expensive - expected_drop, max_expensive)
 
         # Floor at 1 cent
-        result = max(loser_bid, 0.01)
+        result = max(expensive_bid, 0.01)
 
         logger.debug(
             f"[ENHSPIKE] Magnitude bid: mag={magnitude_pct:.4f}%, expected_drop=${expected_drop:.3f}, "
-            f"theoretical_loser=${theoretical_loser:.3f}, winner=${winner_entry:.3f} -> bid=${result:.3f}"
+            f"theoretical_expensive=${theoretical_expensive:.3f}, spike=${spike_entry:.3f} -> bid=${result:.3f}"
         )
 
         return result
@@ -1153,6 +1173,25 @@ class EnhancedSpikeStrategy:
         self.state.last_spike_direction = None
         self.state.last_spike_magnitude = 0.0
         self.state.last_spike_time = 0.0
+        self._market_entry_count = 0  # Reset per-market cap counter
+
+    def can_enter_market(self) -> bool:
+        """Check if per-market entry cap allows another entry.
+
+        Returns True if max_entries_per_market is None (unlimited) or
+        current entry count is below the cap.
+        """
+        if self.max_entries_per_market is None:
+            return True
+        return self._market_entry_count < self.max_entries_per_market
+
+    def record_market_entry(self) -> None:
+        """Record a filled entry in the current market (for cap tracking)."""
+        self._market_entry_count += 1
+        if self.max_entries_per_market is not None:
+            logger.info(
+                f"[ENHSPIKE] Market entry {self._market_entry_count}/{self.max_entries_per_market}"
+            )
 
     def set_zscore_tracker(self, tracker: "LiveZScoreTracker") -> None:
         """Set or update the z-score tracker (for live trading integration)."""
@@ -1382,18 +1421,18 @@ class EnhancedSpikeStrategy:
         """Calculate size allocation for UP and DOWN sides based on velocity."""
         zone_name = self.get_velocity_zone_name(velocity_bps)
         zone_config = VELOCITY_ZONES.get(zone_name, VELOCITY_ZONES['neutral'])
-        winner_ratio = zone_config.get('winner_size_ratio', 0.50)
+        spike_ratio = zone_config.get('spike_size_ratio', 0.50)
 
-        winner_size = int(total_size * winner_ratio)
-        loser_size = total_size - winner_size
+        spike_size = int(total_size * spike_ratio)
+        expensive_size = total_size - spike_size
 
-        winner_size = max(MIN_SHARES, winner_size)
-        loser_size = max(MIN_SHARES, loser_size)
+        spike_size = max(MIN_SHARES, spike_size)
+        expensive_size = max(MIN_SHARES, expensive_size)
 
         if velocity_bps >= 0:
-            return (winner_size, loser_size)
+            return (spike_size, expensive_size)
         else:
-            return (loser_size, winner_size)
+            return (expensive_size, spike_size)
 
     def calculate_hedge_target(self, entry_price: float, velocity_bps: float) -> float:
         """Calculate hedge target price based on entry and current velocity zone."""
@@ -1463,8 +1502,8 @@ class EnhancedSpikeStrategy:
 
     def check_stop_loss(
         self,
-        winner_current_bid: float,
-        loser_current_ask: float,
+        spike_current_bid: float,
+        expensive_current_ask: float,
     ) -> Tuple[bool, Optional[float]]:
         """Check if stop-loss should trigger and return hedge price."""
         s = self.state
@@ -1479,18 +1518,18 @@ class EnhancedSpikeStrategy:
         if s.stop_loss_triggered:
             return (False, None)
 
-        drop_pct = (s.first_fill_price - winner_current_bid) / s.first_fill_price
+        drop_pct = (s.first_fill_price - spike_current_bid) / s.first_fill_price
 
         if drop_pct >= self.stop_loss_pct:
             s.stop_loss_triggered = True
-            s.stop_loss_hedge_price = loser_current_ask
+            s.stop_loss_hedge_price = expensive_current_ask
 
             logger.warning(
-                f"[ENHSPIKE] STOP-LOSS TRIGGERED: winner dropped {drop_pct:.1%} "
-                f"(fill=${s.first_fill_price:.3f} -> bid=${winner_current_bid:.3f}), "
-                f"hedging at loser_ask=${loser_current_ask:.3f}"
+                f"[ENHSPIKE] STOP-LOSS TRIGGERED: spike dropped {drop_pct:.1%} "
+                f"(fill=${s.first_fill_price:.3f} -> bid=${spike_current_bid:.3f}), "
+                f"hedging at expensive_ask=${expensive_current_ask:.3f}"
             )
-            return (True, loser_current_ask)
+            return (True, expensive_current_ask)
 
         return (False, None)
 
@@ -1508,19 +1547,19 @@ class EnhancedSpikeStrategy:
             return None
 
         if s.first_fill_side == "UP":
-            winner_bid = up_bid
-            loser_ask = down_ask
-            loser_side = "DOWN"
+            spike_bid = up_bid
+            expensive_ask = down_ask
+            expensive_side = "DOWN"
         else:
-            winner_bid = down_bid
-            loser_ask = up_ask
-            loser_side = "UP"
+            spike_bid = down_bid
+            expensive_ask = up_ask
+            expensive_side = "UP"
 
-        should_trigger, hedge_price = self.check_stop_loss(winner_bid, loser_ask)
+        should_trigger, hedge_price = self.check_stop_loss(spike_bid, expensive_ask)
 
         if should_trigger and hedge_price is not None:
             return {
-                'side': loser_side,
+                'side': expensive_side,
                 'price': hedge_price,
                 'size': self.base_size,
                 'is_stop_loss': True,
@@ -1539,31 +1578,31 @@ class EnhancedSpikeStrategy:
         zone_name = self.get_velocity_zone_name(velocity_bps)
         zone_config = VELOCITY_ZONES.get(zone_name, VELOCITY_ZONES['moderate'])
 
-        winner_offset = zone_config['winner_offset']
-        loser_offset = zone_config['loser_offset']
+        spike_offset = zone_config['spike_offset']
+        expensive_offset = zone_config['expensive_offset']
 
         if zone_name == 'neutral':
             inventory_bias = s.down_shares - s.up_shares
             if abs(inventory_bias) <= 2:
-                return (winner_offset, winner_offset)
+                return (spike_offset, spike_offset)
             elif inventory_bias > 0:
-                return (winner_offset, loser_offset)
+                return (spike_offset, expensive_offset)
             else:
-                return (loser_offset, winner_offset)
+                return (expensive_offset, spike_offset)
 
         if velocity_bps > 0:
-            return (winner_offset, loser_offset)
+            return (spike_offset, expensive_offset)
         else:
-            return (loser_offset, winner_offset)
+            return (expensive_offset, spike_offset)
 
     def calculate_entry_bid(self, best_bid: float, best_ask: float,
                             velocity_bps: float) -> float:
-        """Calculate LIMIT ORDER entry bid price for winner side."""
+        """Calculate LIMIT ORDER entry bid price for spike side."""
         zone_name = self.get_velocity_zone_name(velocity_bps)
         zone_config = VELOCITY_ZONES.get(zone_name, VELOCITY_ZONES['moderate'])
-        winner_offset = zone_config['winner_offset']
+        spike_offset = zone_config['spike_offset']
 
-        entry_bid = best_bid - winner_offset
+        entry_bid = best_bid - spike_offset
         max_bid = best_ask - 0.001
         entry_bid = min(entry_bid, max_bid)
         entry_bid = max(0.01, min(0.95, entry_bid))
@@ -1640,6 +1679,21 @@ class EnhancedSpikeStrategy:
         if time_remaining < self.min_time_remaining and s.first_fill_side is None:
             logger.debug(f"[ENHSPIKE] Skipping NEW ENTRY: {time_remaining:.0f}s remaining < {self.min_time_remaining:.0f}s min")
             return []
+
+        # HOUR-OF-DAY FILTER (Feb 9, 2026 - Loser Analysis finding)
+        # Skip new entries during bad UTC hours where FADE accuracy drops
+        # Only blocks new entries, NOT exit logic (stop-loss, time-stop) for existing positions
+        if self.skip_utc_hours and s.first_fill_side is None:
+            current_hour_utc = datetime.now(timezone.utc).hour
+            if current_hour_utc in self.skip_utc_hours:
+                self._hour_skip_count += 1
+                if self._hour_skip_count % 50 == 1:
+                    logger.info(
+                        f"[HOUR FILTER] Skipping entry: UTC hour {current_hour_utc} "
+                        f"in skip list {sorted(self.skip_utc_hours)} "
+                        f"(total skipped: {self._hour_skip_count})"
+                    )
+                return []
 
         # SPIKE DETECTION MODE (preferred when binance_price provided)
         spike_direction = None
@@ -1756,13 +1810,13 @@ class EnhancedSpikeStrategy:
                     #
                     # TO USE ENHANCED OBI FILTER (should_take_spike_enhanced):
                     # Replace the if/elif block below with:
-                    #     obi_winner = up_imbalance if spike_direction == "UP" else down_imbalance
+                    #     obi_spike = up_imbalance if spike_direction == "UP" else down_imbalance
                     #     should_take, reason = should_take_spike_enhanced(
                     #         spike_direction=spike_direction,
-                    #         obi_winner=obi_winner if obi_winner is not None else 0.5,
-                    #         loser_spread=loser_spread,  # Must pass from caller
+                    #         obi_spike=obi_spike if obi_spike is not None else 0.5,
+                    #         expensive_spread=expensive_spread,  # Must pass from caller
                     #         time_remaining=time_remaining,
-                    #         winner_ask_depth=winner_ask_depth,  # Must pass from caller
+                    #         spike_ask_depth=spike_ask_depth,  # Must pass from caller
                     #     )
                     #     if not should_take:
                     #         logger.info(f"[ENHANCED OBI REJECT] {spike_direction}: {reason}")
@@ -1845,26 +1899,26 @@ class EnhancedSpikeStrategy:
         if s.first_fill_side is not None and s.first_fill_time is not None:
             elapsed = current_time - s.first_fill_time
             if elapsed >= self.time_stop_seconds:
-                # Determine winner and loser based on entry side
+                # Determine spike and expensive based on entry side
                 if s.first_fill_side == "UP":
-                    winner_bid = up_bid
-                    loser_ask = down_ask
-                    loser_side = "DOWN"
+                    spike_bid = up_bid
+                    expensive_ask = down_ask
+                    expensive_side = "DOWN"
                 else:
-                    winner_bid = down_bid
-                    loser_ask = up_ask
-                    loser_side = "UP"
+                    spike_bid = down_bid
+                    expensive_ask = up_ask
+                    expensive_side = "UP"
 
                 # Only trigger time-stop if NOT in profit
-                in_profit = winner_bid >= s.first_fill_price
+                in_profit = spike_bid >= s.first_fill_price
                 if not in_profit:
                     logger.warning(
                         f"[ENHSPIKE] TIME-STOP TRIGGERED: {elapsed:.0f}s elapsed >= {self.time_stop_seconds:.0f}s, "
-                        f"winner bid=${winner_bid:.3f} < entry=${s.first_fill_price:.3f}, hedging at ${loser_ask:.3f}"
+                        f"spike bid=${spike_bid:.3f} < entry=${s.first_fill_price:.3f}, hedging at ${expensive_ask:.3f}"
                     )
                     return [{
-                        'side': loser_side,
-                        'price': loser_ask,  # Take market (ask)
+                        'side': expensive_side,
+                        'price': expensive_ask,  # Take market (ask)
                         'size': self.base_size,
                         'is_time_stop': True,
                         'is_market_order': True,
@@ -1873,7 +1927,7 @@ class EnhancedSpikeStrategy:
                 else:
                     logger.debug(
                         f"[ENHSPIKE] Time-stop skipped: {elapsed:.0f}s elapsed but in profit "
-                        f"(winner bid=${winner_bid:.3f} >= entry=${s.first_fill_price:.3f})"
+                        f"(spike bid=${spike_bid:.3f} >= entry=${s.first_fill_price:.3f})"
                     )
 
         # =========================================================================
@@ -1900,22 +1954,22 @@ class EnhancedSpikeStrategy:
         if self.enable_multicycle and self.cycle_manager is not None:
             # Check if we can create a new cycle
             if spike_direction is not None and self.cycle_manager.can_enter_new_cycle():
-                winner_side = spike_direction
-                loser_side = "DOWN" if winner_side == "UP" else "UP"
+                spike_side = spike_direction
+                expensive_side = "DOWN" if spike_side == "UP" else "UP"
 
-                if winner_side == "UP":
-                    winner_ask = up_ask
-                    winner_bid = up_bid
-                    loser_bid = down_bid
+                if spike_side == "UP":
+                    spike_ask = up_ask
+                    spike_bid = up_bid
+                    expensive_bid = down_bid
                 else:
-                    winner_ask = down_ask
-                    winner_bid = down_bid
-                    loser_bid = up_bid
+                    spike_ask = down_ask
+                    spike_bid = down_bid
+                    expensive_bid = up_bid
 
                 # SKIP HIGH-ENTRY check
-                if self.skip_high_entry and winner_ask >= self.high_entry_threshold:
+                if self.skip_high_entry and spike_ask >= self.high_entry_threshold:
                     logger.debug(
-                        f"[MULTICYCLE] SKIP: {winner_side} ask=${winner_ask:.3f} >= "
+                        f"[MULTICYCLE] SKIP: {spike_side} ask=${spike_ask:.3f} >= "
                         f"${self.high_entry_threshold:.2f} (unhedgeable)"
                     )
                 else:
@@ -1923,18 +1977,18 @@ class EnhancedSpikeStrategy:
                     cycle = self.cycle_manager.create_cycle(
                         spike_direction=spike_direction,
                         spike_magnitude=spike_magnitude,
-                        winner_ask=winner_ask,
-                        loser_bid=loser_bid,
+                        spike_ask=spike_ask,
+                        expensive_bid=expensive_bid,
                     )
                     if cycle:
                         # Generate entry quote using cycle's shares
                         # TAKER entry at ask - matches backtest logic (Feb 1, 2026 fix)
-                        entry_price = winner_ask
+                        entry_price = spike_ask
                         entry_price = round(entry_price, 2)
                         entry_price = max(0.01, min(self.max_share_price, entry_price))
 
                         quotes.append({
-                            'side': winner_side,
+                            'side': spike_side,
                             'price': entry_price,
                             'size': self.shares_per_cycle,  # Use per-cycle size
                             'level': 0,
@@ -1949,28 +2003,28 @@ class EnhancedSpikeStrategy:
                         })
 
                         logger.info(
-                            f"[MULTICYCLE] New cycle {cycle.id[:12]}: {winner_side} entry @ ${entry_price:.3f} "
+                            f"[MULTICYCLE] New cycle {cycle.id[:12]}: {spike_side} entry @ ${entry_price:.3f} "
                             f"(spike={spike_magnitude:.4f}%, active={len(self.cycle_manager.get_active_cycles())})"
                         )
 
             # Generate hedge quotes for pending cycles
             for cycle in self.cycle_manager.get_active_cycles():
                 if cycle.status == CycleStatus.PENDING_HEDGE and cycle.hedge_order:
-                    loser_side = cycle.loser_side
-                    loser_ask = down_ask if loser_side == "DOWN" else up_ask
-                    loser_bid_price = down_bid if loser_side == "DOWN" else up_bid
+                    expensive_side = cycle.expensive_side
+                    expensive_ask = down_ask if expensive_side == "DOWN" else up_ask
+                    expensive_bid_price = down_bid if expensive_side == "DOWN" else up_bid
 
                     # Use magnitude-based hedge pricing
-                    hedge_bid = self.calculate_magnitude_loser_bid(
+                    hedge_bid = self.calculate_magnitude_expensive_bid(
                         cycle.spike_magnitude,
-                        loser_ask,
+                        expensive_ask,
                         cycle.entry_order.fill_price if cycle.entry_order else 0.5,
                     )
                     hedge_bid = round(hedge_bid, 2)
                     hedge_bid = max(0.01, min(self.max_share_price, hedge_bid))
 
                     quotes.append({
-                        'side': loser_side,
+                        'side': expensive_side,
                         'price': hedge_bid,
                         'size': self.shares_per_cycle,
                         'level': 0,
@@ -1988,40 +2042,40 @@ class EnhancedSpikeStrategy:
         # =========================================================================
         # PHASE 1: Entry not filled yet
         if s.first_fill_side is None:
-            # Determine winner based on spike (preferred) or velocity (fallback)
+            # Determine spike_side based on spike (preferred) or velocity (fallback)
             if spike_direction is not None:
-                winner_side = spike_direction
+                spike_side = spike_direction
                 logger.debug(
-                    f"[ENHSPIKE] SPIKE ENTRY: {winner_side} (mag={spike_magnitude:.4f}%)"
+                    f"[ENHSPIKE] SPIKE ENTRY: {spike_side} (mag={spike_magnitude:.4f}%)"
                 )
             else:
-                winner_side = "UP" if velocity_bps > 0 else "DOWN"
+                spike_side = "UP" if velocity_bps > 0 else "DOWN"
 
-            loser_side = "DOWN" if winner_side == "UP" else "UP"
+            expensive_side = "DOWN" if spike_side == "UP" else "UP"
 
             # TARGET SHARES CHECK: Don't exceed target on either side
             # NOTE: When changing base_size, ensure target_shares is updated accordingly
-            winner_shares = s.up_shares if winner_side == "UP" else s.down_shares
-            if winner_shares + self.base_size > self.target_shares:
+            spike_shares = s.up_shares if spike_side == "UP" else s.down_shares
+            if spike_shares + self.base_size > self.target_shares:
                 logger.debug(
-                    f"[ENHSPIKE] SKIP: {winner_side} would exceed target "
-                    f"({winner_shares} + {self.base_size} > {self.target_shares})"
+                    f"[ENHSPIKE] SKIP: {spike_side} would exceed target "
+                    f"({spike_shares} + {self.base_size} > {self.target_shares})"
                 )
                 return []
 
-            # Winner entry - buy at ASK for speed (spike mode) or bid+offset (velocity mode)
-            if winner_side == "UP":
-                winner_ask = up_ask
-                winner_bid = up_bid
+            # Spike entry - buy at ASK for speed (spike mode) or bid+offset (velocity mode)
+            if spike_side == "UP":
+                spike_ask = up_ask
+                spike_bid = up_bid
             else:
-                winner_ask = down_ask
-                winner_bid = down_bid
+                spike_ask = down_ask
+                spike_bid = down_bid
 
             # SKIP HIGH-ENTRY: Block entries >= $0.90 (cannot hedge - Polymarket $1 min)
             # Only blocks NEW entries (PHASE 1), never hedging (PHASE 2)
-            if self.skip_high_entry and winner_ask >= self.high_entry_threshold:
+            if self.skip_high_entry and spike_ask >= self.high_entry_threshold:
                 logger.debug(
-                    f"[ENHSPIKE] SKIP: {winner_side} ask=${winner_ask:.3f} >= "
+                    f"[ENHSPIKE] SKIP: {spike_side} ask=${spike_ask:.3f} >= "
                     f"${self.high_entry_threshold:.2f} (unhedgeable)"
                 )
                 return []
@@ -2032,18 +2086,18 @@ class EnhancedSpikeStrategy:
             # Note: 500ms taker delay applies, but backtest is validated with this.
             if spike_direction is not None:
                 # TAKER entry: buy at ask to ensure fill
-                entry_price = winner_ask
+                entry_price = spike_ask
             else:
                 # Legacy velocity-based entry (rarely used now)
                 up_offset, down_offset = self.calculate_offsets(velocity_bps)
-                offset = up_offset if winner_side == "UP" else down_offset
-                entry_price = winner_bid - offset
+                offset = up_offset if spike_side == "UP" else down_offset
+                entry_price = spike_bid - offset
 
             entry_price = round(entry_price, 2)
             entry_price = max(0.01, min(self.max_share_price, entry_price))
 
             quotes.append({
-                'side': winner_side,
+                'side': spike_side,
                 'price': entry_price,
                 'size': self.base_size,
                 'level': 0,
@@ -2058,61 +2112,61 @@ class EnhancedSpikeStrategy:
             zone_name = self.get_velocity_zone_name(velocity_bps)
             if spike_direction:
                 logger.debug(
-                    f"[ENHSPIKE] ENTRY: {winner_side} @ ${entry_price:.3f} "
+                    f"[ENHSPIKE] ENTRY: {spike_side} @ ${entry_price:.3f} "
                     f"(spike={spike_magnitude:.4f}%, score={enhanced_score:.3f})"
                 )
             else:
                 logger.debug(
-                    f"[ENHSPIKE] ENTRY: {winner_side} @ ${entry_price:.3f} "
+                    f"[ENHSPIKE] ENTRY: {spike_side} @ ${entry_price:.3f} "
                     f"(vel={velocity_bps:.3f}bps, zone={zone_name})"
                 )
 
         # PHASE 2: Entry filled - place hedge
         else:
-            loser_side = "DOWN" if s.first_fill_side == "UP" else "UP"
-            loser_ask = down_ask if loser_side == "DOWN" else up_ask
-            loser_bid_price = down_bid if loser_side == "DOWN" else up_bid
+            expensive_side = "DOWN" if s.first_fill_side == "UP" else "UP"
+            expensive_ask = down_ask if expensive_side == "DOWN" else up_ask
+            expensive_bid_price = down_bid if expensive_side == "DOWN" else up_bid
 
-            # Calculate loser bid based on spike magnitude (preferred) or hedge target (fallback)
+            # Calculate expensive bid based on spike magnitude (preferred) or hedge target (fallback)
             if s.last_spike_magnitude > 0:
                 # SPIKE MODE: Use magnitude-based bid
-                loser_bid = self.calculate_magnitude_loser_bid(
+                expensive_bid = self.calculate_magnitude_expensive_bid(
                     s.last_spike_magnitude,
-                    loser_ask,
+                    expensive_ask,
                     s.first_fill_price,
                 )
                 logger.debug(
-                    f"[ENHSPIKE] HEDGE (magnitude): {loser_side} bid=${loser_bid:.3f} "
-                    f"(mag={s.last_spike_magnitude:.4f}%, loser_ask=${loser_ask:.3f})"
+                    f"[ENHSPIKE] HEDGE (magnitude): {expensive_side} bid=${expensive_bid:.3f} "
+                    f"(mag={s.last_spike_magnitude:.4f}%, expensive_ask=${expensive_ask:.3f})"
                 )
             else:
                 # LEGACY: Use hedge target
                 hedge_target = s.locked_hedge_target
                 if hedge_target is not None:
-                    price_gap = loser_ask - hedge_target
+                    price_gap = expensive_ask - hedge_target
                     if price_gap <= 0.02:
                         up_offset, down_offset = self.calculate_offsets(velocity_bps)
-                        offset = down_offset if loser_side == "DOWN" else up_offset
-                        loser_bid = loser_bid_price - offset
+                        offset = down_offset if expensive_side == "DOWN" else up_offset
+                        expensive_bid = expensive_bid_price - offset
                         logger.debug(
-                            f"[ENHSPIKE] HEDGE (target): {loser_side} bid=${loser_bid:.3f}, "
-                            f"ask=${loser_ask:.3f} near target=${hedge_target:.3f}"
+                            f"[ENHSPIKE] HEDGE (target): {expensive_side} bid=${expensive_bid:.3f}, "
+                            f"ask=${expensive_ask:.3f} near target=${hedge_target:.3f}"
                         )
                     else:
                         logger.debug(
-                            f"[ENHSPIKE] WAITING: loser ask=${loser_ask:.3f} > target=${hedge_target:.3f}"
+                            f"[ENHSPIKE] WAITING: expensive ask=${expensive_ask:.3f} > target=${hedge_target:.3f}"
                         )
                         return quotes
                 else:
                     # No target set, use default offset
-                    loser_bid = loser_bid_price - 0.03
+                    expensive_bid = expensive_bid_price - 0.03
 
-            loser_bid = round(loser_bid, 2)
-            loser_bid = max(0.01, min(self.max_share_price, loser_bid))
+            expensive_bid = round(expensive_bid, 2)
+            expensive_bid = max(0.01, min(self.max_share_price, expensive_bid))
 
             quotes.append({
-                'side': loser_side,
-                'price': loser_bid,
+                'side': expensive_side,
+                'price': expensive_bid,
                 'size': self.base_size,
                 'level': 0,
                 'is_rebalance': False,
@@ -2606,35 +2660,39 @@ def detect_binance_spike(
     return None, 0
 
 
-def calculate_magnitude_loser_bid(
+def calculate_magnitude_expensive_bid(
     magnitude_pct: float,
-    loser_ask: float,
-    winner_entry: float,
+    expensive_ask: float,
+    spike_entry: float,
     target_pair: float = 0.99,
     regime: str = "MEDIUM",  # Kept for API compatibility, NOT used
 ) -> float:
     """
-    Standalone loser bid calculation based on spike magnitude (v2).
+    Standalone expensive bid calculation based on spike magnitude (v2).
 
     Args:
         magnitude_pct: Absolute BTC % change
-        loser_ask: Current loser side ask price (kept for API compatibility, NOT used)
-        winner_entry: Price we paid for winner
+        expensive_ask: Current expensive side ask price (kept for API compatibility, NOT used)
+        spike_entry: Price we paid for spike side
         target_pair: Target pair cost (default $0.99)
         regime: Volatility regime (kept for API compatibility, NOT used)
 
     Returns:
-        Optimal loser bid price
+        Optimal expensive bid price
     """
     # NOTE: regime_bonus REMOVED Feb 5, 2026 to match backtest/grid search
     expected_drop = DROP_MULTIPLIER * magnitude_pct + DROP_INTERCEPT
     expected_drop = max(0.02, min(0.20, expected_drop))
-    max_loser = target_pair - winner_entry
-    # FIX Feb 2, 2026: Use theoretical loser (1.0 - winner_entry), NOT loser_ask
+    max_expensive = target_pair - spike_entry
+    # FIX Feb 2, 2026: Use theoretical expensive (1.0 - spike_entry), NOT expensive_ask
     # Matches backtest formula for consistent pair costs
-    theoretical_loser = 1.0 - winner_entry
-    loser_bid = min(theoretical_loser - expected_drop, max_loser)
-    return max(loser_bid, 0.01)
+    theoretical_expensive = 1.0 - spike_entry
+    expensive_bid = min(theoretical_expensive - expected_drop, max_expensive)
+    return max(expensive_bid, 0.01)
+
+
+# Backward compatibility alias
+calculate_magnitude_loser_bid = calculate_magnitude_expensive_bid
 
 
 # =============================================================================
