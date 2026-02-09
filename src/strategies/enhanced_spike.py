@@ -1167,13 +1167,17 @@ class EnhancedSpikeStrategy:
         return result
 
     def clear_spike_history(self) -> None:
-        """Clear spike detection history (call on new market)."""
+        """Clear spike detection history (call on new market or new cycle).
+
+        NOTE: Does NOT reset _market_entry_count. That counter persists
+        across cycles within the same market (CAP3 enforcement).
+        Only reset() zeros the counter (on market rotation).
+        """
         self._binance_price_history = []
         self._ewma_price = None  # Reset EWMA state
         self.state.last_spike_direction = None
         self.state.last_spike_magnitude = 0.0
         self.state.last_spike_time = 0.0
-        self._market_entry_count = 0  # Reset per-market cap counter
 
     def can_enter_market(self) -> bool:
         """Check if per-market entry cap allows another entry.
@@ -2544,6 +2548,7 @@ class EnhancedSpikeStrategy:
 
         self._completed_pairs = []
         self.clear_spike_history()
+        self._market_entry_count = 0  # Reset per-market cap counter (only on new market, NOT on cycle)
         self._zscore_skip_count = 0
 
         # Reset multi-cycle manager for new market

@@ -234,14 +234,14 @@ AGGRESSIVE = TradingConfig(
     shares_per_cycle=15,         # CAP3 production: 15 shares × 3 entries = $42 max/market
 
     # Session loss limit (Feb 1, 2026) - circuit breaker
-    max_session_loss=50.0,       # Production: $50 circuit breaker
+    max_session_loss=50.0,       # Safety circuit breaker (not part of validated CAP3, but sensible guard)
 
     # hard_max_imbalance: Auto-calculated as int(shares_per_cycle * 1.1) = 11
 
-    # HOUR-OF-DAY FILTER (Feb 9, 2026 - Loser Analysis finding)
-    # Skip entries during bad UTC hours: +$1,148 PnL improvement, 20.8% trades removed
-    # OOS9 goes from -$243 to +$468 with this filter alone
-    skip_utc_hours=[14, 20, 8, 4, 3],
+    # HOUR-OF-DAY FILTER - OFF (not validated with CAP3)
+    # Loser analysis showed potential benefit but CAP3 backtest ran WITHOUT hour filter.
+    # To enable: skip_utc_hours=[14, 20, 8, 4, 3]
+    skip_utc_hours=None,
 
     # PER-MARKET ENTRY CAP (Feb 9, 2026 - CAP3 winner)
     # Max 3 entries per 15-min market. Prevents cycling into losing markets.
