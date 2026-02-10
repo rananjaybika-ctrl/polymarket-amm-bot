@@ -940,6 +940,8 @@ class PaperTradingBot:
         time_stop_seconds: float = AGGRESSIVE_CONFIG.time_stop_seconds, # From TRADING_CONFIGS.py
         high_entry_threshold: float = AGGRESSIVE_CONFIG.high_entry_threshold,  # From TRADING_CONFIGS.py
         max_entries_per_market: Optional[int] = getattr(AGGRESSIVE_CONFIG, 'max_entries_per_market', None),  # From TRADING_CONFIGS.py (CAP3)
+        # FADE MODE (Feb 9, 2026)
+        fade_mode: bool = getattr(AGGRESSIVE_CONFIG, 'fade_mode', False),  # From TRADING_CONFIGS.py
         # CONTRARIAN (Path 2) specific parameters
         contrarian_pullback_threshold: float = 0.0001,  # 0.01% pullback from peak
         contrarian_retracement_min: float = 0.30,       # Must retrace 30% of move
@@ -1026,6 +1028,7 @@ class PaperTradingBot:
         self.time_stop_seconds = time_stop_seconds
         self.high_entry_threshold = high_entry_threshold
         self.max_entries_per_market = max_entries_per_market
+        self.fade_mode = fade_mode
 
         # CONTRARIAN (Path 2) specific parameters
         self.contrarian_pullback_threshold = contrarian_pullback_threshold
@@ -1053,7 +1056,7 @@ class PaperTradingBot:
         self._detected_market_type: str = "UNKNOWN"
 
         # MAX DAILY LOSS PROTECTION
-        self.max_daily_loss = max_daily_loss
+        self.max_daily_loss = max_daily_loss or 0  # None -> 0 (disabled)
         self.cumulative_pnl = 0.0  # Track cumulative P&L across sessions
         self.loss_limit_reached = False  # Flag to stop trading when limit hit
         if self.max_daily_loss > 0:
@@ -1259,17 +1262,22 @@ class PaperTradingBot:
                 skip_utc_hours=getattr(AGGRESSIVE_CONFIG, 'skip_utc_hours', None),
                 # PER-MARKET ENTRY CAP (Feb 9, 2026 - CAP3 winner)
                 max_entries_per_market=self.max_entries_per_market,
+                # FADE MODE (Feb 9, 2026) - buy opposite of spike, hold to resolution
+                fade_mode=self.fade_mode,
             )
             multicycle_info = ""
             if AGGRESSIVE_CONFIG.enable_multicycle:
                 multicycle_info = (
                     f", multicycle={AGGRESSIVE_CONFIG.max_cycles}x{AGGRESSIVE_CONFIG.shares_per_cycle}"
                 )
+            fade_info = ""
+            if self.fade_mode:
+                fade_info = ", FADE_MODE=ON (buy opposite of spike, hold to resolution)"
             logger.info(
                 f"[AGGRESSIVE] Initialized: base_size={self.spread_base_size}, "
                 f"spike_method={spike_method}, time_stop={self.time_stop_seconds}s, "
                 f"z_bounds=[{self.zscore_lo}, {self.zscore_hi}], skip_high>=${self.high_entry_threshold}, "
-                f"threshold={'OU_ADAPTIVE' if ou_adaptive else 'FIXED_0.02'}{multicycle_info}"
+                f"threshold={'OU_ADAPTIVE' if ou_adaptive else 'FIXED_0.02'}{multicycle_info}{fade_info}"
             )
 
             # Initialize breakeven monitor for real-time exit detection
@@ -1703,6 +1711,8 @@ class PaperTradingBot:
             hard_max_imbalance=config.get("hard_max_imbalance", AGGRESSIVE_CONFIG.hard_max_imbalance),
             # PER-MARKET ENTRY CAP (Feb 9, 2026 - CAP3 winner)
             max_entries_per_market=config.get("max_entries_per_market") or getattr(AGGRESSIVE_CONFIG, 'max_entries_per_market', None),
+            # FADE MODE (Feb 9, 2026)
+            fade_mode=config.get("fade_mode", getattr(AGGRESSIVE_CONFIG, 'fade_mode', False)),
             # Output
             csv_path=f"{'live_trades' if trading_mode == 'live' else 'paper_trades'}_aggressive.csv",
             live_display=True,
@@ -5215,19 +5225,52 @@ class PaperTradingBot:
                 continue
 
             # Determine entry side and price
-            entry_side = signal.direction
-            entry_ask = opportunity.up_ask if entry_side == "UP" else opportunity.down_ask
+            if self.fade_mode:
+                # FADE MODE: Buy OPPOSITE of spike direction (expensive side)
+                # When BTC spikes UP, buy DOWN (still the favorite if ask >= $0.80)
+                entry_side = "DOWN" if signal.direction == "UP" else "UP"
+                expensive_ask = opportunity.down_ask if entry_side == "DOWN" else opportunity.up_ask
 
-            if entry_ask is None:
-                continue
+                if expensive_ask is None:
+                    continue
 
-            # Check high entry threshold
-            if entry_ask >= self.high_entry_threshold:
-                logger.info(
-                    f"[SPIKE_EVENT] Skipped: {entry_side} ask ${entry_ask:.4f} >= "
-                    f"${self.high_entry_threshold:.2f} threshold"
-                )
-                continue
+                # FADE FILTER: Expensive side must be >= $0.80
+                if expensive_ask < self.high_entry_threshold:
+                    logger.debug(
+                        f"[FADE_EVENT] Skipped: {entry_side} ask ${expensive_ask:.4f} < "
+                        f"${self.high_entry_threshold:.2f} threshold"
+                    )
+                    continue
+
+                # Exclude confirmed DOWN spikes (spike=DOWN AND velocity<0)
+                velocity_bps = 0.0
+                if self._trend_detector:
+                    trend_signal = self._trend_detector.get_trend_signal()
+                    if trend_signal:
+                        velocity_bps = trend_signal.velocity_bps
+                if signal.direction == "DOWN" and velocity_bps < 0:
+                    logger.debug(
+                        f"[FADE_EVENT] Skipped: confirmed DOWN spike (vel={velocity_bps:.2f}bps)"
+                    )
+                    continue
+
+                # MAKER entry: expensive_ask - 0.03 offset
+                entry_ask = max(0.01, round(expensive_ask - 0.03, 2))
+            else:
+                # NON-FADE: Original momentum entry (buy same direction as spike)
+                entry_side = signal.direction
+                entry_ask = opportunity.up_ask if entry_side == "UP" else opportunity.down_ask
+
+                if entry_ask is None:
+                    continue
+
+                # Check high entry threshold
+                if entry_ask >= self.high_entry_threshold:
+                    logger.info(
+                        f"[SPIKE_EVENT] Skipped: {entry_side} ask ${entry_ask:.4f} >= "
+                        f"${self.high_entry_threshold:.2f} threshold"
+                    )
+                    continue
 
             # Check per-market entry cap (Feb 9, 2026 - CAP3)
             if not strategy.can_enter_market():
@@ -5254,7 +5297,8 @@ class PaperTradingBot:
                 }
                 if self.trading_mode == "paper":
                     exec_kwargs["is_hedge"] = False
-                    exec_kwargs["is_market_order"] = True  # Taker for speed
+                    # FADE: Maker order (passive bid), Non-FADE: Taker (market order)
+                    exec_kwargs["is_market_order"] = not self.fade_mode
                     exec_kwargs["use_pending_orders"] = True
 
                 result = await self._engine.execute_single_side_trade(**exec_kwargs)
@@ -5269,8 +5313,9 @@ class PaperTradingBot:
                         self._trade_count += 1
                         self._send_web_update()
 
+                        log_prefix = "[FADE_EVENT]" if self.fade_mode else "[SPIKE_EVENT]"
                         logger.info(
-                            f"[SPIKE_EVENT] Entry filled: {entry_side} {filled_size} @ ${filled_price:.4f} | "
+                            f"{log_prefix} Entry filled: {entry_side} {filled_size} @ ${filled_price:.4f} | "
                             f"total_latency={signal.age_ms():.0f}ms"
                         )
 
@@ -5281,11 +5326,11 @@ class PaperTradingBot:
                             "side": entry_side,
                             "price": filled_price,
                             "size": filled_size,
-                            "mode": "aggressive",
+                            "mode": "fade" if self.fade_mode else "aggressive",
                         })
 
-                        # Start breakeven monitoring
-                        if self._breakeven_monitor:
+                        # Start breakeven monitoring (NOT in FADE mode — hold to resolution)
+                        if not self.fade_mode and self._breakeven_monitor:
                             winner_token = market.up_token_id if entry_side == "UP" else market.down_token_id
                             loser_token = market.down_token_id if entry_side == "UP" else market.up_token_id
                             loser_side = "DOWN" if entry_side == "UP" else "UP"
@@ -5849,10 +5894,12 @@ class PaperTradingBot:
 
         # Hard stop enforcement - check PROJECTED imbalance (current + entry size)
         # This prevents new same-side entries that would exceed the limit
+        # FADE MODE: Skip imbalance check — positions are one-sided by design.
+        # CAP3 (max_entries_per_market=3) is the safety mechanism for FADE.
         current_imbalance = abs(current_up - current_down)
         is_actively_hedging = strategy.state.first_fill_side is not None
         projected_imbalance = current_imbalance + self.spread_base_size  # Assume new entry on surplus side
-        in_hard_stop = projected_imbalance >= self.hard_max_imbalance and not is_actively_hedging
+        in_hard_stop = not self.fade_mode and projected_imbalance >= self.hard_max_imbalance and not is_actively_hedging
 
         if in_hard_stop:
             now = time.time()
@@ -5878,7 +5925,13 @@ class PaperTradingBot:
                         completed_pairs_before = len(strategy._completed_pairs)
 
                         strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
-                        logger.info(f"[AGGRESSIVE] Fill: {fill_side} {fill_size} @ ${fill_price:.4f}")
+                        strategy.record_market_entry()  # Track for per-market cap (CAP3)
+                        self._trade_count += 1
+                        self._send_web_update()
+                        logger.info(
+                            f"[AGGRESSIVE] WS Fill: {fill_side} {fill_size} @ ${fill_price:.4f} "
+                            f"(entries={strategy._market_entry_count}/{strategy.max_entries_per_market})"
+                        )
 
                         # FIX Feb 4: Log to CSV (was missing!)
                         await self._log_trade({
@@ -5887,12 +5940,13 @@ class PaperTradingBot:
                             "side": fill_side,
                             "price": fill_price,
                             "size": fill_size,
-                            "mode": "aggressive",
+                            "mode": "fade" if self.fade_mode else "aggressive",
                         })
 
                         # ENTRY FILL: Start breakeven monitoring
                         # (had_position=False means this was an entry, not a hedge)
-                        if not had_position and self._breakeven_monitor:
+                        # FADE MODE: Skip breakeven — hold to resolution
+                        if not self.fade_mode and not had_position and self._breakeven_monitor:
                             winner_token = market.up_token_id if fill_side == "UP" else market.down_token_id
                             loser_token = market.down_token_id if fill_side == "UP" else market.up_token_id
                             loser_side = "DOWN" if fill_side == "UP" else "UP"
@@ -5909,7 +5963,8 @@ class PaperTradingBot:
                             )
 
                         # CYCLE COMPLETION: If cycle just completed, cancel orders and merge
-                        if had_position and strategy.state.first_fill_side is None:
+                        # FADE MODE: No cycle completion (positions held to resolution)
+                        if not self.fade_mode and had_position and strategy.state.first_fill_side is None:
                             await self._cancel_pending_after_cycle_reset(market, "WS_FILL")
                             # Clean slate: clear all breakeven state for this market
                             if self._breakeven_monitor:
@@ -6006,9 +6061,13 @@ class PaperTradingBot:
                         completed_pairs_before = len(strategy._completed_pairs)
 
                         strategy.on_fill(side=fill_side, price=fill_price, size=fill_size)
+                        strategy.record_market_entry()  # Track for per-market cap (CAP3)
                         self._trade_count += 1
                         self._send_web_update()
-                        logger.info(f"[AGGRESSIVE] Paper fill: {fill_side} {fill_size} @ ${fill_price:.4f}")
+                        logger.info(
+                            f"[AGGRESSIVE] Paper fill: {fill_side} {fill_size} @ ${fill_price:.4f} "
+                            f"(entries={strategy._market_entry_count}/{strategy.max_entries_per_market})"
+                        )
 
                         # FIX Feb 4: Log to CSV (was missing!)
                         await self._log_trade({
@@ -6022,7 +6081,8 @@ class PaperTradingBot:
 
                         # ENTRY FILL: Start breakeven monitoring
                         # (had_position=False means this was an entry, not a hedge)
-                        if not had_position and self._breakeven_monitor:
+                        # FADE MODE: Skip breakeven — hold to resolution
+                        if not self.fade_mode and not had_position and self._breakeven_monitor:
                             winner_token = market.up_token_id if fill_side == "UP" else market.down_token_id
                             loser_token = market.down_token_id if fill_side == "UP" else market.up_token_id
                             loser_side = "DOWN" if fill_side == "UP" else "UP"
@@ -6039,7 +6099,8 @@ class PaperTradingBot:
                             )
 
                         # CYCLE COMPLETION: If cycle just completed, cancel orders and merge
-                        if had_position and strategy.state.first_fill_side is None:
+                        # FADE MODE: No cycle completion (positions held to resolution)
+                        if not self.fade_mode and had_position and strategy.state.first_fill_side is None:
                             await self._cancel_pending_after_cycle_reset(market, "PAPER_FILL")
                             # Clean slate: clear all breakeven state for this market
                             if self._breakeven_monitor:
@@ -6157,6 +6218,13 @@ class PaperTradingBot:
             price = quote["price"]
             size = quote["size"]
 
+            # CAP3 gate: check per-market entry cap before executing
+            if not strategy.can_enter_market():
+                logger.debug(
+                    f"[AGGRESSIVE] CAP3 blocked: {strategy._market_entry_count}/{strategy.max_entries_per_market}"
+                )
+                continue
+
             # Auto-scaling disabled - let Polymarket reject if below $1.00 minimum
             # (Re-enable when testing with larger sizes like 50 shares)
             # if price > 0 and size * price < 1.0:
@@ -6209,6 +6277,7 @@ class PaperTradingBot:
                         completed_pairs_before = len(strategy._completed_pairs)
 
                         strategy.on_fill(side=side, price=filled_price, size=int(filled_size))
+                        strategy.record_market_entry()  # Track for per-market cap (CAP3)
                         self._trade_count += 1
                         self._send_web_update()
 
@@ -6218,7 +6287,7 @@ class PaperTradingBot:
                             "side": side,
                             "price": filled_price,
                             "size": filled_size,
-                            "mode": "aggressive",
+                            "mode": "fade" if self.fade_mode else "aggressive",
                             "velocity_bps": velocity_bps,
                         })
 
@@ -6226,8 +6295,9 @@ class PaperTradingBot:
 
                         # ENTRY FILL: Start breakeven monitoring
                         # (had_position=False means this was an entry, not a hedge)
+                        # FADE MODE: Skip breakeven — hold to resolution
                         is_hedge = quote.get("is_hedge", False)
-                        if not had_position and not is_hedge and self._breakeven_monitor:
+                        if not self.fade_mode and not had_position and not is_hedge and self._breakeven_monitor:
                             winner_token = market.up_token_id if side == "UP" else market.down_token_id
                             loser_token = market.down_token_id if side == "UP" else market.up_token_id
                             loser_side = "DOWN" if side == "UP" else "UP"
@@ -6244,7 +6314,8 @@ class PaperTradingBot:
                             )
 
                         # CYCLE COMPLETION: Full cleanup (FIX Feb 4, 2026)
-                        if had_position and strategy.state.first_fill_side is None:
+                        # FADE MODE: No cycle completion (positions held to resolution)
+                        if not self.fade_mode and had_position and strategy.state.first_fill_side is None:
                             # Cancel pending orders (works for both live and paper now)
                             await self._cancel_pending_after_cycle_reset(market, "EXEC_FILL")
 
@@ -7046,6 +7117,7 @@ class PaperTradingBot:
                                 price=fill_price,
                                 size=fill_size
                             )
+                            strategy.record_market_entry()  # Track for per-market cap (CAP3)
                             self._live_confirmed_fills.add(order_id)
 
                             # FIX Feb 4: Log to CSV (REST verify fallback)

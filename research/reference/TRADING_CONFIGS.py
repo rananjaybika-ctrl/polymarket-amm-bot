@@ -122,7 +122,7 @@ class TradingConfig:
     # Session loss limit (Feb 1, 2026)
     # Circuit breaker: stop trading if cumulative session loss exceeds this amount
     # Analysis showed $50 never triggered in OOS7/OOS8 but protects against catastrophic sessions
-    max_session_loss: float = 50.0   # $50 hard stop on session losses
+    max_session_loss: Optional[float] = 50.0   # $50 hard stop on session losses (None = disabled)
 
     # Breakeven exit (Feb 3, 2026)
     # Real-time monitoring: exit when winner_bid <= entry_price AFTER min hold time
@@ -143,6 +143,12 @@ class TradingConfig:
     # 8=London open stop-hunt (83.3%), 3-4=pre-Tokyo thin liquidity (0%)
     # See: research/findings/data/loser_analysis_filters.csv (worst_5_hours_skip)
     skip_utc_hours: Optional[list] = None  # e.g. [14, 20, 8, 4, 3]
+
+    # FADE mode (Feb 9, 2026)
+    # Buy OPPOSITE of spike direction (expensive side), hold to resolution.
+    # NO hedging, NO pair merging. PnL from directional accuracy (~88%).
+    # When False: old pair-trading mode (entry+hedge+merge) — NEVER VALIDATED.
+    fade_mode: bool = True
 
     # Per-market entry cap (Feb 9, 2026 - CAP3 winner)
     # Limits filled entries per market to prevent cycling into losing markets.
@@ -234,7 +240,7 @@ AGGRESSIVE = TradingConfig(
     shares_per_cycle=15,         # CAP3 production: 15 shares × 3 entries = $42 max/market
 
     # Session loss limit (Feb 1, 2026) - circuit breaker
-    max_session_loss=50.0,       # Safety circuit breaker (not part of validated CAP3, but sensible guard)
+    max_session_loss=None,       # Disabled per user request (Feb 10, 2026)
 
     # hard_max_imbalance: Auto-calculated as int(shares_per_cycle * 1.1) = 11
 

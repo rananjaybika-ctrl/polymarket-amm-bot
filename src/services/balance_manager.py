@@ -111,7 +111,7 @@ class BalanceManager:
         # Session loss tracking (Feb 1, 2026)
         # Tracks cumulative PnL within a trading session
         self.session_realized_pnl = 0.0
-        self.max_session_loss = 50.0  # User decision: $50 hard stop
+        self.max_session_loss = 0  # Disabled (Feb 10, 2026) — was $50
 
     async def get_available_capital(self) -> float:
         """
@@ -417,8 +417,8 @@ class BalanceManager:
         if pnl < 0:
             self.record_realized_loss(-pnl)  # record_realized_loss expects positive number
 
-        # Check session limit
-        if self.session_realized_pnl <= -self.max_session_loss:
+        # Check session limit (0 = disabled)
+        if self.max_session_loss > 0 and self.session_realized_pnl <= -self.max_session_loss:
             logger.warning(
                 f"SESSION LOSS LIMIT REACHED: ${-self.session_realized_pnl:.2f} "
                 f"(limit: ${self.max_session_loss:.2f}) - STOPPING TRADING"
@@ -434,7 +434,9 @@ class BalanceManager:
         logger.info(f"Session reset (previous session PnL: ${old_pnl:.2f})")
 
     def is_within_session_limit(self) -> bool:
-        """Check if within session loss limit."""
+        """Check if within session loss limit (0 = disabled, always True)."""
+        if self.max_session_loss <= 0:
+            return True
         return self.session_realized_pnl > -self.max_session_loss
 
     def get_session_pnl(self) -> float:

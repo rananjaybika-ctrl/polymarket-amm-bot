@@ -1116,12 +1116,14 @@ class PaperTradingEngine:
             is_hedge = pending.get("is_hedge", False)
             is_market_order = pending.get("is_market_order", False)
 
-            # MAKER vs TAKER fill mechanics (Feb 4, 2026)
-            # Maker = passive hedge (is_hedge=True, is_market_order=False) → no delay, price-touch
-            # Taker = entry, time-stop, breakeven → 500ms delay, fill at current ask
+            # MAKER vs TAKER fill mechanics (Feb 4, 2026, FIXED Feb 10, 2026)
+            # Maker = any order with is_market_order=False → no delay, price-touch
+            #   - Includes: passive hedge orders AND FADE entries (bid at ask-0.03)
+            # Taker = is_market_order=True → 500ms delay, fill at current ask
+            #   - Includes: time-stop exits, breakeven exits, non-FADE entries
             filled_size = None
             filled_price = None
-            is_maker = is_hedge and not is_market_order
+            is_maker = not is_market_order
 
             if is_maker:
                 # MAKER ORDERS (passive hedge): Strict price-touch mode
@@ -1204,8 +1206,10 @@ class PaperTradingEngine:
 
             self._stats.total_trades += 1
 
-            if is_maker:
+            if is_maker and is_hedge:
                 fill_type_str = "HEDGE(maker)"
+            elif is_maker and not is_hedge:
+                fill_type_str = "ENTRY(maker)"  # FADE entries
             elif is_hedge:
                 fill_type_str = "HEDGE(taker)"  # time-stop or breakeven
             else:
