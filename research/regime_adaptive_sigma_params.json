@@ -1,0 +1,25 @@
+{
+  "method": "regime_adaptive",
+  "description": "Sigma multiplier scales inversely with EWMA sigma level",
+  "train_datasets": [
+    "IS+OOS2",
+    "OOS7"
+  ],
+  "test_datasets": [
+    "OOS3+4",
+    "OOS9",
+    "OOS8",
+    "OOS10"
+  ],
+  "sigma_target_d05": 8.164965809277261e-05,
+  "sigma_target_d04": 0.00010206207261596574,
+  "sigma_target_d06": 6.804138174397718e-05,
+  "piecewise_v2_thresholds": {
+    "< 0.00001": "8.0x",
+    "0.00001-0.00003": "3.5x",
+    "0.00003-0.00005": "2.0x",
+    "0.00005-0.00008": "1.3x",
+    ">= 0.00008": "1.0x"
+  },
+  "timestamp": 1770730796.5130198
+}

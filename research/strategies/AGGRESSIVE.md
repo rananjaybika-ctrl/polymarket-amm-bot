@@ -1,13 +1,37 @@
-# AGGRESSIVE Strategy (Path 1)
+# AGGRESSIVE Strategy (Path 1) - ⚠️ DEPRECATED
 
-**Status:** VALIDATED - EWMA_1000 + TS30 + OBI Filter
-**Last Updated:** February 3, 2026
+**Status:** ⚠️ DEPRECATED - Pivoting to MAKER-PREDICTION (February 5, 2026)
+**Last Updated:** February 5, 2026
 
 ---
 
-## Overview
+## ⚠️ DEPRECATION NOTICE
+
+**This taker-based strategy is being replaced by MAKER-PREDICTION.**
+
+### Why Deprecated?
+
+| Issue | Finding | Impact |
+|-------|---------|--------|
+| **Latency arb not viable** | BTC velocity r=0.055 | 60Hz Binance data provides NO edge |
+| **Taker fees hurt** | 2% on every entry | Eats into profit margin |
+| **Backtest/live mismatch** | -$25/hr with realistic delays | Unreliable results |
+| **Prediction has edge** | 57-70% accuracy | Better than 50% direction |
+
+### Replacement Strategy
+
+**NEW (Feb 6, 2026):** See [CONTRARIAN_MAKER.md](CONTRARIAN_MAKER.md) - FADE spikes when market doesn't believe them. **90% accuracy** when fade_side >= $0.65.
+
+See: [STRATEGY_PIVOT_FEB2026.md](STRATEGY_PIVOT_FEB2026.md) for pivot rationale.
+See: [MAKER_PREDICTION.md](MAKER_PREDICTION.md) for prediction-based approach (in development).
+
+---
+
+## Overview (Historical Reference)
 
 "Quality-first volume strategy" - Detect BTC spikes with OU threshold, enter winner side passively, hedge on loser side, exit via time-stop or passive fill.
+
+**⚠️ NOTE:** This approach relied on latency arbitrage which has been proven non-viable.
 
 ---
 

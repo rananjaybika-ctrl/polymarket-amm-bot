@@ -5,6 +5,21 @@
 
 ---
 
+## ⚠️ WARNING: CONTAINS OVERGENERALIZATIONS
+
+**See plan file for corrections:** `~/.claude/plans/glistening-drifting-lantern.md`
+
+Key errors in this document:
+1. **Stop Loss = HARMFUL** → Only true for FADE strategy, not universal
+2. **Time Stop = 180s** → Only for AGGRESSIVE taker, FADE uses None
+3. **Velocity = noise** → Used as FILTER, not predictor
+4. **Pair Builder 77.5%** → Unverified source
+5. **Z-score blocks profits** → Was calibration issue, not fundamental flaw
+
+Always check strategy-specific context before applying findings.
+
+---
+
 ## EXECUTIVE SUMMARY
 
 After analyzing 200+ files across findings, backtests, ML models, and whale strategies:

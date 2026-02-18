@@ -19,7 +19,7 @@ Usage:
         compute_enhanced_score,
 
         # Calculations
-        calculate_loser_bid,
+        calculate_expensive_bid,
 
         # Multi-cycle direction modes
         DIRECTION_MODE_SINGLE,
@@ -66,8 +66,8 @@ def polymarket_taker_fee(price: float) -> float:
 
 
 def calculate_pnl_with_fees(
-    winner_entry: float,
-    loser_fill: float,
+    spike_entry: float,
+    expensive_fill: float,
     shares: int,
     is_taker_entry: bool,
     is_taker_exit: bool
@@ -76,8 +76,8 @@ def calculate_pnl_with_fees(
     Calculate PnL with proper maker/taker fee handling.
 
     Args:
-        winner_entry: Price paid for winner side
-        loser_fill: Price received for loser side
+        spike_entry: Price paid for spike side (or expensive side in CONTRARIAN)
+        expensive_fill: Price received for expensive/hedge side
         shares: Number of shares traded
         is_taker_entry: True if entry was taker (market order)
         is_taker_exit: True if exit was taker (market order)
@@ -89,11 +89,11 @@ def calculate_pnl_with_fees(
         - entry_fee: Fee paid on entry
         - exit_fee: Fee paid on exit
     """
-    pair_cost = winner_entry + loser_fill
+    pair_cost = spike_entry + expensive_fill
     pnl_gross = (1.0 - pair_cost) * shares
 
-    entry_fee = polymarket_taker_fee(winner_entry) * winner_entry * shares if is_taker_entry else 0
-    exit_fee = polymarket_taker_fee(loser_fill) * loser_fill * shares if is_taker_exit else 0
+    entry_fee = polymarket_taker_fee(spike_entry) * spike_entry * shares if is_taker_entry else 0
+    exit_fee = polymarket_taker_fee(expensive_fill) * expensive_fill * shares if is_taker_exit else 0
 
     pnl_net = pnl_gross - entry_fee - exit_fee
     return pnl_net, pnl_gross, entry_fee, exit_fee
@@ -185,10 +185,10 @@ def obi_confirms_spike(spike_dir: str, up_imbalance: Optional[float],
 
 def should_take_spike_enhanced(
     spike_direction: str,
-    obi_winner: float,
-    loser_spread: float = 0.05,
+    obi_spike: float,
+    expensive_spread: float = 0.05,
     time_remaining: float = 600.0,
-    winner_ask_depth: Optional[float] = None,
+    spike_ask_depth: Optional[float] = None,
 ) -> Tuple[bool, str]:
     """
     Simple binary OBI check - does orderbook confirm spike direction?
@@ -202,17 +202,17 @@ def should_take_spike_enhanced(
 
     Args:
         spike_direction: "UP" or "DOWN"
-        obi_winner: Orderbook imbalance for winner side (-1 to +1)
-        loser_spread: IGNORED (kept for API compatibility)
+        obi_spike: Orderbook imbalance for spike side (-1 to +1)
+        expensive_spread: IGNORED (kept for API compatibility)
         time_remaining: IGNORED (kept for API compatibility)
-        winner_ask_depth: IGNORED (kept for API compatibility)
+        spike_ask_depth: IGNORED (kept for API compatibility)
 
     Returns:
         Tuple of (should_take, reason)
     """
     # Simple binary OBI check: does orderbook agree with spike?
-    if obi_winner <= 0:
-        return False, f"OBI disagrees (obi={obi_winner:.3f})"
+    if obi_spike <= 0:
+        return False, f"OBI disagrees (obi={obi_spike:.3f})"
 
     return True, "OBI confirms"
 
@@ -281,14 +281,18 @@ class TradeResult:
     Standard trade result with fee tracking.
 
     Used by both backtests and live trading for consistent result format.
+
+    Naming convention (Feb 2026):
+    - spike_side: The side BTC spike predicts (direction of spike)
+    - expensive_side: The opposite side (our entry in CONTRARIAN when >= $0.65)
     """
     market_slug: str
     cycle_num: int
     entry_time_remaining: float
     signal_score: float
-    winner_side: str
-    winner_fill_price: float
-    loser_fill_price: float
+    spike_side: str  # Renamed from winner_side
+    spike_fill_price: float  # Renamed from winner_fill_price
+    expensive_fill_price: float  # Renamed from loser_fill_price
     hedge_type: str  # "passive", "time_stop", or "resolution"
     pair_cost: float
     pnl_gross: float
@@ -310,13 +314,17 @@ class BacktestCycle:
     Track a single cycle in multi-cycle mode.
 
     Used for managing multiple concurrent trading cycles.
+
+    Naming convention (Feb 2026):
+    - spike_side: The side BTC spike predicts
+    - expensive_side: The opposite side (hedge target)
     """
     cycle_id: int
     entry_ts: int  # Entry timestamp in milliseconds
-    winner_side: str
-    loser_side: str
-    winner_entry: float
-    loser_target: float
+    spike_side: str  # Renamed from winner_side
+    expensive_side: str  # Renamed from loser_side
+    spike_entry: float  # Renamed from winner_entry
+    expensive_target: float  # Renamed from loser_target
     entry_time_rem: float
     spike_magnitude: float
     score: float
@@ -324,18 +332,22 @@ class BacktestCycle:
 
 
 # =============================================================================
-# LOSER BID CALCULATION
+# EXPENSIVE SIDE BID CALCULATION (formerly "loser bid")
 # =============================================================================
 
-def calculate_loser_bid(
-    winner_entry: float,
+def calculate_expensive_bid(
+    spike_entry: float,
     spike_magnitude: float,
     drop_multiplier: float = 0.50,
     drop_intercept: float = 0.08,
     target_pair_cost: float = 0.99,
 ) -> float:
     """
-    Calculate optimal loser bid price based on spike magnitude.
+    Calculate optimal expensive side bid price based on spike magnitude.
+
+    Renamed from calculate_loser_bid (Feb 2026) for clarity:
+    - spike_side: The side BTC spike predicts
+    - expensive_side: The opposite side (hedge target)
 
     Uses linear model recalibrated Jan 18, 2026:
         expected_drop = drop_multiplier * spike_magnitude + drop_intercept
@@ -347,25 +359,29 @@ def calculate_loser_bid(
           → ACCURATE prediction
 
     The reduced multiplier (0.68→0.50) indicates spike magnitude has weak
-    predictive power for actual loser drop. The higher intercept (0.01→0.08)
-    matches observed mean drop better.
+    predictive power for actual expensive side drop. The higher intercept
+    (0.01→0.08) matches observed mean drop better.
 
     Args:
-        winner_entry: Price paid for winner side
+        spike_entry: Price paid for spike side
         spike_magnitude: Absolute BTC % change (e.g., 0.05 for 0.05%)
         drop_multiplier: Linear model slope (default 0.50)
         drop_intercept: Linear model intercept (default 0.08)
-        target_pair_cost: Target for winner+loser cost (default 0.99)
+        target_pair_cost: Target for spike+expensive cost (default 0.99)
 
     Returns:
-        Optimal loser bid price, clamped to [0.01, 0.95]
+        Optimal expensive side bid price, clamped to [0.01, 0.95]
 
     Reference: research/HEDGE_PRICING_FINDINGS.md (Jan 18, 2026)
     """
     expected_drop = drop_multiplier * spike_magnitude + drop_intercept
-    max_loser = target_pair_cost - winner_entry
-    loser_bid = min((1.0 - winner_entry) - expected_drop, max_loser)
-    return max(0.01, min(0.95, loser_bid))
+    max_expensive = target_pair_cost - spike_entry
+    expensive_bid = min((1.0 - spike_entry) - expected_drop, max_expensive)
+    return max(0.01, min(0.95, expensive_bid))
+
+
+# Alias for backwards compatibility
+calculate_loser_bid = calculate_expensive_bid
 
 
 # =============================================================================
@@ -407,7 +423,7 @@ def can_enter_direction(
 
     Args:
         spike_direction: "UP" or "DOWN" - direction of new spike
-        active_cycles: List of active BacktestCycle objects (must have winner_side attr)
+        active_cycles: List of active BacktestCycle objects (must have spike_side attr)
         direction_mode: "single", "build", or "clear" (only "single" is live-ready)
 
     Returns:
@@ -422,7 +438,7 @@ def can_enter_direction(
         return True, "No active cycles"
 
     # Get direction from first active cycle (all should be same direction)
-    existing_direction = active_cycles[0].winner_side
+    existing_direction = active_cycles[0].spike_side
 
     if spike_direction == existing_direction:
         return True, f"Same direction as existing ({existing_direction})"

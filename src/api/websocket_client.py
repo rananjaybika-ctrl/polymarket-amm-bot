@@ -99,15 +99,35 @@ class PriceChange:
 
     @classmethod
     def from_message(cls, data: dict) -> "PriceChange":
-        """Create from WebSocket message."""
-        changes = data.get("changes", [])
+        """Create from WebSocket message.
+
+        Handles both old format (pre Sept 15, 2025) and new format:
+        - Old: {"changes": [...], "asset_id": "..."}
+        - New: {"price_changes": [{"asset_id": "...", "best_bid": "...", "best_ask": "...", ...}]}
+        """
+        # New format: "price_changes" with best_bid/best_ask per change
+        changes = data.get("price_changes") or data.get("changes") or []
 
         if not changes:
             return cls(token_id=data.get("asset_id", ""))
 
-        change = changes[0]  # Usually one change per message
+        change = changes[0]
+        token_id = change.get("asset_id") or data.get("asset_id", "")
+
+        # New format includes best_bid/best_ask directly
+        best_bid_str = change.get("best_bid")
+        best_ask_str = change.get("best_ask")
+
+        if best_bid_str is not None and best_ask_str is not None:
+            return cls(
+                token_id=token_id,
+                best_bid=float(best_bid_str) if best_bid_str else None,
+                best_ask=float(best_ask_str) if best_ask_str else None,
+            )
+
+        # Old format fallback: infer from side + price
         return cls(
-            token_id=change.get("asset_id", ""),
+            token_id=token_id,
             best_bid=float(change["price"]) if change.get("side") == "BUY" else None,
             best_ask=float(change["price"]) if change.get("side") == "SELL" else None,
         )
@@ -476,8 +496,8 @@ class WebSocketClient:
                     except Exception as e:
                         logger.error(f"Book callback error: {e}")
 
-            # Price change - has changes array
-            elif "changes" in data:
+            # Price change - new format: "price_changes", old format: "changes"
+            elif "price_changes" in data or "changes" in data:
                 update = PriceChange.from_message(data)
                 for callback in self._price_callbacks:
                     try:

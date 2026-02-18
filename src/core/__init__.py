@@ -6,6 +6,12 @@ BOTH live strategy (src/strategies/) AND backtests (research/) import from here.
 This ensures identical logic across live trading and backtesting.
 =============================================================================
 
+Naming Convention (Feb 2026):
+    - spike_side: The side BTC spike predicts (direction of spike)
+    - expensive_side: The opposite side (our entry in CONTRARIAN when >= $0.65)
+
+    Old names (winner/loser) are aliased for backwards compatibility.
+
 Usage:
     from src.core import (
         # Fee model
@@ -19,7 +25,8 @@ Usage:
         compute_enhanced_score,
 
         # Calculations
-        calculate_loser_bid,
+        calculate_expensive_bid,  # NEW name (Feb 2026)
+        calculate_loser_bid,      # Alias for backwards compatibility
 
         # Data classes
         TradeResult,
@@ -45,7 +52,9 @@ from src.core.trading_utils import (
     should_take_spike_enhanced,
     compute_enhanced_score,
 
-    # Calculations
+    # Calculations - NEW name (Feb 2026)
+    calculate_expensive_bid,
+    # Alias for backwards compatibility
     calculate_loser_bid,
 
     # Multi-cycle direction modes - DEPRECATED Jan 31, 2026
@@ -75,7 +84,9 @@ __all__ = [
     'should_take_spike_enhanced',
     'compute_enhanced_score',
 
-    # Calculations
+    # Calculations - NEW name (Feb 2026)
+    'calculate_expensive_bid',
+    # Alias for backwards compatibility
     'calculate_loser_bid',
 
     # Multi-cycle direction modes - DEPRECATED Jan 31, 2026

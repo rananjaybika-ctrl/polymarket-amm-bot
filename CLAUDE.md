@@ -6,11 +6,22 @@
 
 This file contains 30+ documented mistakes that cost significant time and money. Do not repeat them.
 
+## ⚠️ STRATEGY PIVOT (February 5, 2026)
+
+**AGGRESSIVE (taker-based) is DEPRECATED. New focus: MAKER-PREDICTION.**
+
+| Old Strategy | New Strategy | Key Change |
+|--------------|--------------|------------|
+| AGGRESSIVE (taker) | MAKER-PREDICTION | 0% maker fees, prediction signal |
+
+**Read first:** `research/strategies/STRATEGY_PIVOT_FEB2026.md`
+
 ## Key Files to Know
 
 - `research/reference/TRADING_CONFIGS.py` - **SOURCE OF TRUTH** for all trading parameters
 - `CLAUDE_MISTAKES.md` - Mistakes log (READ THIS)
-- `src/strategies/enhanced_spike.py` - Main AGGRESSIVE strategy
+- `research/strategies/STRATEGY_PIVOT_FEB2026.md` - **NEW** Strategy pivot plan
+- `src/strategies/enhanced_spike.py` - AGGRESSIVE strategy (DEPRECATED)
 - `scripts/run_paper_bot.py` - Live paper trading runner
 
 ## CONFIG WIRING (Jan 31, 2026 FIX)

@@ -1,17 +1,43 @@
 # MASTER PLAN: Production Trading Strategies
 
-**Status:** VALIDATED - EWMA_1000 + TS30 + OBI + DEDUP (February 3, 2026)
-**Strategies:** AGGRESSIVE (Path 1) + CONTRARIAN (Path 2)
+**Status:** PIVOTING - Taker→Maker (February 5, 2026)
+**Old:** AGGRESSIVE (taker-based) - DEPRECATED
+**New:** MAKER-PREDICTION (Path B) + Frank-Wolfe (Path C)
+
+---
+
+## ⚠️ STRATEGY PIVOT (February 5, 2026)
+
+**The AGGRESSIVE taker-based strategy is being deprecated.**
+
+### Why the Pivot?
+
+| Finding | Evidence | Impact |
+|---------|----------|--------|
+| Latency arb NOT viable | BTC velocity r=0.055 (0.3% variance) | 60Hz data useless |
+| Taker fees hurt | 2% on every entry | Eats into edge |
+| Pair building fails | 0/108 configs profitable | Avg pair cost > $1.00 |
+| Prediction HAS edge | Expensive side = 57% baseline | Gabagool gets 67-70% |
+
+### New Strategy: MAKER-PREDICTION
+
+- **Entry**: MAKER (0% fee) via limit orders
+- **Signal**: Prediction (expensive side = likely winner)
+- **Sizing**: Consider Frank-Wolfe optimization
+- **Full spec**: [strategies/STRATEGY_PIVOT_FEB2026.md](strategies/STRATEGY_PIVOT_FEB2026.md)
 
 ---
 
 ## Executive Summary
 
-Two independent, validated trading strategies for Polymarket BTC 15-minute binary markets:
-- **AGGRESSIVE**: EWMA spike detection + full hedge, **$15.20/hr @50sh** (167h validated)
-- **CONTRARIAN**: Bet against BTC direction, ~$618/hr @2500sh
+Three strategy paths for Polymarket BTC 15-minute binary markets:
 
-Both strategies are uncorrelated (different signals, different market conditions) and can run simultaneously.
+| Path | Strategy | Status | Expected |
+|------|----------|--------|----------|
+| **A (OLD)** | AGGRESSIVE (taker) | ⚠️ DEPRECATED | Was $15/hr |
+| **B (NEW)** | MAKER-PREDICTION | 🔧 IN DEVELOPMENT | TBD |
+| **C (NEW)** | Frank-Wolfe Sizing | 🔬 RESEARCH | TBD |
+| **2** | CONTRARIAN | ✅ READY | ~$618/hr @2500sh |
 
 ---
 

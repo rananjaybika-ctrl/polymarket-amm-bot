@@ -1,0 +1,22 @@
+{
+  "mu": -10.327998096788619,
+  "theta": 0.007075404630043366,
+  "xi": 1.6558586403300695,
+  "sigma_stat": 1.6500179384763372,
+  "half_life_sec": 97.96573013177579,
+  "n_samples": 152489,
+  "dt_seconds": 1.0,
+  "mu_sigma_per_sec": 3.2704492741615736e-05,
+  "floor_z_minus1_sigma_per_sec": 6.280782173842468e-06,
+  "train_datasets": [
+    "IS+OOS2",
+    "OOS7"
+  ],
+  "test_datasets": [
+    "OOS3+4",
+    "OOS9",
+    "OOS8",
+    "OOS10"
+  ],
+  "estimation_timestamp": 1770730199.552089
+}

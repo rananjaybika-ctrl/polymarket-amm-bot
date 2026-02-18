@@ -1,59 +1,108 @@
-# What's Next - Polymarket AGGRESSIVE Strategy
+# What's Next - Polymarket Strategy Development
 
-**Updated**: 2026-01-27 (Post Testing Config Deploy)
+**Updated**: 2026-02-05 (Strategy Pivot: Taker → Maker)
 
 ---
 
-## Current Status
+## ⚠️ MAJOR PIVOT: AGGRESSIVE Strategy Deprecated
 
-### DEPLOYED: Testing Configuration (10 shares)
+**Previous approach (taker-based latency arbitrage) is NOT viable.**
 
-| Parameter | Production | Testing (LIVE) |
-|-----------|------------|----------------|
-| `base_size` | 50 | **10** |
-| `high_entry_threshold` | 0.90 | **0.80** |
-| `time_stop_seconds` | 120 | 120 |
-| `min_time_remaining` | 180 | 180 |
+| Finding | Evidence |
+|---------|----------|
+| BTC velocity useless | r = 0.055 (explains 0.3% variance) |
+| 60Hz Binance data | NO latency advantage |
+| Pair building fails | 0/108 configs profitable |
+| Taker fees hurt | 2% on every entry |
 
-**Dashboard:** http://54.170.244.221:8000
+**New focus: MAKER-PREDICTION (Path B) + Frank-Wolfe (Path C)**
 
-**SSH:** `ssh -i ~/Downloads/polymarket-key.pem ubuntu@54.170.244.221`
+---
 
-### Expected Performance (Testing @ 10sh)
+## Current Priorities
 
-| Metric | Backtest |
+### 1. MAKER-PREDICTION Strategy (Path B) 🔧 IN PROGRESS
+
+**Core idea:** Use prediction signal + maker orders (0% fee)
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| Prediction signal | Research | "expensive side = winner" (57% baseline) |
+| Maker order logic | TODO | Limit orders, 2s fill delay simulation |
+| OBI filter | Available | Contrarian (-0.64 correlation like Baguette) |
+| Backtest | TODO | `research/backtests/maker_prediction_backtest.py` |
+
+**Next step:** Create maker_prediction_backtest.py
+
+### 2. Frank-Wolfe Position Sizing (Path C) 🔬 RESEARCH
+
+**Core idea:** Optimize position size based on price coherence
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| Coherence checker | Available | `PolyClaude/polyclaude/strategies/arbitrage/coherence.py` |
+| FW optimizer | Available | `PolyClaude/polyclaude/strategies/arbitrage/optimizer.py` |
+| Integration | TODO | Import to polymarket-amm-bot |
+
+**Next step:** Import FW code, test on historical data
+
+### 3. CONTRARIAN Strategy (Path 2) ✅ READY
+
+Still viable but requires large bankroll ($750/trade).
+
+---
+
+## Files to Create
+
+| File | Purpose | Priority |
+|------|---------|----------|
+| `research/backtests/maker_prediction_backtest.py` | Backtest new strategy | HIGH |
+| `research/strategies/MAKER_PREDICTION.md` | Full strategy spec | HIGH |
+| `src/strategies/maker_prediction.py` | Live implementation | MEDIUM |
+| `src/core/frank_wolfe.py` | FW optimizer (from PolyClaude) | MEDIUM |
+
+## Files Updated (Feb 5, 2026)
+
+| File | Change |
+|------|--------|
+| `research/MASTER_PLAN.md` | Added pivot section, marked AGGRESSIVE deprecated |
+| `research/strategies/AGGRESSIVE.md` | Marked deprecated |
+| `research/strategies/STRATEGY_PIVOT_FEB2026.md` | NEW - Full pivot documentation |
+| `CLAUDE.md` | Added pivot notice, new key files |
+
+---
+
+## Key Research Findings
+
+### Whale Analysis (from WHALE_OBI_ANALYSIS.md)
+
+| Whale | Accuracy | Strategy |
+|-------|----------|----------|
+| Gabagool | 67-70% | Buys expensive side, ~50/50 OBI |
+| Baguette | **82.5%** | Strong OBI contrarian (-0.64), momentum filter |
+
+### Prediction Signal Value
+
+| Signal | Accuracy |
 |--------|----------|
-| $/hr | ~$2.32 |
-| Unhedgeable trades | 0 |
-| Min hedge price | $0.10 |
+| Expensive side (baseline) | 57% |
+| + OBI confirmation | ~65% |
+| + Momentum (60s) | ~70%+ |
+| Baguette (unknown edge) | 82.5% |
 
 ---
 
-## Immediate Next Steps
+## Commands
 
-### 1. Start Live Testing
 ```bash
-# On AWS - restart bot with new config
-ssh -i ~/Downloads/polymarket-key.pem ubuntu@54.170.244.221 'sudo systemctl restart polymarket-bot'
-```
+# SSH to AWS
+ssh -i ~/Downloads/polymarket-key.pem ubuntu@54.170.244.221
 
-### 2. Monitor First Few Trades
-- Check fills are executing correctly
-- Verify hedge orders are placing
-- Watch for any skip messages at >= $0.80
+# Stop bot
+sudo systemctl stop polymarket-bot
 
-### 3. After Validation (1-2 hours of clean trades)
-- [ ] Revert to production config (50sh, skip >= $0.90)
-- [ ] Scale up gradually
-
----
-
-## Production Config (After Testing Validation)
-
-```python
-# scripts/run_paper_bot.py - revert these lines:
-spread_base_size=config.get("base_size", 50),  # Change 10 -> 50
-high_entry_threshold=0.90,                      # Change 0.80 -> 0.90
+# Check logs
+journalctl -u polymarket-bot -f
 ```
 
 ---
@@ -62,35 +111,12 @@ high_entry_threshold=0.90,                      # Change 0.80 -> 0.90
 
 | Document | Purpose |
 |----------|---------|
-| `research/STRATEGY_OPTIMIZATION_PLAN.md` | Full optimization analysis (TIME120s_SKIP) |
-| `research/strategies/AGGRESSIVE.md` | Strategy specification |
-| `research/TRADING_CONFIGS.py` | Python config definitions |
-| `research/MASTER_PLAN.md` | Overview of both strategies |
+| `research/strategies/STRATEGY_PIVOT_FEB2026.md` | **NEW** Pivot plan |
+| `research/MASTER_PLAN.md` | Overall strategy overview |
+| `research/findings/WHALE_OBI_ANALYSIS.md` | Whale trading patterns |
+| `research/findings/gabagool_strategy_decoded.md` | Gabagool analysis |
+| `PolyClaude/research/findings/gabagool_btc_correlation_findings.md` | BTC velocity analysis |
 
 ---
 
-## Strategy Summary
-
-**AGGRESSIVE (Path 1)** - Spike detection + full hedge
-- OU threshold, EWMA z-score, 1200ms lookback
-- 120s time-stop, min_time=180s
-- Skip entries >= threshold (testing: $0.80, production: $0.90)
-- ~$9.00/hr @50sh cross-validated (157.4h, 456 markets)
-
-**CONTRARIAN (Path 2)** - Mean reversion (NOT YET DEPLOYED)
-- $0.30 entry, hold to resolution
-- $618/hr @2500sh, 42% WR
-- Requires larger bankroll ($750/trade)
-
----
-
-## Outstanding Items
-
-- [ ] Validate testing config live (10sh, skip >= $0.80)
-- [ ] Scale to production config (50sh, skip >= $0.90)
-- [ ] Implement hybrid maker/taker entry (saves ~$1/trade)
-- [ ] Deploy CONTRARIAN strategy
-
----
-
-*Testing config deployed: Jan 27, 2026*
+*Strategy pivot started: February 5, 2026*

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Reverse Engineer Trading Strategy for Wallet 0xa5e8...95f5
+Reverse Engineer Trading Strategy for Wallet 0xEd0C...736e (User's wallet)
 
-Comprehensive multi-stage analysis to determine the exact trading strategy
-used by wallet 0xa5e83423126dbc6cdb34f10f37f5d27668ab95f5.
+Comprehensive multi-stage analysis of user's manual trading patterns
+on Polymarket BTC updown markets since November 28, 2025.
 
-Bot started after January 20, 2026.
+Project PHOENIX Session 1: Intelligence Gathering.
 
 Stages:
 1. Discovery - Fetch ALL trades
@@ -33,8 +33,8 @@ from collections import defaultdict
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-WALLET = "0xa5e83423126dbc6cdb34f10f37f5d27668ab95f5"
-START_DATE = datetime(2026, 1, 20, tzinfo=ZoneInfo('UTC'))
+WALLET = "0xEd0C6e5b294F9e46e7CBA71E4AD1c9cFDE66736e"
+START_DATE = datetime(2025, 11, 28, tzinfo=ZoneInfo('UTC'))
 
 # API endpoints
 TRADES_URL = "https://data-api.polymarket.com/trades"
@@ -44,9 +44,9 @@ EVENTS_URL = "https://gamma-api.polymarket.com/events"
 UTC = ZoneInfo('UTC')
 ET = ZoneInfo('America/New_York')
 
-OUTPUT_DIR = "research"
-CSV_FILE = f"{OUTPUT_DIR}/wallet_0xa5e8_trades.csv"
-REPORT_FILE = f"{OUTPUT_DIR}/WALLET_0xa5e8_STRATEGY_ANALYSIS.md"
+OUTPUT_DIR = "research/findings"
+CSV_FILE = f"{OUTPUT_DIR}/wallet_0xEd0C_trades.csv"
+REPORT_FILE = f"{OUTPUT_DIR}/wallet_analysis_0xEd0C.md"
 
 
 # ─── Data Classes ─────────────────────────────────────────────────────────────
@@ -498,6 +498,47 @@ def classify_markets(trades: List[Trade]) -> Dict[str, MarketSummary]:
     print(f"  One-sided markets: {one_sided}")
 
     return markets
+
+
+# ─── Stage 2b: Gambling Market Filter ────────────────────────────────────────
+
+def filter_gambling_markets(
+    markets: Dict[str, MarketSummary]
+) -> Tuple[Dict[str, MarketSummary], Dict[str, MarketSummary]]:
+    """
+    Filter out gambling markets where position imbalance > 3:1.
+    User acknowledged gambling on those; they're not representative of strategy.
+    """
+    strategic = {}
+    gambling = {}
+
+    for key, ms in markets.items():
+        total_shares = abs(ms.net_up_shares) + abs(ms.net_down_shares)
+        if total_shares == 0:
+            strategic[key] = ms
+            continue
+
+        # Check imbalance: if one side > 3x the other, it's gambling
+        up_abs = abs(ms.net_up_shares)
+        down_abs = abs(ms.net_down_shares)
+        bigger = max(up_abs, down_abs)
+        smaller = max(min(up_abs, down_abs), 0.01)  # avoid div by 0
+
+        if ms.is_two_sided and bigger / smaller > 3.0:
+            gambling[key] = ms
+        elif not ms.is_two_sided:
+            # One-sided is fine — that's directional trading, not gambling
+            strategic[key] = ms
+        else:
+            strategic[key] = ms
+
+    if gambling:
+        print(f"\n  Gambling markets filtered (imbalance > 3:1):")
+        for key, ms in gambling.items():
+            title = ms.title[:50] if ms.title else ms.condition_id[:20]
+            print(f"    {title} | UP:{ms.net_up_shares:.0f} DOWN:{ms.net_down_shares:.0f}")
+
+    return strategic, gambling
 
 
 # ─── Stage 3: Strategy Pattern Analysis ──────────────────────────────────────
@@ -1080,17 +1121,20 @@ def detect_maker_taker(trades: List[Trade]):
 
     print(f"\n  Maker trades: {len(makers)}")
     print(f"  Taker trades: {len(takers)}")
-    print(f"  Unknown:      {len(unknown)}")
+    print(f"  Unknown (API didn't return maker/taker): {len(unknown)}")
 
-    if total_known > 0:
+    if len(unknown) > len(trades) * 0.5:
+        print(f"\n  NOTE: API did not return maker/taker addresses for {len(unknown)}/{len(trades)} trades.")
+        print(f"  Cannot determine maker vs taker from API data alone.")
+        print(f"  User reports posting LIMIT ORDERS (maker) for most trades.")
+    elif total_known > 0:
         print(f"  Maker %:      {len(makers)/total_known*100:.1f}%")
-        print(f"\n  -> {'MAKER-dominated' if len(makers) > len(takers) else 'TAKER-dominated'} strategy")
         if len(makers) > total_known * 0.7:
-            print(f"     Bot primarily POSTS limit orders (passive market making)")
+            print(f"\n  -> MAKER-dominated: primarily POSTS limit orders")
         elif len(takers) > total_known * 0.7:
-            print(f"     Bot primarily TAKES from orderbook (aggressive/momentum)")
+            print(f"\n  -> TAKER-dominated: primarily TAKES from orderbook")
         else:
-            print(f"     Bot uses a MIX of maker and taker orders")
+            print(f"\n  -> MIX of maker and taker orders")
 
 
 def detect_cycling_behavior(markets: Dict[str, MarketSummary]):
@@ -1168,6 +1212,270 @@ def detect_timing_patterns(trades: List[Trade], markets: Dict[str, MarketSummary
 
         top_minutes = sorted(min_counts.items(), key=lambda x: -x[1])[:5]
         print(f"\n  Most common first-trade minutes: {top_minutes}")
+
+
+# ─── Stage 4b: PHOENIX-Specific Analysis ─────────────────────────────────────
+
+def analyze_phoenix_patterns(trades: List[Trade], markets: Dict[str, MarketSummary]):
+    """
+    PHOENIX-specific analysis: hedging, time-to-hedge, double-down,
+    entry timing relative to overreactions.
+    """
+    print("\n" + "=" * 70)
+    print("STAGE 4b: PHOENIX-SPECIFIC ANALYSIS")
+    print("=" * 70)
+
+    # 4b-1: Hedging Analysis — Time to hedge after initial entry
+    print(f"\n{'─' * 60}")
+    print("4b-1. HEDGING PATTERNS (Time-to-Hedge)")
+    print("─" * 60)
+
+    hedge_delays = []
+    hedge_markets = []
+    for ms in markets.values():
+        if not ms.is_two_sided or len(ms.trades) < 2:
+            continue
+        # Find first UP buy and first DOWN buy
+        first_up_ts = None
+        first_down_ts = None
+        first_up_price = None
+        first_down_price = None
+        for t in ms.trades:
+            if t.side == "BUY":
+                if t.outcome.lower() == "up" and first_up_ts is None:
+                    first_up_ts = t.timestamp
+                    first_up_price = t.price
+                elif t.outcome.lower() == "down" and first_down_ts is None:
+                    first_down_ts = t.timestamp
+                    first_down_price = t.price
+            if first_up_ts and first_down_ts:
+                break
+
+        if first_up_ts and first_down_ts:
+            delay = abs(first_down_ts - first_up_ts)
+            hedge_delays.append(delay)
+            # Determine which was entry vs hedge
+            if first_up_ts < first_down_ts:
+                entry_side, entry_price, hedge_price = "UP", first_up_price, first_down_price
+            else:
+                entry_side, entry_price, hedge_price = "DOWN", first_down_price, first_up_price
+            pair_cost = entry_price + hedge_price
+            hedge_markets.append({
+                "slug": ms.slug,
+                "entry_side": entry_side,
+                "entry_price": entry_price,
+                "hedge_price": hedge_price,
+                "pair_cost": pair_cost,
+                "delay_s": delay,
+                "resolution": ms.resolution,
+                "pnl": ms.pnl,
+            })
+
+    if hedge_delays:
+        print(f"\n  Two-sided markets: {len(hedge_delays)}")
+        print(f"  Time to hedge (first entry → first hedge):")
+        print(f"    Min:    {min(hedge_delays):.1f}s")
+        print(f"    Max:    {max(hedge_delays):.1f}s")
+        print(f"    Mean:   {statistics.mean(hedge_delays):.1f}s")
+        print(f"    Median: {statistics.median(hedge_delays):.1f}s")
+
+        # Quick hedges (<30s) vs slow hedges
+        quick = sum(1 for d in hedge_delays if d < 30)
+        medium = sum(1 for d in hedge_delays if 30 <= d < 120)
+        slow = sum(1 for d in hedge_delays if d >= 120)
+        print(f"    <30s:  {quick} ({quick/len(hedge_delays)*100:.0f}%)")
+        print(f"    30-120s: {medium} ({medium/len(hedge_delays)*100:.0f}%)")
+        print(f"    >120s: {slow} ({slow/len(hedge_delays)*100:.0f}%)")
+
+        # Pair cost distribution for hedged trades
+        pair_costs = [h["pair_cost"] for h in hedge_markets]
+        print(f"\n  Pair Cost Distribution:")
+        print(f"    Min:    ${min(pair_costs):.4f}")
+        print(f"    Max:    ${max(pair_costs):.4f}")
+        print(f"    Mean:   ${statistics.mean(pair_costs):.4f}")
+        print(f"    Median: ${statistics.median(pair_costs):.4f}")
+        profitable = sum(1 for pc in pair_costs if pc < 1.0)
+        print(f"    Profitable (<$1.00): {profitable}/{len(pair_costs)} ({profitable/len(pair_costs)*100:.0f}%)")
+    else:
+        print("\n  No two-sided markets found.")
+
+    # 4b-2: Entry Side Analysis — Did user buy cheap or expensive first?
+    print(f"\n{'─' * 60}")
+    print("4b-2. ENTRY SIDE ANALYSIS (Cheap vs Expensive first)")
+    print("─" * 60)
+
+    if hedge_markets:
+        entry_prices = [h["entry_price"] for h in hedge_markets]
+        hedge_prices = [h["hedge_price"] for h in hedge_markets]
+        cheap_first = sum(1 for h in hedge_markets if h["entry_price"] < h["hedge_price"])
+        expensive_first = len(hedge_markets) - cheap_first
+
+        print(f"\n  Cheap side first:    {cheap_first} ({cheap_first/len(hedge_markets)*100:.0f}%)")
+        print(f"  Expensive side first: {expensive_first} ({expensive_first/len(hedge_markets)*100:.0f}%)")
+        print(f"  Avg entry price:      ${statistics.mean(entry_prices):.3f}")
+        print(f"  Avg hedge price:      ${statistics.mean(hedge_prices):.3f}")
+
+        # Win rate by entry side
+        if cheap_first > 0:
+            cheap_wins = sum(1 for h in hedge_markets
+                           if h["entry_price"] < h["hedge_price"]
+                           and h["pnl"] is not None and h["pnl"] > 0)
+            cheap_resolved = sum(1 for h in hedge_markets
+                               if h["entry_price"] < h["hedge_price"]
+                               and h["pnl"] is not None)
+            if cheap_resolved > 0:
+                print(f"  Win rate (cheap first):    {cheap_wins}/{cheap_resolved} ({cheap_wins/cheap_resolved*100:.0f}%)")
+
+        if expensive_first > 0:
+            exp_wins = sum(1 for h in hedge_markets
+                         if h["entry_price"] >= h["hedge_price"]
+                         and h["pnl"] is not None and h["pnl"] > 0)
+            exp_resolved = sum(1 for h in hedge_markets
+                             if h["entry_price"] >= h["hedge_price"]
+                             and h["pnl"] is not None)
+            if exp_resolved > 0:
+                print(f"  Win rate (expensive first): {exp_wins}/{exp_resolved} ({exp_wins/exp_resolved*100:.0f}%)")
+
+    # 4b-3: Double-Down Detection
+    print(f"\n{'─' * 60}")
+    print("4b-3. DOUBLE-DOWN DETECTION")
+    print("─" * 60)
+
+    double_down_markets = []
+    for ms in markets.values():
+        if len(ms.trades) < 3:
+            continue
+
+        # Group buys by outcome and look for multiple entries on same side
+        up_buys_ts = [(t.timestamp, t.price, t.size) for t in ms.trades if t.side == "BUY" and t.outcome.lower() == "up"]
+        down_buys_ts = [(t.timestamp, t.price, t.size) for t in ms.trades if t.side == "BUY" and t.outcome.lower() == "down"]
+
+        # Double-down = buying the SAME side at different prices (>2s apart)
+        for side_name, side_buys in [("UP", up_buys_ts), ("DOWN", down_buys_ts)]:
+            if len(side_buys) < 2:
+                continue
+
+            # Check if buys are spaced out (not simultaneous grid fills)
+            spaced_buys = []
+            for i, (ts, price, size) in enumerate(side_buys):
+                if i == 0 or ts - side_buys[i-1][0] > 2.0:
+                    spaced_buys.append((ts, price, size))
+
+            if len(spaced_buys) >= 2:
+                double_down_markets.append({
+                    "slug": ms.slug,
+                    "side": side_name,
+                    "n_entries": len(spaced_buys),
+                    "prices": [p for _, p, _ in spaced_buys],
+                    "total_cost": ms.up_cost if side_name == "UP" else ms.down_cost,
+                    "pnl": ms.pnl,
+                })
+
+    print(f"\n  Markets with double-down: {len(double_down_markets)}")
+    if double_down_markets:
+        dd_wins = sum(1 for d in double_down_markets if d["pnl"] is not None and d["pnl"] > 0)
+        dd_resolved = sum(1 for d in double_down_markets if d["pnl"] is not None)
+        if dd_resolved > 0:
+            print(f"  Win rate on DD markets: {dd_wins}/{dd_resolved} ({dd_wins/dd_resolved*100:.0f}%)")
+
+        # Price trend in double-downs
+        dd_higher = 0
+        dd_lower = 0
+        for d in double_down_markets:
+            if len(d["prices"]) >= 2:
+                if d["prices"][-1] > d["prices"][0]:
+                    dd_higher += 1
+                else:
+                    dd_lower += 1
+        print(f"  Bought at higher price: {dd_higher}")
+        print(f"  Bought at lower price (averaging down): {dd_lower}")
+
+        # Show examples
+        print(f"\n  Examples:")
+        for d in double_down_markets[:5]:
+            prices_str = " → ".join(f"${p:.3f}" for p in d["prices"])
+            pnl_str = f"${d['pnl']:.2f}" if d["pnl"] is not None else "?"
+            print(f"    {d['slug'][:40]}: {d['side']} {prices_str} | PnL={pnl_str}")
+
+    # 4b-4: "Overreaction Entry" Detection
+    print(f"\n{'─' * 60}")
+    print("4b-4. OVERREACTION ENTRY DETECTION")
+    print("─" * 60)
+
+    # Identify entries where the user bought cheap side (< $0.35)
+    cheap_entries = []
+    expensive_entries = []
+    for ms in markets.values():
+        if not ms.trades:
+            continue
+
+        # First buy determines "entry"
+        first_buy = next((t for t in ms.trades if t.side == "BUY"), None)
+        if not first_buy:
+            continue
+
+        if first_buy.price < 0.35:
+            cheap_entries.append({
+                "price": first_buy.price,
+                "outcome": first_buy.outcome,
+                "pnl": ms.pnl,
+                "resolution": ms.resolution,
+            })
+        elif first_buy.price > 0.55:
+            expensive_entries.append({
+                "price": first_buy.price,
+                "outcome": first_buy.outcome,
+                "pnl": ms.pnl,
+                "resolution": ms.resolution,
+            })
+
+    print(f"\n  First-entry price < $0.35 (cheap/contrarian): {len(cheap_entries)}")
+    if cheap_entries:
+        avg_cheap = statistics.mean([e["price"] for e in cheap_entries])
+        cheap_wins = sum(1 for e in cheap_entries if e["pnl"] is not None and e["pnl"] > 0)
+        cheap_resolved = sum(1 for e in cheap_entries if e["pnl"] is not None)
+        print(f"    Avg price: ${avg_cheap:.3f}")
+        if cheap_resolved > 0:
+            print(f"    Win rate:  {cheap_wins}/{cheap_resolved} ({cheap_wins/cheap_resolved*100:.0f}%)")
+
+    print(f"\n  First-entry price > $0.55 (expensive/FADE): {len(expensive_entries)}")
+    if expensive_entries:
+        avg_exp = statistics.mean([e["price"] for e in expensive_entries])
+        exp_wins = sum(1 for e in expensive_entries if e["pnl"] is not None and e["pnl"] > 0)
+        exp_resolved = sum(1 for e in expensive_entries if e["pnl"] is not None)
+        print(f"    Avg price: ${avg_exp:.3f}")
+        if exp_resolved > 0:
+            print(f"    Win rate:  {exp_wins}/{exp_resolved} ({exp_wins/exp_resolved*100:.0f}%)")
+
+    mid_entries = len(markets) - len(cheap_entries) - len(expensive_entries)
+    print(f"\n  Mid-range entries ($0.35-$0.55): {mid_entries}")
+
+    # 4b-5: Position Duration
+    print(f"\n{'─' * 60}")
+    print("4b-5. POSITION DURATION")
+    print("─" * 60)
+
+    durations = []
+    for ms in markets.values():
+        if ms.first_trade_dt and ms.last_trade_dt:
+            dur = (ms.last_trade_dt - ms.first_trade_dt).total_seconds()
+            if dur > 0:
+                durations.append(dur)
+
+    if durations:
+        print(f"\n  Duration (first → last trade in market):")
+        print(f"    Min:    {min(durations):.0f}s")
+        print(f"    Max:    {max(durations):.0f}s")
+        print(f"    Mean:   {statistics.mean(durations):.0f}s")
+        print(f"    Median: {statistics.median(durations):.0f}s")
+
+    # 4b-6: Order Type Note
+    print(f"\n{'─' * 60}")
+    print("4b-6. ORDER TYPE NOTE")
+    print("─" * 60)
+    print(f"\n  API does not reliably report maker/taker addresses for this wallet.")
+    print(f"  User reports posting LIMIT ORDERS (maker) for most entries.")
+    print(f"  Implication: User pays 0% maker fees (not 1.56% taker fees).")
 
 
 # ─── Stage 5: Strategy Hypothesis & Report ───────────────────────────────────
@@ -1303,7 +1611,7 @@ def generate_markdown_report(
     time_span = (trades[-1].timestamp - trades[0].timestamp) / 3600 if len(trades) > 1 else 0
 
     lines = [
-        f"# Strategy Analysis: Wallet 0xa5e8...95f5",
+        f"# Wallet Analysis: 0xEd0C...736e (User Manual Trading)",
         f"",
         f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}",
         f"**Wallet:** `{WALLET}`",
@@ -1517,11 +1825,45 @@ def main():
     # Stage 2: Classify markets
     markets = classify_markets(trades)
 
+    # Stage 2b: Filter out gambling markets (position imbalance > 3:1)
+    filtered_markets, gambling_markets = filter_gambling_markets(markets)
+    filtered_trades = [t for t in trades if (t.condition_id or t.market_slug) in filtered_markets]
+    print(f"\n  After filtering gambling markets: {len(filtered_markets)} strategic, {len(gambling_markets)} gambling")
+    print(f"  Trades: {len(filtered_trades)} strategic, {len(trades) - len(filtered_trades)} gambling")
+
+    # Stage 2c: Filter out markets with ANY sell orders
+    # User posted limit orders (maker), sells represent position exits / different activity
+    sell_market_keys = set()
+    for t in filtered_trades:
+        if t.side == "SELL":
+            key = t.condition_id or t.market_slug
+            sell_market_keys.add(key)
+
+    buy_only_markets = {k: v for k, v in filtered_markets.items() if k not in sell_market_keys}
+    sell_markets = {k: v for k, v in filtered_markets.items() if k in sell_market_keys}
+    buy_only_trades = [t for t in filtered_trades if (t.condition_id or t.market_slug) in buy_only_markets]
+
+    print(f"\n  After filtering sell-markets: {len(buy_only_markets)} buy-only, {len(sell_markets)} had sells")
+    print(f"  Trades: {len(buy_only_trades)} buy-only")
+    if sell_markets:
+        print(f"  Removed markets with sells:")
+        for key, ms in sell_markets.items():
+            title = ms.title[:50] if ms.title else ms.condition_id[:20]
+            sells = ms.up_sells + ms.down_sells
+            print(f"    {title} | {sells} sells")
+
+    # Use filtered data for analysis
+    markets = buy_only_markets
+    trades = buy_only_trades
+
     # Stage 3: Strategy patterns
     analyze_patterns(trades, markets)
 
     # Stage 4: Advanced patterns
     detect_advanced_patterns(trades, markets)
+
+    # Stage 4b: PHOENIX-specific analysis
+    analyze_phoenix_patterns(trades, markets)
 
     # Stage 5: Generate report
     report = generate_report(trades, markets)

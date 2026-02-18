@@ -44,7 +44,7 @@ from src.core import (
     obi_confirms_spike,
     should_take_spike_enhanced,
     compute_enhanced_score,
-    calculate_loser_bid as calculate_loser_bid_core,
+    calculate_expensive_bid as calculate_expensive_bid_core,
     # Constants
     VELOCITY_CONFIRM_THRESHOLD,
     ENHANCED_SCORE_THRESHOLD,
@@ -78,7 +78,7 @@ OU_SIGMOID_STEEPNESS = 1.5
 OU_MIN_THRESHOLD = 0.015
 OU_MAX_THRESHOLD = 0.10
 
-# Loser bid calculation (match grid search)
+# Expensive bid calculation (match grid search)
 DROP_MULTIPLIER = 0.50
 DROP_INTERCEPT = 0.08
 TARGET_PAIR_COST = 0.99
@@ -104,8 +104,8 @@ ENTRY_DELAY_ROWS = 3       # 542ms / 200ms = 2.7 → round to 3 rows (conservati
 # =============================================================================
 # BREAKEVEN EXIT - Real-time profit threshold monitoring
 # =============================================================================
-# When enabled, checks every tick if winner_bid <= entry_price (breakeven/loss).
-# If so, exits immediately at market (loser_ask) instead of waiting for time-stop.
+# When enabled, checks every tick if spike_bid <= entry_price (breakeven/loss).
+# If so, exits immediately at market (expensive_ask) instead of waiting for time-stop.
 # This catches exits at ~$1.00 pair cost instead of $1.04 from 5s polling delay.
 BREAKEVEN_EXIT_ENABLED = True  # Set False to compare with/without breakeven exit
 BREAKEVEN_MIN_HOLD_MS = getattr(AGGRESSIVE_CONFIG, 'breakeven_min_hold_ms', 10000)  # From TRADING_CONFIGS (10s winner)
@@ -181,9 +181,9 @@ class TradeResult:
     cycle_num: int
     entry_time_remaining: float
     signal_score: float
-    winner_side: str
-    winner_fill_price: float
-    loser_fill_price: float
+    spike_side: str
+    spike_fill_price: float
+    expensive_fill_price: float
     hedge_type: str  # "passive", "time_stop", "resolution"
     pair_cost: float
     pnl_gross: float
@@ -463,12 +463,12 @@ def precompute_spikes_ou(btc_df: pd.DataFrame, lookback: int = SPIKE_LOOKBACK) -
     return precompute_spikes_fixed(btc_df, lookback)
 
 
-def calculate_loser_bid(winner_entry: float, spike_magnitude: float) -> float:
-    """Calculate loser bid - matches grid search TestConfig.calculate_loser_bid()."""
+def calculate_expensive_bid(spike_entry: float, spike_magnitude: float) -> float:
+    """Calculate expensive bid - matches grid search TestConfig.calculate_expensive_bid()."""
     expected_drop = DROP_MULTIPLIER * spike_magnitude + DROP_INTERCEPT
-    max_loser = TARGET_PAIR_COST - winner_entry
-    loser_bid = min((1.0 - winner_entry) - expected_drop, max_loser)
-    return max(0.01, min(0.95, loser_bid))
+    max_expensive = TARGET_PAIR_COST - spike_entry
+    expensive_bid = min((1.0 - spike_entry) - expected_drop, max_expensive)
+    return max(0.01, min(0.95, expensive_bid))
 
 
 # =============================================================================
@@ -525,21 +525,21 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                     obs_idx += 1
                     continue
 
-                loser_side = position_data['loser_side']
-                loser_target = position_data['loser_target']
-                winner_entry = position_data['winner_entry']
+                expensive_side = position_data['expensive_side']
+                expensive_target = position_data['expensive_target']
+                spike_entry = position_data['spike_entry']
                 spike_mag = position_data['spike_magnitude']
                 score = position_data['score']
 
-                if loser_side == "UP":
-                    loser_ask = obs_row['up_ask']
+                if expensive_side == "UP":
+                    expensive_ask = obs_row['up_ask']
                 else:
-                    loser_ask = obs_row['down_ask']
+                    expensive_ask = obs_row['down_ask']
 
                 # Check passive fill: when market ask drops to our bid, we get filled at OUR bid price
-                if pd.notna(loser_ask) and loser_ask <= loser_target:
+                if pd.notna(expensive_ask) and expensive_ask <= expensive_target:
                     pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
-                        winner_entry, loser_target, TARGET_SHARES,
+                        spike_entry, expensive_target, TARGET_SHARES,
                         is_taker_entry=True,
                         is_taker_exit=False
                     )
@@ -549,16 +549,16 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                         cycle_num=cycle_num,
                         entry_time_remaining=position_data['entry_time_rem'],
                         signal_score=score,
-                        winner_side=position_data['winner_side'],
-                        winner_fill_price=winner_entry,
-                        loser_fill_price=loser_target,
+                        spike_side=position_data['spike_side'],
+                        spike_fill_price=spike_entry,
+                        expensive_fill_price=expensive_target,
                         hedge_type="passive",
-                        pair_cost=winner_entry + loser_target,
+                        pair_cost=spike_entry + expensive_target,
                         pnl_gross=pnl_gross,
                         pnl_net=pnl_net,
                         entry_fee=entry_fee,
                         exit_fee=exit_fee,
-                        correct_direction=(resolution == position_data['winner_side']),
+                        correct_direction=(resolution == position_data['spike_side']),
                         spike_magnitude=spike_mag,
                         dataset=dataset_name,
                         offset_name="CURRENT",
@@ -573,25 +573,25 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                     break
 
                 # =========================================================
-                # BREAKEVEN EXIT: Check if winner_bid <= entry_price
+                # BREAKEVEN EXIT: Check if spike_bid <= entry_price
                 # This catches the exact moment we hit breakeven/loss
                 # Exit immediately at market to get ~$1.00 pair cost
                 # instead of waiting for time-stop at $1.04
                 # =========================================================
                 elapsed_ms = obs_ts - entry_ts
                 if BREAKEVEN_EXIT_ENABLED and elapsed_ms >= BREAKEVEN_MIN_HOLD_MS:
-                    winner_side_current = position_data['winner_side']
-                    if winner_side_current == "UP":
-                        winner_bid_current = obs_row['up_bid']
+                    spike_side_current = position_data['spike_side']
+                    if spike_side_current == "UP":
+                        spike_bid_current = obs_row['up_bid']
                     else:
-                        winner_bid_current = obs_row['down_bid']
+                        spike_bid_current = obs_row['down_bid']
 
-                    # Breakeven = winner_bid <= entry (not strictly less - includes equal)
-                    if pd.notna(winner_bid_current) and winner_bid_current <= winner_entry:
-                        # Exit at market (loser_ask) - same as time-stop but triggered earlier
-                        loser_fill = loser_ask if pd.notna(loser_ask) else loser_target * 1.05
+                    # Breakeven = spike_bid <= entry (not strictly less - includes equal)
+                    if pd.notna(spike_bid_current) and spike_bid_current <= spike_entry:
+                        # Exit at market (expensive_ask) - same as time-stop but triggered earlier
+                        expensive_fill = expensive_ask if pd.notna(expensive_ask) else expensive_target * 1.05
                         pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
-                            winner_entry, loser_fill, TARGET_SHARES,
+                            spike_entry, expensive_fill, TARGET_SHARES,
                             is_taker_entry=True,
                             is_taker_exit=True  # Market order = taker
                         )
@@ -601,16 +601,16 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                             cycle_num=cycle_num,
                             entry_time_remaining=position_data['entry_time_rem'],
                             signal_score=score,
-                            winner_side=position_data['winner_side'],
-                            winner_fill_price=winner_entry,
-                            loser_fill_price=loser_fill,
+                            spike_side=position_data['spike_side'],
+                            spike_fill_price=spike_entry,
+                            expensive_fill_price=expensive_fill,
                             hedge_type="breakeven",  # New hedge type
-                            pair_cost=winner_entry + loser_fill,
+                            pair_cost=spike_entry + expensive_fill,
                             pnl_gross=pnl_gross,
                             pnl_net=pnl_net,
                             entry_fee=entry_fee,
                             exit_fee=exit_fee,
-                            correct_direction=(resolution == position_data['winner_side']),
+                            correct_direction=(resolution == position_data['spike_side']),
                             spike_magnitude=spike_mag,
                             dataset=dataset_name,
                             offset_name="CURRENT",
@@ -627,18 +627,18 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                 # Check time-stop (ONLY if NOT in profit) - matches grid search
                 # elapsed_ms already calculated above for breakeven check
                 if time_stop_ms > 0 and elapsed_ms >= time_stop_ms:
-                    winner_side_current = position_data['winner_side']
-                    if winner_side_current == "UP":
-                        winner_bid_current = obs_row['up_bid']
+                    spike_side_current = position_data['spike_side']
+                    if spike_side_current == "UP":
+                        spike_bid_current = obs_row['up_bid']
                     else:
-                        winner_bid_current = obs_row['down_bid']
+                        spike_bid_current = obs_row['down_bid']
 
-                    in_profit = pd.notna(winner_bid_current) and winner_bid_current >= winner_entry
+                    in_profit = pd.notna(spike_bid_current) and spike_bid_current >= spike_entry
 
                     if not in_profit:
-                        loser_fill = loser_ask if pd.notna(loser_ask) else loser_target * 1.05
+                        expensive_fill = expensive_ask if pd.notna(expensive_ask) else expensive_target * 1.05
                         pnl_net, pnl_gross, entry_fee, exit_fee = calculate_pnl_with_fees(
-                            winner_entry, loser_fill, TARGET_SHARES,
+                            spike_entry, expensive_fill, TARGET_SHARES,
                             is_taker_entry=True,
                             is_taker_exit=True
                         )
@@ -648,16 +648,16 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                             cycle_num=cycle_num,
                             entry_time_remaining=position_data['entry_time_rem'],
                             signal_score=score,
-                            winner_side=position_data['winner_side'],
-                            winner_fill_price=winner_entry,
-                            loser_fill_price=loser_fill,
+                            spike_side=position_data['spike_side'],
+                            spike_fill_price=spike_entry,
+                            expensive_fill_price=expensive_fill,
                             hedge_type="time_stop",
-                            pair_cost=winner_entry + loser_fill,
+                            pair_cost=spike_entry + expensive_fill,
                             pnl_gross=pnl_gross,
                             pnl_net=pnl_net,
                             entry_fee=entry_fee,
                             exit_fee=exit_fee,
-                            correct_direction=(resolution == position_data['winner_side']),
+                            correct_direction=(resolution == position_data['spike_side']),
                             spike_magnitude=spike_mag,
                             dataset=dataset_name,
                             offset_name="CURRENT",
@@ -675,18 +675,18 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
 
             # If we ran out of observer data while in position
             if in_position and obs_idx >= len(mdf):
-                winner_side = position_data['winner_side']
-                winner_entry = position_data['winner_entry']
+                spike_side = position_data['spike_side']
+                spike_entry = position_data['spike_entry']
                 shares = TARGET_SHARES
 
-                entry_fee = polymarket_taker_fee(winner_entry) * winner_entry * shares
+                entry_fee = polymarket_taker_fee(spike_entry) * spike_entry * shares
 
-                if resolution == winner_side:
-                    pnl_gross = (1.0 - winner_entry) * shares
-                    loser_fill = 0.0
+                if resolution == spike_side:
+                    pnl_gross = (1.0 - spike_entry) * shares
+                    expensive_fill = 0.0
                 else:
-                    pnl_gross = (0.0 - winner_entry) * shares
-                    loser_fill = 1.0
+                    pnl_gross = (0.0 - spike_entry) * shares
+                    expensive_fill = 1.0
 
                 pnl_net = pnl_gross - entry_fee
 
@@ -695,16 +695,16 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
                     cycle_num=cycle_num,
                     entry_time_remaining=position_data['entry_time_rem'],
                     signal_score=position_data['score'],
-                    winner_side=winner_side,
-                    winner_fill_price=winner_entry,
-                    loser_fill_price=loser_fill,
+                    spike_side=spike_side,
+                    spike_fill_price=spike_entry,
+                    expensive_fill_price=expensive_fill,
                     hedge_type="resolution",
-                    pair_cost=winner_entry + loser_fill,
+                    pair_cost=spike_entry + expensive_fill,
                     pnl_gross=pnl_gross,
                     pnl_net=pnl_net,
                     entry_fee=entry_fee,
                     exit_fee=0.0,
-                    correct_direction=(resolution == winner_side),
+                    correct_direction=(resolution == spike_side),
                     spike_magnitude=position_data['spike_magnitude'],
                     dataset=dataset_name,
                     offset_name="CURRENT",
@@ -760,71 +760,71 @@ def simulate_market_precomputed(btc_spikes: pd.DataFrame, obs_df: pd.DataFrame,
             continue
 
         # Get prices first (needed for enhanced OBI filter)
-        winner_side = spike_dir
-        if winner_side == "UP":
-            winner_ask = obs_row['up_ask']
-            loser_bid = obs_row.get('down_bid', None)
-            loser_ask = obs_row.get('down_ask', None)
-            obi_winner = obs_row.get('up_imbalance', None)
+        spike_side = spike_dir
+        if spike_side == "UP":
+            spike_ask = obs_row['up_ask']
+            expensive_bid = obs_row.get('down_bid', None)
+            expensive_ask = obs_row.get('down_ask', None)
+            obi_spike = obs_row.get('up_imbalance', None)
         else:
-            winner_ask = obs_row['down_ask']
-            loser_bid = obs_row.get('up_bid', None)
-            loser_ask = obs_row.get('up_ask', None)
-            obi_winner = obs_row.get('down_imbalance', None)
+            spike_ask = obs_row['down_ask']
+            expensive_bid = obs_row.get('up_bid', None)
+            expensive_ask = obs_row.get('up_ask', None)
+            obi_spike = obs_row.get('down_imbalance', None)
 
-        if pd.isna(winner_ask) or winner_ask >= HIGH_ENTRY_THRESHOLD:
+        if pd.isna(spike_ask) or spike_ask >= HIGH_ENTRY_THRESHOLD:
             spike_idx += 1
             continue
 
-        # Enhanced OBI filter (uses loser spread, time remaining, OBI magnitude)
+        # Enhanced OBI filter (uses expensive spread, time remaining, OBI magnitude)
         if use_obi_filter:
-            if obi_winner is not None and not np.isnan(obi_winner):
-                # Calculate loser spread
-                loser_spread = 0.05  # Default
-                if pd.notna(loser_bid) and pd.notna(loser_ask):
-                    loser_spread = loser_ask - loser_bid
+            if obi_spike is not None and not np.isnan(obi_spike):
+                # Calculate expensive spread
+                expensive_spread = 0.05  # Default
+                if pd.notna(expensive_bid) and pd.notna(expensive_ask):
+                    expensive_spread = expensive_ask - expensive_bid
 
                 should_take, reject_reason = should_take_spike_enhanced(
                     spike_direction=spike_dir,
-                    obi_winner=obi_winner,
-                    loser_spread=loser_spread,
+                    obi_spike=obi_spike,
+                    expensive_spread=expensive_spread,
                     time_remaining=time_rem,
-                    winner_ask_depth=None,  # Depth not available in observer data
+                    spike_ask_depth=None,  # Depth not available in observer data
                 )
                 if not should_take:
                     spike_idx += 1
                     continue
 
-        # ENTRY - use local loser bid calculation (matches grid search)
+        # ENTRY - use local expensive bid calculation (matches grid search)
         # ENTRY DELAY FIX (Feb 5, 2026): Simulate 542ms taker delay
         # Look ahead in observer data to get the fill price AFTER delay
         delayed_obs_idx = min(obs_idx + ENTRY_DELAY_ROWS, len(mdf) - 1)
         delayed_obs_row = mdf.iloc[delayed_obs_idx]
 
         # Get the delayed fill price (what we actually pay after 542ms)
-        if winner_side == "UP":
-            winner_ask_delayed = delayed_obs_row['up_ask']
+        if spike_side == "UP":
+            spike_ask_delayed = delayed_obs_row['up_ask']
         else:
-            winner_ask_delayed = delayed_obs_row['down_ask']
+            spike_ask_delayed = delayed_obs_row['down_ask']
 
         # SKIP RULE RE-CHECK: If delayed price is too high, reject entry
         # This matches paper trading behavior where fills are rejected if
         # market moves against us during the delay
-        if pd.isna(winner_ask_delayed) or winner_ask_delayed >= HIGH_ENTRY_THRESHOLD:
+        if pd.isna(spike_ask_delayed) or spike_ask_delayed >= HIGH_ENTRY_THRESHOLD:
             spike_idx += 1
             continue
 
         cycle_num += 1
-        loser_side = "DOWN" if winner_side == "UP" else "UP"
-        winner_entry = winner_ask_delayed  # USE DELAYED PRICE, not instant
-        loser_target = calculate_loser_bid(winner_entry, spike_mag)
+        expensive_side = "DOWN" if spike_side == "UP" else "UP"
+        spike_entry = spike_ask_delayed  # USE DELAYED PRICE, not instant
+        expensive_target = calculate_expensive_bid(spike_entry, spike_mag)
 
         in_position = True
         position_data = {
-            'winner_side': winner_side,
-            'loser_side': loser_side,
-            'winner_entry': winner_entry,
-            'loser_target': loser_target,
+            'spike_side': spike_side,
+            'expensive_side': expensive_side,
+            'spike_entry': spike_entry,
+            'expensive_target': expensive_target,
             'entry_ts': spike_ts,
             'entry_time_rem': time_rem,
             'spike_magnitude': spike_mag,

@@ -1,0 +1,4142 @@
+{
+  "summary": {
+    "total_markets": 516,
+    "agrees": 499,
+    "disagrees": 17,
+    "agreement_pct": 96.7,
+    "offset_mean_usd": 1.86,
+    "offset_median_usd": 1.78,
+    "offset_stdev_usd": 20.48,
+    "live_measured_offset": -50.51
+  },
+  "markets": {
+    "btc-updown-15m-1768592700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 94962.21,
+      "inferred_chainlink_strike": 94962.21,
+      "offset_usd": null,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768593600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95000.15,
+      "inferred_chainlink_strike": 95030.57,
+      "offset_usd": -30.42,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768594500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 94874.61,
+      "inferred_chainlink_strike": 94855.04,
+      "offset_usd": 19.57,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768595400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95115.51,
+      "inferred_chainlink_strike": 95129.76,
+      "offset_usd": -14.25,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768599000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95421.86,
+      "inferred_chainlink_strike": 95436.16,
+      "offset_usd": -14.3,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768600800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95505.07,
+      "inferred_chainlink_strike": 95488.97,
+      "offset_usd": 16.1,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768601700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95378.49,
+      "inferred_chainlink_strike": 95369.57,
+      "offset_usd": 8.92,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768602600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95460.58,
+      "inferred_chainlink_strike": 95467.72,
+      "offset_usd": -7.14,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768603500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95265.92,
+      "inferred_chainlink_strike": 95260.58,
+      "offset_usd": 5.34,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768605300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95481.99,
+      "inferred_chainlink_strike": 95509.83,
+      "offset_usd": -27.84,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768606200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95560.51,
+      "inferred_chainlink_strike": 95580.22,
+      "offset_usd": -19.71,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768607100": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95475.42,
+      "inferred_chainlink_strike": 95422.46,
+      "offset_usd": 52.96,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768608000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95568.64,
+      "inferred_chainlink_strike": 95570.43,
+      "offset_usd": -1.79,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768608900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95533.07,
+      "inferred_chainlink_strike": 95544.69,
+      "offset_usd": -11.62,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768609800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95481.12,
+      "inferred_chainlink_strike": 95479.33,
+      "offset_usd": 1.79,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768612500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95442.21,
+      "inferred_chainlink_strike": 95426.12,
+      "offset_usd": 16.09,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768613400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95465.98,
+      "inferred_chainlink_strike": 95471.34,
+      "offset_usd": -5.36,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768615200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95399.93,
+      "inferred_chainlink_strike": 95347.01,
+      "offset_usd": 52.92,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768617000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95290.29,
+      "inferred_chainlink_strike": 95309.95,
+      "offset_usd": -19.66,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768617900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95314.58,
+      "inferred_chainlink_strike": 95316.36,
+      "offset_usd": -1.78,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768618800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95371.36,
+      "inferred_chainlink_strike": 95373.14,
+      "offset_usd": -1.78,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768620600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95295.52,
+      "inferred_chainlink_strike": 95290.17,
+      "offset_usd": 5.35,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768621500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95270.79,
+      "inferred_chainlink_strike": 95335.27,
+      "offset_usd": -64.48,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768622400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95378.92,
+      "inferred_chainlink_strike": 95409.47,
+      "offset_usd": -30.55,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768624200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95291.99,
+      "inferred_chainlink_strike": 95324.33,
+      "offset_usd": -32.34,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768625100": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95281.76,
+      "inferred_chainlink_strike": 95290.67,
+      "offset_usd": -8.91,
+      "resolution": "DOWN",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1768644000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95260.64,
+      "inferred_chainlink_strike": 95255.3,
+      "offset_usd": 5.34,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768644900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95245.01,
+      "inferred_chainlink_strike": 95236.1,
+      "offset_usd": 8.91,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768645800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95236.04,
+      "inferred_chainlink_strike": 95237.82,
+      "offset_usd": -1.78,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768646700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95175.82,
+      "inferred_chainlink_strike": 95159.77,
+      "offset_usd": 16.05,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768648500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95114.67,
+      "inferred_chainlink_strike": 95073.19,
+      "offset_usd": 41.48,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768649400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95299.26,
+      "inferred_chainlink_strike": 95309.96,
+      "offset_usd": -10.7,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768650300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95314.61,
+      "inferred_chainlink_strike": 95334.27,
+      "offset_usd": -19.66,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768651200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95306.14,
+      "inferred_chainlink_strike": 95324.0,
+      "offset_usd": -17.86,
+      "resolution": "DOWN",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1768652100": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95314.24,
+      "inferred_chainlink_strike": 95332.11,
+      "offset_usd": -17.87,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768653000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95270.24,
+      "inferred_chainlink_strike": 95293.5,
+      "offset_usd": -23.26,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768653900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95255.1,
+      "inferred_chainlink_strike": 95256.88,
+      "offset_usd": -1.78,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768654800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95249.96,
+      "inferred_chainlink_strike": 95230.31,
+      "offset_usd": 19.65,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768655700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95277.14,
+      "inferred_chainlink_strike": 95273.58,
+      "offset_usd": 3.56,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768660200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95453.33,
+      "inferred_chainlink_strike": 95469.42,
+      "offset_usd": -16.09,
+      "resolution": "DOWN",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1768661100": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95465.99,
+      "inferred_chainlink_strike": 95485.68,
+      "offset_usd": -19.69,
+      "resolution": "UP",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1768663800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95513.61,
+      "inferred_chainlink_strike": 95526.13,
+      "offset_usd": -12.52,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768667400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95393.07,
+      "inferred_chainlink_strike": 95398.42,
+      "offset_usd": -5.35,
+      "resolution": "DOWN",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1768668300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95399.99,
+      "inferred_chainlink_strike": 95356.52,
+      "offset_usd": 43.47,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768669200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95315.24,
+      "inferred_chainlink_strike": 95299.17,
+      "offset_usd": 16.07,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768670100": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95363.8,
+      "inferred_chainlink_strike": 95379.88,
+      "offset_usd": -16.08,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768671900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95400.61,
+      "inferred_chainlink_strike": 95420.29,
+      "offset_usd": -19.68,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768672800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95349.99,
+      "inferred_chainlink_strike": 95326.71,
+      "offset_usd": 23.28,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768675500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95417.57,
+      "inferred_chainlink_strike": 95417.57,
+      "offset_usd": null,
+      "resolution": "DOWN",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1768676400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95428.24,
+      "inferred_chainlink_strike": 95451.54,
+      "offset_usd": -23.3,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768677300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95393.17,
+      "inferred_chainlink_strike": 95377.09,
+      "offset_usd": 16.08,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768678200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95336.64,
+      "inferred_chainlink_strike": 95309.75,
+      "offset_usd": 26.89,
+      "resolution": "UP",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1768680900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95299.08,
+      "inferred_chainlink_strike": 95277.62,
+      "offset_usd": 21.46,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768681800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95334.54,
+      "inferred_chainlink_strike": 95369.65,
+      "offset_usd": -35.11,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768682700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95316.51,
+      "inferred_chainlink_strike": 95243.99,
+      "offset_usd": 72.52,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768683600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95378.18,
+      "inferred_chainlink_strike": 95379.96,
+      "offset_usd": -1.78,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768685400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95370.58,
+      "inferred_chainlink_strike": 95399.3,
+      "offset_usd": -28.72,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768686300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95288.26,
+      "inferred_chainlink_strike": 95270.4,
+      "offset_usd": 17.86,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768689000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95169.71,
+      "inferred_chainlink_strike": 95153.66,
+      "offset_usd": 16.05,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768689900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95149.99,
+      "inferred_chainlink_strike": 95141.09,
+      "offset_usd": 8.9,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768690800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95170.98,
+      "inferred_chainlink_strike": 95162.08,
+      "offset_usd": 8.9,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768691700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95200.76,
+      "inferred_chainlink_strike": 95216.81,
+      "offset_usd": -16.05,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768692600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95139.58,
+      "inferred_chainlink_strike": 95123.54,
+      "offset_usd": 16.04,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768693500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95148.49,
+      "inferred_chainlink_strike": 95143.15,
+      "offset_usd": 5.34,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768694400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95141.33,
+      "inferred_chainlink_strike": 95134.21,
+      "offset_usd": 7.12,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768696200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95203.32,
+      "inferred_chainlink_strike": 95215.79,
+      "offset_usd": -12.47,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768697100": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95157.92,
+      "inferred_chainlink_strike": 95152.58,
+      "offset_usd": 5.34,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768698000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95115.39,
+      "inferred_chainlink_strike": 95106.49,
+      "offset_usd": 8.9,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768698900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 94952.54,
+      "inferred_chainlink_strike": 94927.56,
+      "offset_usd": 24.98,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768699800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95025.86,
+      "inferred_chainlink_strike": 95009.84,
+      "offset_usd": 16.02,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768700700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95002.36,
+      "inferred_chainlink_strike": 94986.34,
+      "offset_usd": 16.02,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768701600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 94957.49,
+      "inferred_chainlink_strike": 94912.36,
+      "offset_usd": 45.13,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768705200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95021.01,
+      "inferred_chainlink_strike": 95004.99,
+      "offset_usd": 16.02,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768707000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95135.54,
+      "inferred_chainlink_strike": 95155.17,
+      "offset_usd": -19.63,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768707900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95159.07,
+      "inferred_chainlink_strike": 95175.12,
+      "offset_usd": -16.05,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768708800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95200.29,
+      "inferred_chainlink_strike": 95252.14,
+      "offset_usd": -51.85,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768709700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95162.05,
+      "inferred_chainlink_strike": 95181.68,
+      "offset_usd": -19.63,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768711500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95097.21,
+      "inferred_chainlink_strike": 95091.88,
+      "offset_usd": 5.33,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768712400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95095.68,
+      "inferred_chainlink_strike": 95088.57,
+      "offset_usd": 7.11,
+      "resolution": "UP",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1768713300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95085.99,
+      "inferred_chainlink_strike": 95077.1,
+      "offset_usd": 8.89,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768714200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95117.67,
+      "inferred_chainlink_strike": 95159.15,
+      "offset_usd": -41.48,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768716000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95188.54,
+      "inferred_chainlink_strike": 95219.02,
+      "offset_usd": -30.48,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768717800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95174.98,
+      "inferred_chainlink_strike": 95191.03,
+      "offset_usd": -16.05,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768718700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95199.61,
+      "inferred_chainlink_strike": 95244.86,
+      "offset_usd": -45.25,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768719600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95171.43,
+      "inferred_chainlink_strike": 95162.53,
+      "offset_usd": 8.9,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768720500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95080.51,
+      "inferred_chainlink_strike": 95059.1,
+      "offset_usd": 21.41,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768721400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95101.99,
+      "inferred_chainlink_strike": 95093.09,
+      "offset_usd": 8.9,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768722300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95029.99,
+      "inferred_chainlink_strike": 95004.99,
+      "offset_usd": 25.0,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768723200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95043.77,
+      "inferred_chainlink_strike": 95037.55,
+      "offset_usd": 6.22,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768724100": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95048.26,
+      "inferred_chainlink_strike": 95028.65,
+      "offset_usd": 19.61,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768725000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95098.95,
+      "inferred_chainlink_strike": 95097.17,
+      "offset_usd": 1.78,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768725900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95162.73,
+      "inferred_chainlink_strike": 95182.36,
+      "offset_usd": -19.63,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768727700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95166.33,
+      "inferred_chainlink_strike": 95189.56,
+      "offset_usd": -23.23,
+      "resolution": "DOWN",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1768728600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95199.62,
+      "inferred_chainlink_strike": 95204.96,
+      "offset_usd": -5.34,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768729500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95238.62,
+      "inferred_chainlink_strike": 95258.27,
+      "offset_usd": -19.65,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768730400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95275.74,
+      "inferred_chainlink_strike": 95295.4,
+      "offset_usd": -19.66,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768731300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95140.48,
+      "inferred_chainlink_strike": 95170.95,
+      "offset_usd": -30.47,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768733100": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95179.27,
+      "inferred_chainlink_strike": 95186.39,
+      "offset_usd": -7.12,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768734000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95180.67,
+      "inferred_chainlink_strike": 95209.33,
+      "offset_usd": -28.66,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768735800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95121.05,
+      "inferred_chainlink_strike": 95105.01,
+      "offset_usd": 16.04,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768736700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95129.42,
+      "inferred_chainlink_strike": 95124.08,
+      "offset_usd": 5.34,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768737600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95157.98,
+      "inferred_chainlink_strike": 95163.32,
+      "offset_usd": -5.34,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768738500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95117.99,
+      "inferred_chainlink_strike": 95089.34,
+      "offset_usd": 28.65,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768739400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95141.01,
+      "inferred_chainlink_strike": 95132.11,
+      "offset_usd": 8.9,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768740300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95164.2,
+      "inferred_chainlink_strike": 95162.42,
+      "offset_usd": 1.78,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768741200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95129.05,
+      "inferred_chainlink_strike": 95116.58,
+      "offset_usd": 12.47,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768742100": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95044.04,
+      "inferred_chainlink_strike": 95019.04,
+      "offset_usd": 25.0,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768743000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 94953.18,
+      "inferred_chainlink_strike": 94937.17,
+      "offset_usd": 16.01,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768743900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95161.64,
+      "inferred_chainlink_strike": 95166.98,
+      "offset_usd": -5.34,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768745700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95205.86,
+      "inferred_chainlink_strike": 95189.81,
+      "offset_usd": 16.05,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768746600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95170.23,
+      "inferred_chainlink_strike": 95154.18,
+      "offset_usd": 16.05,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768749300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 94999.99,
+      "inferred_chainlink_strike": 94998.21,
+      "offset_usd": 1.78,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768750200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95054.27,
+      "inferred_chainlink_strike": 95073.88,
+      "offset_usd": -19.61,
+      "resolution": "DOWN",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1768751100": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95061.76,
+      "inferred_chainlink_strike": 95049.3,
+      "offset_usd": 12.46,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768752000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95125.46,
+      "inferred_chainlink_strike": 95137.92,
+      "offset_usd": -12.46,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768752900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95157.98,
+      "inferred_chainlink_strike": 95170.45,
+      "offset_usd": -12.47,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768756500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95191.96,
+      "inferred_chainlink_strike": 95193.74,
+      "offset_usd": -1.78,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768757400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95272.52,
+      "inferred_chainlink_strike": 95292.17,
+      "offset_usd": -19.65,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768758300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95205.46,
+      "inferred_chainlink_strike": 95209.02,
+      "offset_usd": -3.56,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768759200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95224.61,
+      "inferred_chainlink_strike": 95244.25,
+      "offset_usd": -19.64,
+      "resolution": "DOWN",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1768761900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95368.82,
+      "inferred_chainlink_strike": 95349.15,
+      "offset_usd": 19.67,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768762800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95450.83,
+      "inferred_chainlink_strike": 95441.9,
+      "offset_usd": 8.93,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768763700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95447.01,
+      "inferred_chainlink_strike": 95438.08,
+      "offset_usd": 8.93,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768764600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95462.54,
+      "inferred_chainlink_strike": 95467.9,
+      "offset_usd": -5.36,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768765500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95412.86,
+      "inferred_chainlink_strike": 95421.78,
+      "offset_usd": -8.92,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768766400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95380.99,
+      "inferred_chainlink_strike": 95391.7,
+      "offset_usd": -10.71,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768767300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95292.99,
+      "inferred_chainlink_strike": 95267.92,
+      "offset_usd": 25.07,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768768200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95433.92,
+      "inferred_chainlink_strike": 95446.43,
+      "offset_usd": -12.51,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768769100": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95348.08,
+      "inferred_chainlink_strike": 95346.3,
+      "offset_usd": 1.78,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768770900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95360.89,
+      "inferred_chainlink_strike": 95373.39,
+      "offset_usd": -12.5,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768771800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95303.29,
+      "inferred_chainlink_strike": 95257.99,
+      "offset_usd": 45.3,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768772700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95380.76,
+      "inferred_chainlink_strike": 95389.68,
+      "offset_usd": -8.92,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768773600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95430.45,
+      "inferred_chainlink_strike": 95461.01,
+      "offset_usd": -30.56,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768774500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95521.74,
+      "inferred_chainlink_strike": 95543.25,
+      "offset_usd": -21.51,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768775400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95474.01,
+      "inferred_chainlink_strike": 95479.37,
+      "offset_usd": -5.36,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768777200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95498.61,
+      "inferred_chainlink_strike": 95561.28,
+      "offset_usd": -62.67,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768778100": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 95125.89,
+      "inferred_chainlink_strike": 95102.67,
+      "offset_usd": 23.22,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768779900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 94477.58,
+      "inferred_chainlink_strike": 94461.65,
+      "offset_usd": 15.93,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768780800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93686.35,
+      "inferred_chainlink_strike": 93672.31,
+      "offset_usd": 14.04,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768781700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92532.92,
+      "inferred_chainlink_strike": 92520.8,
+      "offset_usd": 12.12,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768783500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92962.61,
+      "inferred_chainlink_strike": 92988.83,
+      "offset_usd": -26.22,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768784400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92726.86,
+      "inferred_chainlink_strike": 92745.99,
+      "offset_usd": -19.13,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768785300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92774.77,
+      "inferred_chainlink_strike": 92755.63,
+      "offset_usd": 19.14,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768786200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92610.01,
+      "inferred_chainlink_strike": 92581.24,
+      "offset_usd": 28.77,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768787100": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92527.61,
+      "inferred_chainlink_strike": 92512.01,
+      "offset_usd": 15.6,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768788000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92573.54,
+      "inferred_chainlink_strike": 92563.15,
+      "offset_usd": 10.39,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768788900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92435.99,
+      "inferred_chainlink_strike": 92427.34,
+      "offset_usd": 8.65,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768791600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92579.99,
+      "inferred_chainlink_strike": 92571.33,
+      "offset_usd": 8.66,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768792500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92699.99,
+      "inferred_chainlink_strike": 92694.79,
+      "offset_usd": 5.2,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768793400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92560.57,
+      "inferred_chainlink_strike": 92548.44,
+      "offset_usd": 12.13,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768794300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92650.14,
+      "inferred_chainlink_strike": 92651.87,
+      "offset_usd": -1.73,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768795200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92678.64,
+      "inferred_chainlink_strike": 92737.55,
+      "offset_usd": -58.91,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768797900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92687.43,
+      "inferred_chainlink_strike": 92682.23,
+      "offset_usd": 5.2,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768799700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92688.01,
+      "inferred_chainlink_strike": 92715.04,
+      "offset_usd": -27.03,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768809600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92721.24,
+      "inferred_chainlink_strike": 92721.24,
+      "offset_usd": null,
+      "resolution": "DOWN",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1768810500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92785.92,
+      "inferred_chainlink_strike": 92791.13,
+      "offset_usd": -5.21,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768811400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93081.36,
+      "inferred_chainlink_strike": 93093.56,
+      "offset_usd": -12.2,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768812300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93257.46,
+      "inferred_chainlink_strike": 93257.46,
+      "offset_usd": null,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768813200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93275.83,
+      "inferred_chainlink_strike": 93291.56,
+      "offset_usd": -15.73,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768815000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93070.01,
+      "inferred_chainlink_strike": 93043.76,
+      "offset_usd": 26.25,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768815900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92966.08,
+      "inferred_chainlink_strike": 92950.4,
+      "offset_usd": 15.68,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768816800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93045.99,
+      "inferred_chainlink_strike": 93051.21,
+      "offset_usd": -5.22,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768817700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92967.26,
+      "inferred_chainlink_strike": 92937.49,
+      "offset_usd": 29.77,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768818600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93010.05,
+      "inferred_chainlink_strike": 93008.31,
+      "offset_usd": 1.74,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768819500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93030.82,
+      "inferred_chainlink_strike": 93027.34,
+      "offset_usd": 3.48,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768820400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93058.14,
+      "inferred_chainlink_strike": 93063.36,
+      "offset_usd": -5.22,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768821300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92998.43,
+      "inferred_chainlink_strike": 92927.67,
+      "offset_usd": 70.76,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768822200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93120.45,
+      "inferred_chainlink_strike": 93132.65,
+      "offset_usd": -12.2,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768823100": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93231.42,
+      "inferred_chainlink_strike": 93247.14,
+      "offset_usd": -15.72,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768824000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93191.96,
+      "inferred_chainlink_strike": 93179.75,
+      "offset_usd": 12.21,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768825800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93017.14,
+      "inferred_chainlink_strike": 92976.57,
+      "offset_usd": 40.57,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768826700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93176.26,
+      "inferred_chainlink_strike": 93188.47,
+      "offset_usd": -12.21,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768828500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93006.01,
+      "inferred_chainlink_strike": 92986.82,
+      "offset_usd": 19.19,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768829400": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92961.11,
+      "inferred_chainlink_strike": 92941.93,
+      "offset_usd": 19.18,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768830300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93081.71,
+      "inferred_chainlink_strike": 93073.0,
+      "offset_usd": 8.71,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768831200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93020.29,
+      "inferred_chainlink_strike": 93011.59,
+      "offset_usd": 8.7,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768833000": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92862.73,
+      "inferred_chainlink_strike": 92841.82,
+      "offset_usd": 20.91,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768833900": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92812.82,
+      "inferred_chainlink_strike": 92804.14,
+      "offset_usd": 8.68,
+      "resolution": "UP",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1768834800": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92812.42,
+      "inferred_chainlink_strike": 92791.52,
+      "offset_usd": 20.9,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768835700": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92992.08,
+      "inferred_chainlink_strike": 92993.82,
+      "offset_usd": -1.74,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768836600": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92950.46,
+      "inferred_chainlink_strike": 92944.38,
+      "offset_usd": 6.08,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768837500": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 92986.74,
+      "inferred_chainlink_strike": 92971.06,
+      "offset_usd": 15.68,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768839300": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93053.89,
+      "inferred_chainlink_strike": 93064.34,
+      "offset_usd": -10.45,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768840200": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93180.65,
+      "inferred_chainlink_strike": 93192.86,
+      "offset_usd": -12.21,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1768841100": {
+      "dataset": "IS+OOS2",
+      "binance_strike": 93202.04,
+      "inferred_chainlink_strike": 93217.76,
+      "offset_usd": -15.72,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769073300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 90001.67,
+      "inferred_chainlink_strike": 90001.67,
+      "offset_usd": null,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769088600": {
+      "dataset": "OOS3+4",
+      "binance_strike": 90197.17,
+      "inferred_chainlink_strike": 90215.78,
+      "offset_usd": -18.61,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769090400": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89619.82,
+      "inferred_chainlink_strike": 89608.08,
+      "offset_usd": 11.74,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769091300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89702.85,
+      "inferred_chainlink_strike": 89697.82,
+      "offset_usd": 5.03,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769092200": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89574.08,
+      "inferred_chainlink_strike": 89569.06,
+      "offset_usd": 5.02,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769093100": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89486.11,
+      "inferred_chainlink_strike": 89502.88,
+      "offset_usd": -16.77,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769094000": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89110.87,
+      "inferred_chainlink_strike": 89099.19,
+      "offset_usd": 11.68,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769094900": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89258.85,
+      "inferred_chainlink_strike": 89243.8,
+      "offset_usd": 15.05,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769095800": {
+      "dataset": "OOS3+4",
+      "binance_strike": 88658.04,
+      "inferred_chainlink_strike": 88639.75,
+      "offset_usd": 18.29,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769096700": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89150.08,
+      "inferred_chainlink_strike": 89135.05,
+      "offset_usd": 15.03,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769097600": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89000.01,
+      "inferred_chainlink_strike": 88957.71,
+      "offset_usd": 42.3,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769098500": {
+      "dataset": "OOS3+4",
+      "binance_strike": 88843.79,
+      "inferred_chainlink_strike": 88832.15,
+      "offset_usd": 11.64,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769100300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 88972.45,
+      "inferred_chainlink_strike": 88962.46,
+      "offset_usd": 9.99,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769101200": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89054.07,
+      "inferred_chainlink_strike": 89039.05,
+      "offset_usd": 15.02,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769102100": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89228.33,
+      "inferred_chainlink_strike": 89233.34,
+      "offset_usd": -5.01,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769103000": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89148.33,
+      "inferred_chainlink_strike": 89140.83,
+      "offset_usd": 7.5,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769103900": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89230.71,
+      "inferred_chainlink_strike": 89207.23,
+      "offset_usd": 23.48,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769106600": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89616.04,
+      "inferred_chainlink_strike": 89614.36,
+      "offset_usd": 1.68,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769107500": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89668.61,
+      "inferred_chainlink_strike": 89692.2,
+      "offset_usd": -23.59,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769108400": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89333.93,
+      "inferred_chainlink_strike": 89318.87,
+      "offset_usd": 15.06,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769109300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89399.11,
+      "inferred_chainlink_strike": 89410.82,
+      "offset_usd": -11.71,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769110200": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89504.99,
+      "inferred_chainlink_strike": 89513.36,
+      "offset_usd": -8.37,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769111100": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89845.71,
+      "inferred_chainlink_strike": 89867.64,
+      "offset_usd": -21.93,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769112000": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89777.89,
+      "inferred_chainlink_strike": 89791.34,
+      "offset_usd": -13.45,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769112900": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89923.99,
+      "inferred_chainlink_strike": 89925.67,
+      "offset_usd": -1.68,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769113800": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89574.43,
+      "inferred_chainlink_strike": 89589.53,
+      "offset_usd": -15.1,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769114700": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89507.7,
+      "inferred_chainlink_strike": 89485.85,
+      "offset_usd": 21.85,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769115600": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89409.73,
+      "inferred_chainlink_strike": 89321.86,
+      "offset_usd": 87.87,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769116500": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89540.01,
+      "inferred_chainlink_strike": 89526.6,
+      "offset_usd": 13.41,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769117400": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89571.54,
+      "inferred_chainlink_strike": 89576.56,
+      "offset_usd": -5.02,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769119200": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89268.67,
+      "inferred_chainlink_strike": 89250.25,
+      "offset_usd": 18.42,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769120100": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89490.71,
+      "inferred_chainlink_strike": 89485.69,
+      "offset_usd": 5.02,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769121000": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89422.77,
+      "inferred_chainlink_strike": 89422.77,
+      "offset_usd": null,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769121900": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89265.51,
+      "inferred_chainlink_strike": 89223.08,
+      "offset_usd": 42.43,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769122800": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89346.99,
+      "inferred_chainlink_strike": 89355.35,
+      "offset_usd": -8.36,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769123700": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89302.4,
+      "inferred_chainlink_strike": 89297.39,
+      "offset_usd": 5.01,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769124600": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89440.01,
+      "inferred_chainlink_strike": 89451.73,
+      "offset_usd": -11.72,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769125500": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89505.7,
+      "inferred_chainlink_strike": 89507.37,
+      "offset_usd": -1.67,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769126400": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89559.67,
+      "inferred_chainlink_strike": 89590.07,
+      "offset_usd": -30.4,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769127300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89536.99,
+      "inferred_chainlink_strike": 89538.66,
+      "offset_usd": -1.67,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769128200": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89615.71,
+      "inferred_chainlink_strike": 89640.99,
+      "offset_usd": -25.28,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769129100": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89552.51,
+      "inferred_chainlink_strike": 89564.24,
+      "offset_usd": -11.73,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769130000": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89520.01,
+      "inferred_chainlink_strike": 89494.76,
+      "offset_usd": 25.25,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769130900": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89607.83,
+      "inferred_chainlink_strike": 89558.13,
+      "offset_usd": 49.7,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769131800": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89693.17,
+      "inferred_chainlink_strike": 89688.14,
+      "offset_usd": 5.03,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769132700": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89827.8,
+      "inferred_chainlink_strike": 89832.84,
+      "offset_usd": -5.04,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769134500": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89950.33,
+      "inferred_chainlink_strike": 90007.51,
+      "offset_usd": -57.18,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769136300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89788.71,
+      "inferred_chainlink_strike": 89782.83,
+      "offset_usd": 5.88,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769137200": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89663.48,
+      "inferred_chainlink_strike": 89665.16,
+      "offset_usd": -1.68,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769138100": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89805.43,
+      "inferred_chainlink_strike": 89793.66,
+      "offset_usd": 11.77,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769139900": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89894.29,
+      "inferred_chainlink_strike": 89909.45,
+      "offset_usd": -15.16,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769140800": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89924.77,
+      "inferred_chainlink_strike": 89936.55,
+      "offset_usd": -11.78,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769141700": {
+      "dataset": "OOS3+4",
+      "binance_strike": 90076.9,
+      "inferred_chainlink_strike": 90102.31,
+      "offset_usd": -25.41,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769144400": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89965.42,
+      "inferred_chainlink_strike": 89982.28,
+      "offset_usd": -16.86,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769145300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89886.17,
+      "inferred_chainlink_strike": 89904.71,
+      "offset_usd": -18.54,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769146200": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89646.23,
+      "inferred_chainlink_strike": 89634.48,
+      "offset_usd": 11.75,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769148000": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89616.04,
+      "inferred_chainlink_strike": 89590.76,
+      "offset_usd": 25.28,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769148900": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89733.51,
+      "inferred_chainlink_strike": 89765.69,
+      "offset_usd": -32.18,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769149800": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89473.17,
+      "inferred_chainlink_strike": 89435.89,
+      "offset_usd": 37.28,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769150700": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89655.74,
+      "inferred_chainlink_strike": 89660.77,
+      "offset_usd": -5.03,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769151600": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89509.58,
+      "inferred_chainlink_strike": 89491.11,
+      "offset_usd": 18.47,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769152500": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89550.6,
+      "inferred_chainlink_strike": 89542.22,
+      "offset_usd": 8.38,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769156100": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89569.02,
+      "inferred_chainlink_strike": 89550.54,
+      "offset_usd": 18.48,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769157900": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89359.76,
+      "inferred_chainlink_strike": 89334.55,
+      "offset_usd": 25.21,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769158800": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89221.46,
+      "inferred_chainlink_strike": 89203.05,
+      "offset_usd": 18.41,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769159700": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89238.57,
+      "inferred_chainlink_strike": 89263.74,
+      "offset_usd": -25.17,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769161500": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89009.74,
+      "inferred_chainlink_strike": 89008.08,
+      "offset_usd": 1.66,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769163300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89049.83,
+      "inferred_chainlink_strike": 89048.17,
+      "offset_usd": 1.66,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769165100": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89127.96,
+      "inferred_chainlink_strike": 89132.96,
+      "offset_usd": -5.0,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769166000": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89046.49,
+      "inferred_chainlink_strike": 89044.83,
+      "offset_usd": 1.66,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769166900": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89222.89,
+      "inferred_chainlink_strike": 89234.58,
+      "offset_usd": -11.69,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769167800": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89219.99,
+      "inferred_chainlink_strike": 89221.66,
+      "offset_usd": -1.67,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769171400": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89163.51,
+      "inferred_chainlink_strike": 89151.83,
+      "offset_usd": 11.68,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769172300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89241.26,
+      "inferred_chainlink_strike": 89221.16,
+      "offset_usd": 20.1,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769173200": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89267.83,
+      "inferred_chainlink_strike": 89299.84,
+      "offset_usd": -32.01,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769174100": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89407.14,
+      "inferred_chainlink_strike": 89422.22,
+      "offset_usd": -15.08,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769175900": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89355.21,
+      "inferred_chainlink_strike": 89353.54,
+      "offset_usd": 1.67,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769176800": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89350.8,
+      "inferred_chainlink_strike": 89359.16,
+      "offset_usd": -8.36,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769177700": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89459.29,
+      "inferred_chainlink_strike": 89481.13,
+      "offset_usd": -21.84,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769178600": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89685.92,
+      "inferred_chainlink_strike": 89704.42,
+      "offset_usd": -18.5,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769181300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 88821.92,
+      "inferred_chainlink_strike": 88806.94,
+      "offset_usd": 14.98,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769182200": {
+      "dataset": "OOS3+4",
+      "binance_strike": 88979.61,
+      "inferred_chainlink_strike": 88976.28,
+      "offset_usd": 3.33,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769183100": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89259.98,
+      "inferred_chainlink_strike": 89261.65,
+      "offset_usd": -1.67,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769184000": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89761.61,
+      "inferred_chainlink_strike": 89780.13,
+      "offset_usd": -18.52,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769184900": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89752.26,
+      "inferred_chainlink_strike": 89777.58,
+      "offset_usd": -25.32,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769185800": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89575.46,
+      "inferred_chainlink_strike": 89568.76,
+      "offset_usd": 6.7,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769186700": {
+      "dataset": "OOS3+4",
+      "binance_strike": 90269.65,
+      "inferred_chainlink_strike": 90281.48,
+      "offset_usd": -11.83,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769187600": {
+      "dataset": "OOS3+4",
+      "binance_strike": 90124.86,
+      "inferred_chainlink_strike": 90140.06,
+      "offset_usd": -15.2,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769188500": {
+      "dataset": "OOS3+4",
+      "binance_strike": 90199.99,
+      "inferred_chainlink_strike": 90164.16,
+      "offset_usd": 35.83,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769190300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 90831.33,
+      "inferred_chainlink_strike": 90811.73,
+      "offset_usd": 19.6,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769191200": {
+      "dataset": "OOS3+4",
+      "binance_strike": 90599.99,
+      "inferred_chainlink_strike": 90608.46,
+      "offset_usd": -8.47,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769192100": {
+      "dataset": "OOS3+4",
+      "binance_strike": 90743.61,
+      "inferred_chainlink_strike": 90747.0,
+      "offset_usd": -3.39,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769193900": {
+      "dataset": "OOS3+4",
+      "binance_strike": 90737.99,
+      "inferred_chainlink_strike": 90756.71,
+      "offset_usd": -18.72,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769194800": {
+      "dataset": "OOS3+4",
+      "binance_strike": 90530.45,
+      "inferred_chainlink_strike": 90521.98,
+      "offset_usd": 8.47,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769195700": {
+      "dataset": "OOS3+4",
+      "binance_strike": 90277.99,
+      "inferred_chainlink_strike": 90266.16,
+      "offset_usd": 11.83,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769197500": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89879.79,
+      "inferred_chainlink_strike": 89869.7,
+      "offset_usd": 10.09,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769199300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 90119.01,
+      "inferred_chainlink_strike": 90134.21,
+      "offset_usd": -15.2,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769200200": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89814.38,
+      "inferred_chainlink_strike": 89875.17,
+      "offset_usd": -60.79,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769202000": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89503.67,
+      "inferred_chainlink_strike": 89498.65,
+      "offset_usd": 5.02,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769203800": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89600.26,
+      "inferred_chainlink_strike": 89635.85,
+      "offset_usd": -35.59,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769205600": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89349.99,
+      "inferred_chainlink_strike": 89334.92,
+      "offset_usd": 15.07,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769206500": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89622.51,
+      "inferred_chainlink_strike": 89641.0,
+      "offset_usd": -18.49,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769207400": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89712.23,
+      "inferred_chainlink_strike": 89722.3,
+      "offset_usd": -10.07,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769208300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89587.04,
+      "inferred_chainlink_strike": 89598.78,
+      "offset_usd": -11.74,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769209200": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89624.61,
+      "inferred_chainlink_strike": 89663.7,
+      "offset_usd": -39.09,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769211000": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89562.01,
+      "inferred_chainlink_strike": 89572.07,
+      "offset_usd": -10.06,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769211900": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89517.1,
+      "inferred_chainlink_strike": 89518.77,
+      "offset_usd": -1.67,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769212800": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89600.26,
+      "inferred_chainlink_strike": 89595.23,
+      "offset_usd": 5.03,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769213700": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89509.51,
+      "inferred_chainlink_strike": 89494.42,
+      "offset_usd": 15.09,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769214600": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89457.86,
+      "inferred_chainlink_strike": 89413.58,
+      "offset_usd": 44.28,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769215500": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89481.83,
+      "inferred_chainlink_strike": 89480.16,
+      "offset_usd": 1.67,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769216400": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89452.83,
+      "inferred_chainlink_strike": 89451.16,
+      "offset_usd": 1.67,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769217300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89515.92,
+      "inferred_chainlink_strike": 89534.39,
+      "offset_usd": -18.47,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769218200": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89574.23,
+      "inferred_chainlink_strike": 89638.59,
+      "offset_usd": -64.36,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769220000": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89550.24,
+      "inferred_chainlink_strike": 89504.14,
+      "offset_usd": 46.1,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769221800": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89617.4,
+      "inferred_chainlink_strike": 89602.29,
+      "offset_usd": 15.11,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769222700": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89686.57,
+      "inferred_chainlink_strike": 89705.07,
+      "offset_usd": -18.5,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769223600": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89702.85,
+      "inferred_chainlink_strike": 89721.36,
+      "offset_usd": -18.51,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769225400": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89936.26,
+      "inferred_chainlink_strike": 89987.95,
+      "offset_usd": -51.69,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769226300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89834.35,
+      "inferred_chainlink_strike": 89856.28,
+      "offset_usd": -21.93,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769227200": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89770.02,
+      "inferred_chainlink_strike": 89768.34,
+      "offset_usd": 1.68,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769228100": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89803.42,
+      "inferred_chainlink_strike": 89808.46,
+      "offset_usd": -5.04,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769229000": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89723.14,
+      "inferred_chainlink_strike": 89701.24,
+      "offset_usd": 21.9,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769229900": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89759.67,
+      "inferred_chainlink_strike": 89776.49,
+      "offset_usd": -16.82,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769232600": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89816.12,
+      "inferred_chainlink_strike": 89858.81,
+      "offset_usd": -42.69,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769234400": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89775.2,
+      "inferred_chainlink_strike": 89761.75,
+      "offset_usd": 13.45,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769235300": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89744.49,
+      "inferred_chainlink_strike": 89759.62,
+      "offset_usd": -15.13,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769236200": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89649.99,
+      "inferred_chainlink_strike": 89614.38,
+      "offset_usd": 35.61,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769237100": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89671.76,
+      "inferred_chainlink_strike": 89670.08,
+      "offset_usd": 1.68,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769238000": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89649.33,
+      "inferred_chainlink_strike": 89634.21,
+      "offset_usd": 15.12,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769238900": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89657.76,
+      "inferred_chainlink_strike": 89652.73,
+      "offset_usd": 5.03,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769239800": {
+      "dataset": "OOS3+4",
+      "binance_strike": 89604.89,
+      "inferred_chainlink_strike": 89589.78,
+      "offset_usd": 15.11,
+      "resolution": "UP",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1769702400": {
+      "dataset": "OOS7",
+      "binance_strike": 84777.96,
+      "inferred_chainlink_strike": 84777.96,
+      "offset_usd": null,
+      "resolution": "DOWN",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1769703300": {
+      "dataset": "OOS7",
+      "binance_strike": 84769.55,
+      "inferred_chainlink_strike": 84745.64,
+      "offset_usd": 23.91,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769704200": {
+      "dataset": "OOS7",
+      "binance_strike": 84504.71,
+      "inferred_chainlink_strike": 84476.03,
+      "offset_usd": 28.68,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769705100": {
+      "dataset": "OOS7",
+      "binance_strike": 84621.58,
+      "inferred_chainlink_strike": 84623.16,
+      "offset_usd": -1.58,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769707800": {
+      "dataset": "OOS7",
+      "binance_strike": 85059.54,
+      "inferred_chainlink_strike": 85054.77,
+      "offset_usd": 4.77,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769708700": {
+      "dataset": "OOS7",
+      "binance_strike": 84880.32,
+      "inferred_chainlink_strike": 84875.56,
+      "offset_usd": 4.76,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769709600": {
+      "dataset": "OOS7",
+      "binance_strike": 84253.32,
+      "inferred_chainlink_strike": 84229.55,
+      "offset_usd": 23.77,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769710500": {
+      "dataset": "OOS7",
+      "binance_strike": 84523.51,
+      "inferred_chainlink_strike": 84525.09,
+      "offset_usd": -1.58,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769711400": {
+      "dataset": "OOS7",
+      "binance_strike": 83881.49,
+      "inferred_chainlink_strike": 83895.63,
+      "offset_usd": -14.14,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769712300": {
+      "dataset": "OOS7",
+      "binance_strike": 84024.01,
+      "inferred_chainlink_strike": 84019.3,
+      "offset_usd": 4.71,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769713200": {
+      "dataset": "OOS7",
+      "binance_strike": 83477.01,
+      "inferred_chainlink_strike": 83462.93,
+      "offset_usd": 14.08,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769715000": {
+      "dataset": "OOS7",
+      "binance_strike": 83801.89,
+      "inferred_chainlink_strike": 83771.84,
+      "offset_usd": 30.05,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769715900": {
+      "dataset": "OOS7",
+      "binance_strike": 84166.57,
+      "inferred_chainlink_strike": 84157.12,
+      "offset_usd": 9.45,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769717700": {
+      "dataset": "OOS7",
+      "binance_strike": 83918.07,
+      "inferred_chainlink_strike": 83894.4,
+      "offset_usd": 23.67,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769718600": {
+      "dataset": "OOS7",
+      "binance_strike": 84000.42,
+      "inferred_chainlink_strike": 83998.85,
+      "offset_usd": 1.57,
+      "resolution": "DOWN",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1769719500": {
+      "dataset": "OOS7",
+      "binance_strike": 84100.01,
+      "inferred_chainlink_strike": 84114.19,
+      "offset_usd": -14.18,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769720400": {
+      "dataset": "OOS7",
+      "binance_strike": 84207.67,
+      "inferred_chainlink_strike": 84220.29,
+      "offset_usd": -12.62,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769721300": {
+      "dataset": "OOS7",
+      "binance_strike": 84427.21,
+      "inferred_chainlink_strike": 84464.03,
+      "offset_usd": -36.82,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769722200": {
+      "dataset": "OOS7",
+      "binance_strike": 84370.58,
+      "inferred_chainlink_strike": 84369.0,
+      "offset_usd": 1.58,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769723100": {
+      "dataset": "OOS7",
+      "binance_strike": 84448.14,
+      "inferred_chainlink_strike": 84459.21,
+      "offset_usd": -11.07,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769724900": {
+      "dataset": "OOS7",
+      "binance_strike": 84345.62,
+      "inferred_chainlink_strike": 84292.0,
+      "offset_usd": 53.62,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769725800": {
+      "dataset": "OOS7",
+      "binance_strike": 84445.29,
+      "inferred_chainlink_strike": 84424.68,
+      "offset_usd": 20.61,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769726700": {
+      "dataset": "OOS7",
+      "binance_strike": 84458.89,
+      "inferred_chainlink_strike": 84463.63,
+      "offset_usd": -4.74,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769727600": {
+      "dataset": "OOS7",
+      "binance_strike": 84570.04,
+      "inferred_chainlink_strike": 84601.18,
+      "offset_usd": -31.14,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769728500": {
+      "dataset": "OOS7",
+      "binance_strike": 84487.39,
+      "inferred_chainlink_strike": 84474.73,
+      "offset_usd": 12.66,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769729400": {
+      "dataset": "OOS7",
+      "binance_strike": 84575.99,
+      "inferred_chainlink_strike": 84525.67,
+      "offset_usd": 50.32,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769730300": {
+      "dataset": "OOS7",
+      "binance_strike": 84687.4,
+      "inferred_chainlink_strike": 84700.09,
+      "offset_usd": -12.69,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769732100": {
+      "dataset": "OOS7",
+      "binance_strike": 84542.27,
+      "inferred_chainlink_strike": 84529.6,
+      "offset_usd": 12.67,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769733000": {
+      "dataset": "OOS7",
+      "binance_strike": 84368.43,
+      "inferred_chainlink_strike": 84360.54,
+      "offset_usd": 7.89,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769733900": {
+      "dataset": "OOS7",
+      "binance_strike": 84403.62,
+      "inferred_chainlink_strike": 84395.73,
+      "offset_usd": 7.89,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769734800": {
+      "dataset": "OOS7",
+      "binance_strike": 84192.01,
+      "inferred_chainlink_strike": 84180.98,
+      "offset_usd": 11.03,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769735700": {
+      "dataset": "OOS7",
+      "binance_strike": 84143.3,
+      "inferred_chainlink_strike": 84124.35,
+      "offset_usd": 18.95,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769736600": {
+      "dataset": "OOS7",
+      "binance_strike": 83772.92,
+      "inferred_chainlink_strike": 83790.2,
+      "offset_usd": -17.28,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769737500": {
+      "dataset": "OOS7",
+      "binance_strike": 82039.99,
+      "inferred_chainlink_strike": 82023.07,
+      "offset_usd": 16.92,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769738400": {
+      "dataset": "OOS7",
+      "binance_strike": 82468.01,
+      "inferred_chainlink_strike": 82466.47,
+      "offset_usd": 1.54,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769739300": {
+      "dataset": "OOS7",
+      "binance_strike": 81896.68,
+      "inferred_chainlink_strike": 81870.45,
+      "offset_usd": 26.23,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769740200": {
+      "dataset": "OOS7",
+      "binance_strike": 81465.36,
+      "inferred_chainlink_strike": 81448.55,
+      "offset_usd": 16.81,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769741100": {
+      "dataset": "OOS7",
+      "binance_strike": 81984.95,
+      "inferred_chainlink_strike": 81968.04,
+      "offset_usd": 16.91,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769742900": {
+      "dataset": "OOS7",
+      "binance_strike": 82387.36,
+      "inferred_chainlink_strike": 82407.47,
+      "offset_usd": -20.11,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769743800": {
+      "dataset": "OOS7",
+      "binance_strike": 82355.67,
+      "inferred_chainlink_strike": 82360.29,
+      "offset_usd": -4.62,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769744700": {
+      "dataset": "OOS7",
+      "binance_strike": 82498.04,
+      "inferred_chainlink_strike": 82501.12,
+      "offset_usd": -3.08,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769745600": {
+      "dataset": "OOS7",
+      "binance_strike": 82676.42,
+      "inferred_chainlink_strike": 82690.36,
+      "offset_usd": -13.94,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769748300": {
+      "dataset": "OOS7",
+      "binance_strike": 82917.46,
+      "inferred_chainlink_strike": 82909.7,
+      "offset_usd": 7.76,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769749200": {
+      "dataset": "OOS7",
+      "binance_strike": 82938.92,
+      "inferred_chainlink_strike": 82943.57,
+      "offset_usd": -4.65,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769750100": {
+      "dataset": "OOS7",
+      "binance_strike": 82971.99,
+      "inferred_chainlink_strike": 82945.42,
+      "offset_usd": 26.57,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769751000": {
+      "dataset": "OOS7",
+      "binance_strike": 83259.54,
+      "inferred_chainlink_strike": 83264.21,
+      "offset_usd": -4.67,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769753700": {
+      "dataset": "OOS7",
+      "binance_strike": 82792.9,
+      "inferred_chainlink_strike": 82775.82,
+      "offset_usd": 17.08,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769754600": {
+      "dataset": "OOS7",
+      "binance_strike": 82410.54,
+      "inferred_chainlink_strike": 82390.42,
+      "offset_usd": 20.12,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769755500": {
+      "dataset": "OOS7",
+      "binance_strike": 82161.58,
+      "inferred_chainlink_strike": 82139.96,
+      "offset_usd": 21.62,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769756400": {
+      "dataset": "OOS7",
+      "binance_strike": 82602.8,
+      "inferred_chainlink_strike": 82595.07,
+      "offset_usd": 7.73,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769757300": {
+      "dataset": "OOS7",
+      "binance_strike": 82946.04,
+      "inferred_chainlink_strike": 82956.91,
+      "offset_usd": -10.87,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769758200": {
+      "dataset": "OOS7",
+      "binance_strike": 82669.62,
+      "inferred_chainlink_strike": 82699.27,
+      "offset_usd": -29.65,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769759100": {
+      "dataset": "OOS7",
+      "binance_strike": 82567.29,
+      "inferred_chainlink_strike": 82559.57,
+      "offset_usd": 7.72,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769760000": {
+      "dataset": "OOS7",
+      "binance_strike": 82816.98,
+      "inferred_chainlink_strike": 82830.94,
+      "offset_usd": -13.96,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769761800": {
+      "dataset": "OOS7",
+      "binance_strike": 82699.99,
+      "inferred_chainlink_strike": 82704.63,
+      "offset_usd": -4.64,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769762700": {
+      "dataset": "OOS7",
+      "binance_strike": 82595.26,
+      "inferred_chainlink_strike": 82581.33,
+      "offset_usd": 13.93,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769763600": {
+      "dataset": "OOS7",
+      "binance_strike": 82671.7,
+      "inferred_chainlink_strike": 82654.64,
+      "offset_usd": 17.06,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769764500": {
+      "dataset": "OOS7",
+      "binance_strike": 82642.46,
+      "inferred_chainlink_strike": 82647.1,
+      "offset_usd": -4.64,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769765400": {
+      "dataset": "OOS7",
+      "binance_strike": 82410.92,
+      "inferred_chainlink_strike": 82383.74,
+      "offset_usd": 27.18,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769766300": {
+      "dataset": "OOS7",
+      "binance_strike": 82485.64,
+      "inferred_chainlink_strike": 82493.36,
+      "offset_usd": -7.72,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769767200": {
+      "dataset": "OOS7",
+      "binance_strike": 82367.54,
+      "inferred_chainlink_strike": 82356.75,
+      "offset_usd": 10.79,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769768100": {
+      "dataset": "OOS7",
+      "binance_strike": 82319.15,
+      "inferred_chainlink_strike": 82305.27,
+      "offset_usd": 13.88,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769769000": {
+      "dataset": "OOS7",
+      "binance_strike": 82522.67,
+      "inferred_chainlink_strike": 82521.13,
+      "offset_usd": 1.54,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769769900": {
+      "dataset": "OOS7",
+      "binance_strike": 82592.04,
+      "inferred_chainlink_strike": 82599.77,
+      "offset_usd": -7.73,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769838300": {
+      "dataset": "OOS8",
+      "binance_strike": 84016.68,
+      "inferred_chainlink_strike": 84016.68,
+      "offset_usd": null,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769840100": {
+      "dataset": "OOS8",
+      "binance_strike": 83990.57,
+      "inferred_chainlink_strike": 83989.0,
+      "offset_usd": 1.57,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769841000": {
+      "dataset": "OOS8",
+      "binance_strike": 83670.64,
+      "inferred_chainlink_strike": 83610.52,
+      "offset_usd": 60.12,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769841900": {
+      "dataset": "OOS8",
+      "binance_strike": 83774.71,
+      "inferred_chainlink_strike": 83744.67,
+      "offset_usd": 30.04,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769842800": {
+      "dataset": "OOS8",
+      "binance_strike": 83786.08,
+      "inferred_chainlink_strike": 83795.49,
+      "offset_usd": -9.41,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769843700": {
+      "dataset": "OOS8",
+      "binance_strike": 83749.52,
+      "inferred_chainlink_strike": 83747.95,
+      "offset_usd": 1.57,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769844600": {
+      "dataset": "OOS8",
+      "binance_strike": 83700.15,
+      "inferred_chainlink_strike": 83679.72,
+      "offset_usd": 20.43,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769845500": {
+      "dataset": "OOS8",
+      "binance_strike": 83482.07,
+      "inferred_chainlink_strike": 83435.76,
+      "offset_usd": 46.31,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769846400": {
+      "dataset": "OOS8",
+      "binance_strike": 83546.82,
+      "inferred_chainlink_strike": 83545.26,
+      "offset_usd": 1.56,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769847300": {
+      "dataset": "OOS8",
+      "binance_strike": 83351.71,
+      "inferred_chainlink_strike": 83347.03,
+      "offset_usd": 4.68,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769848200": {
+      "dataset": "OOS8",
+      "binance_strike": 83097.99,
+      "inferred_chainlink_strike": 83080.85,
+      "offset_usd": 17.14,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769849100": {
+      "dataset": "OOS8",
+      "binance_strike": 82789.99,
+      "inferred_chainlink_strike": 82760.3,
+      "offset_usd": 29.69,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769850900": {
+      "dataset": "OOS8",
+      "binance_strike": 83140.01,
+      "inferred_chainlink_strike": 83150.9,
+      "offset_usd": -10.89,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769851800": {
+      "dataset": "OOS8",
+      "binance_strike": 83021.62,
+      "inferred_chainlink_strike": 82991.85,
+      "offset_usd": 29.77,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769852700": {
+      "dataset": "OOS8",
+      "binance_strike": 83214.58,
+      "inferred_chainlink_strike": 83233.32,
+      "offset_usd": -18.74,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769853600": {
+      "dataset": "OOS8",
+      "binance_strike": 83109.1,
+      "inferred_chainlink_strike": 83095.09,
+      "offset_usd": 14.01,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769854500": {
+      "dataset": "OOS8",
+      "binance_strike": 83004.39,
+      "inferred_chainlink_strike": 82990.39,
+      "offset_usd": 14.0,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769857200": {
+      "dataset": "OOS8",
+      "binance_strike": 83159.99,
+      "inferred_chainlink_strike": 83174.01,
+      "offset_usd": -14.02,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769859900": {
+      "dataset": "OOS8",
+      "binance_strike": 82983.99,
+      "inferred_chainlink_strike": 82962.16,
+      "offset_usd": 21.83,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769860800": {
+      "dataset": "OOS8",
+      "binance_strike": 83019.99,
+      "inferred_chainlink_strike": 83027.76,
+      "offset_usd": -7.77,
+      "resolution": "UP",
+      "binance_agrees": false
+    },
+    "btc-updown-15m-1769861700": {
+      "dataset": "OOS8",
+      "binance_strike": 82842.65,
+      "inferred_chainlink_strike": 82828.68,
+      "offset_usd": 13.97,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769863500": {
+      "dataset": "OOS8",
+      "binance_strike": 82918.76,
+      "inferred_chainlink_strike": 82903.22,
+      "offset_usd": 15.54,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769864400": {
+      "dataset": "OOS8",
+      "binance_strike": 82761.99,
+      "inferred_chainlink_strike": 82746.48,
+      "offset_usd": 15.51,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769865300": {
+      "dataset": "OOS8",
+      "binance_strike": 82802.26,
+      "inferred_chainlink_strike": 82788.3,
+      "offset_usd": 13.96,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769866200": {
+      "dataset": "OOS8",
+      "binance_strike": 82827.95,
+      "inferred_chainlink_strike": 82829.5,
+      "offset_usd": -1.55,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769868000": {
+      "dataset": "OOS8",
+      "binance_strike": 82767.99,
+      "inferred_chainlink_strike": 82750.91,
+      "offset_usd": 17.08,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769868900": {
+      "dataset": "OOS8",
+      "binance_strike": 82449.54,
+      "inferred_chainlink_strike": 82438.74,
+      "offset_usd": 10.8,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769869800": {
+      "dataset": "OOS8",
+      "binance_strike": 81587.99,
+      "inferred_chainlink_strike": 81584.94,
+      "offset_usd": 3.05,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769870700": {
+      "dataset": "OOS8",
+      "binance_strike": 80995.79,
+      "inferred_chainlink_strike": 80969.85,
+      "offset_usd": 25.94,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769874300": {
+      "dataset": "OOS8",
+      "binance_strike": 81343.35,
+      "inferred_chainlink_strike": 81334.22,
+      "offset_usd": 9.13,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769875200": {
+      "dataset": "OOS8",
+      "binance_strike": 81302.15,
+      "inferred_chainlink_strike": 81285.38,
+      "offset_usd": 16.77,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769876100": {
+      "dataset": "OOS8",
+      "binance_strike": 80992.49,
+      "inferred_chainlink_strike": 80971.18,
+      "offset_usd": 21.31,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769877000": {
+      "dataset": "OOS8",
+      "binance_strike": 81113.08,
+      "inferred_chainlink_strike": 81108.53,
+      "offset_usd": 4.55,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769877900": {
+      "dataset": "OOS8",
+      "binance_strike": 80987.83,
+      "inferred_chainlink_strike": 80974.17,
+      "offset_usd": 13.66,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769878800": {
+      "dataset": "OOS8",
+      "binance_strike": 80365.04,
+      "inferred_chainlink_strike": 80339.3,
+      "offset_usd": 25.74,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769880600": {
+      "dataset": "OOS8",
+      "binance_strike": 79120.11,
+      "inferred_chainlink_strike": 79106.77,
+      "offset_usd": 13.34,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769883300": {
+      "dataset": "OOS8",
+      "binance_strike": 78622.96,
+      "inferred_chainlink_strike": 78606.74,
+      "offset_usd": 16.22,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769884200": {
+      "dataset": "OOS8",
+      "binance_strike": 78436.95,
+      "inferred_chainlink_strike": 78394.23,
+      "offset_usd": 42.72,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769886000": {
+      "dataset": "OOS8",
+      "binance_strike": 78038.39,
+      "inferred_chainlink_strike": 78034.01,
+      "offset_usd": 4.38,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769886900": {
+      "dataset": "OOS8",
+      "binance_strike": 78226.24,
+      "inferred_chainlink_strike": 78235.02,
+      "offset_usd": -8.78,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769887800": {
+      "dataset": "OOS8",
+      "binance_strike": 77982.54,
+      "inferred_chainlink_strike": 77969.39,
+      "offset_usd": 13.15,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769888700": {
+      "dataset": "OOS8",
+      "binance_strike": 77527.83,
+      "inferred_chainlink_strike": 77510.37,
+      "offset_usd": 17.46,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769889600": {
+      "dataset": "OOS8",
+      "binance_strike": 77750.01,
+      "inferred_chainlink_strike": 77751.46,
+      "offset_usd": -1.45,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769890500": {
+      "dataset": "OOS8",
+      "binance_strike": 77532.17,
+      "inferred_chainlink_strike": 77519.1,
+      "offset_usd": 13.07,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769894100": {
+      "dataset": "OOS8",
+      "binance_strike": 77670.57,
+      "inferred_chainlink_strike": 77663.3,
+      "offset_usd": 7.27,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769895000": {
+      "dataset": "OOS8",
+      "binance_strike": 77836.46,
+      "inferred_chainlink_strike": 77839.37,
+      "offset_usd": -2.91,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769895900": {
+      "dataset": "OOS8",
+      "binance_strike": 78166.4,
+      "inferred_chainlink_strike": 78173.71,
+      "offset_usd": -7.31,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769896800": {
+      "dataset": "OOS8",
+      "binance_strike": 78291.99,
+      "inferred_chainlink_strike": 78293.45,
+      "offset_usd": -1.46,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769900400": {
+      "dataset": "OOS8",
+      "binance_strike": 78155.17,
+      "inferred_chainlink_strike": 78146.4,
+      "offset_usd": 8.77,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769901300": {
+      "dataset": "OOS8",
+      "binance_strike": 78227.88,
+      "inferred_chainlink_strike": 78244.02,
+      "offset_usd": -16.14,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769949900": {
+      "dataset": "OOS9",
+      "binance_strike": 78378.46,
+      "inferred_chainlink_strike": 78332.62,
+      "offset_usd": 45.84,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769950800": {
+      "dataset": "OOS9",
+      "binance_strike": 78459.67,
+      "inferred_chainlink_strike": 78444.96,
+      "offset_usd": 14.71,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769952600": {
+      "dataset": "OOS9",
+      "binance_strike": 78687.14,
+      "inferred_chainlink_strike": 78700.41,
+      "offset_usd": -13.27,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769953500": {
+      "dataset": "OOS9",
+      "binance_strike": 78526.35,
+      "inferred_chainlink_strike": 78479.63,
+      "offset_usd": 46.72,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769954400": {
+      "dataset": "OOS9",
+      "binance_strike": 78317.51,
+      "inferred_chainlink_strike": 78307.25,
+      "offset_usd": 10.26,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769955300": {
+      "dataset": "OOS9",
+      "binance_strike": 78188.32,
+      "inferred_chainlink_strike": 78169.23,
+      "offset_usd": 19.09,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769956200": {
+      "dataset": "OOS9",
+      "binance_strike": 77856.42,
+      "inferred_chainlink_strike": 77819.42,
+      "offset_usd": 37.0,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769957100": {
+      "dataset": "OOS9",
+      "binance_strike": 77887.62,
+      "inferred_chainlink_strike": 77859.69,
+      "offset_usd": 27.93,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769958000": {
+      "dataset": "OOS9",
+      "binance_strike": 78211.11,
+      "inferred_chainlink_strike": 78224.3,
+      "offset_usd": -13.19,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769959800": {
+      "dataset": "OOS9",
+      "binance_strike": 76984.01,
+      "inferred_chainlink_strike": 76963.76,
+      "offset_usd": 20.25,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769960700": {
+      "dataset": "OOS9",
+      "binance_strike": 77169.79,
+      "inferred_chainlink_strike": 77159.68,
+      "offset_usd": 10.11,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769961600": {
+      "dataset": "OOS9",
+      "binance_strike": 77593.39,
+      "inferred_chainlink_strike": 77606.47,
+      "offset_usd": -13.08,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769962500": {
+      "dataset": "OOS9",
+      "binance_strike": 77571.99,
+      "inferred_chainlink_strike": 77586.53,
+      "offset_usd": -14.54,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769963400": {
+      "dataset": "OOS9",
+      "binance_strike": 77534.17,
+      "inferred_chainlink_strike": 77532.72,
+      "offset_usd": 1.45,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769964300": {
+      "dataset": "OOS9",
+      "binance_strike": 77242.27,
+      "inferred_chainlink_strike": 77226.33,
+      "offset_usd": 15.94,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769965200": {
+      "dataset": "OOS9",
+      "binance_strike": 77494.76,
+      "inferred_chainlink_strike": 77491.86,
+      "offset_usd": 2.9,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769966100": {
+      "dataset": "OOS9",
+      "binance_strike": 77641.2,
+      "inferred_chainlink_strike": 77669.04,
+      "offset_usd": -27.84,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769967000": {
+      "dataset": "OOS9",
+      "binance_strike": 77556.46,
+      "inferred_chainlink_strike": 77549.21,
+      "offset_usd": 7.25,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769968800": {
+      "dataset": "OOS9",
+      "binance_strike": 77745.33,
+      "inferred_chainlink_strike": 77749.69,
+      "offset_usd": -4.36,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769969700": {
+      "dataset": "OOS9",
+      "binance_strike": 78233.99,
+      "inferred_chainlink_strike": 78250.13,
+      "offset_usd": -16.14,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769971500": {
+      "dataset": "OOS9",
+      "binance_strike": 77990.71,
+      "inferred_chainlink_strike": 77986.33,
+      "offset_usd": 4.38,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769972400": {
+      "dataset": "OOS9",
+      "binance_strike": 78029.29,
+      "inferred_chainlink_strike": 78023.45,
+      "offset_usd": 5.84,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769973300": {
+      "dataset": "OOS9",
+      "binance_strike": 77736.01,
+      "inferred_chainlink_strike": 77745.47,
+      "offset_usd": -9.46,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769974200": {
+      "dataset": "OOS9",
+      "binance_strike": 77699.99,
+      "inferred_chainlink_strike": 77694.18,
+      "offset_usd": 5.81,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769975100": {
+      "dataset": "OOS9",
+      "binance_strike": 77544.38,
+      "inferred_chainlink_strike": 77572.19,
+      "offset_usd": -27.81,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769976000": {
+      "dataset": "OOS9",
+      "binance_strike": 77174.77,
+      "inferred_chainlink_strike": 77173.33,
+      "offset_usd": 1.44,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1769976900": {
+      "dataset": "OOS9",
+      "binance_strike": 77193.12,
+      "inferred_chainlink_strike": 77196.01,
+      "offset_usd": -2.89,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770051600": {
+      "dataset": "OOS9",
+      "binance_strike": 78896.11,
+      "inferred_chainlink_strike": 78896.11,
+      "offset_usd": null,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770053400": {
+      "dataset": "OOS9",
+      "binance_strike": 78965.64,
+      "inferred_chainlink_strike": 78970.07,
+      "offset_usd": -4.43,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770054300": {
+      "dataset": "OOS9",
+      "binance_strike": 78875.1,
+      "inferred_chainlink_strike": 78861.8,
+      "offset_usd": 13.3,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770055200": {
+      "dataset": "OOS9",
+      "binance_strike": 78988.64,
+      "inferred_chainlink_strike": 78993.07,
+      "offset_usd": -4.43,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770056100": {
+      "dataset": "OOS9",
+      "binance_strike": 78711.88,
+      "inferred_chainlink_strike": 78704.52,
+      "offset_usd": 7.36,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770057000": {
+      "dataset": "OOS9",
+      "binance_strike": 78430.36,
+      "inferred_chainlink_strike": 78417.14,
+      "offset_usd": 13.22,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770059700": {
+      "dataset": "OOS9",
+      "binance_strike": 78519.99,
+      "inferred_chainlink_strike": 78509.7,
+      "offset_usd": 10.29,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770061500": {
+      "dataset": "OOS9",
+      "binance_strike": 78544.85,
+      "inferred_chainlink_strike": 78543.38,
+      "offset_usd": 1.47,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770062400": {
+      "dataset": "OOS9",
+      "binance_strike": 78341.51,
+      "inferred_chainlink_strike": 78357.67,
+      "offset_usd": -16.16,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770064200": {
+      "dataset": "OOS9",
+      "binance_strike": 78415.29,
+      "inferred_chainlink_strike": 78446.44,
+      "offset_usd": -31.15,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770065100": {
+      "dataset": "OOS9",
+      "binance_strike": 78188.73,
+      "inferred_chainlink_strike": 78175.55,
+      "offset_usd": 13.18,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770066000": {
+      "dataset": "OOS9",
+      "binance_strike": 77998.64,
+      "inferred_chainlink_strike": 77997.18,
+      "offset_usd": 1.46,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770066900": {
+      "dataset": "OOS9",
+      "binance_strike": 78345.26,
+      "inferred_chainlink_strike": 78352.59,
+      "offset_usd": -7.33,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770067800": {
+      "dataset": "OOS9",
+      "binance_strike": 78291.46,
+      "inferred_chainlink_strike": 78292.92,
+      "offset_usd": -1.46,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770068700": {
+      "dataset": "OOS9",
+      "binance_strike": 78367.52,
+      "inferred_chainlink_strike": 78366.05,
+      "offset_usd": 1.47,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770069600": {
+      "dataset": "OOS9",
+      "binance_strike": 78532.07,
+      "inferred_chainlink_strike": 78542.36,
+      "offset_usd": -10.29,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770070500": {
+      "dataset": "OOS9",
+      "binance_strike": 78765.36,
+      "inferred_chainlink_strike": 78783.1,
+      "offset_usd": -17.74,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770071400": {
+      "dataset": "OOS9",
+      "binance_strike": 78661.43,
+      "inferred_chainlink_strike": 78683.62,
+      "offset_usd": -22.19,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770072300": {
+      "dataset": "OOS9",
+      "binance_strike": 78831.02,
+      "inferred_chainlink_strike": 78841.35,
+      "offset_usd": -10.33,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770073200": {
+      "dataset": "OOS9",
+      "binance_strike": 78795.2,
+      "inferred_chainlink_strike": 78811.46,
+      "offset_usd": -16.26,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770074100": {
+      "dataset": "OOS9",
+      "binance_strike": 78748.71,
+      "inferred_chainlink_strike": 78720.47,
+      "offset_usd": 28.24,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770075000": {
+      "dataset": "OOS9",
+      "binance_strike": 78620.73,
+      "inferred_chainlink_strike": 78613.38,
+      "offset_usd": 7.35,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770075900": {
+      "dataset": "OOS9",
+      "binance_strike": 78892.42,
+      "inferred_chainlink_strike": 78905.72,
+      "offset_usd": -13.3,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770076800": {
+      "dataset": "OOS9",
+      "binance_strike": 78737.54,
+      "inferred_chainlink_strike": 78731.65,
+      "offset_usd": 5.89,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770077700": {
+      "dataset": "OOS9",
+      "binance_strike": 78576.86,
+      "inferred_chainlink_strike": 78573.92,
+      "offset_usd": 2.94,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770080400": {
+      "dataset": "OOS9",
+      "binance_strike": 79065.24,
+      "inferred_chainlink_strike": 79090.56,
+      "offset_usd": -25.32,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770083100": {
+      "dataset": "OOS9",
+      "binance_strike": 78939.99,
+      "inferred_chainlink_strike": 78948.11,
+      "offset_usd": -8.12,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770084000": {
+      "dataset": "OOS9",
+      "binance_strike": 79017.64,
+      "inferred_chainlink_strike": 79026.51,
+      "offset_usd": -8.87,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770084900": {
+      "dataset": "OOS9",
+      "binance_strike": 78527.79,
+      "inferred_chainlink_strike": 78521.92,
+      "offset_usd": 5.87,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770085800": {
+      "dataset": "OOS9",
+      "binance_strike": 78699.99,
+      "inferred_chainlink_strike": 78698.52,
+      "offset_usd": 1.47,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770086700": {
+      "dataset": "OOS9",
+      "binance_strike": 78393.01,
+      "inferred_chainlink_strike": 78406.23,
+      "offset_usd": -13.22,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770087600": {
+      "dataset": "OOS9",
+      "binance_strike": 77808.01,
+      "inferred_chainlink_strike": 77786.06,
+      "offset_usd": 21.95,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770088500": {
+      "dataset": "OOS9",
+      "binance_strike": 78021.54,
+      "inferred_chainlink_strike": 78005.44,
+      "offset_usd": 16.1,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770089400": {
+      "dataset": "OOS9",
+      "binance_strike": 78306.01,
+      "inferred_chainlink_strike": 78319.21,
+      "offset_usd": -13.2,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770090300": {
+      "dataset": "OOS9",
+      "binance_strike": 78560.01,
+      "inferred_chainlink_strike": 78582.17,
+      "offset_usd": -22.16,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770091200": {
+      "dataset": "OOS9",
+      "binance_strike": 78753.33,
+      "inferred_chainlink_strike": 78772.56,
+      "offset_usd": -19.23,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770092100": {
+      "dataset": "OOS9",
+      "binance_strike": 78759.99,
+      "inferred_chainlink_strike": 78782.21,
+      "offset_usd": -22.22,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770093000": {
+      "dataset": "OOS9",
+      "binance_strike": 78509.36,
+      "inferred_chainlink_strike": 78499.07,
+      "offset_usd": 10.29,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770093900": {
+      "dataset": "OOS9",
+      "binance_strike": 78979.62,
+      "inferred_chainlink_strike": 78992.94,
+      "offset_usd": -13.32,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770095700": {
+      "dataset": "OOS9",
+      "binance_strike": 78504.11,
+      "inferred_chainlink_strike": 78499.71,
+      "offset_usd": 4.4,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770096600": {
+      "dataset": "OOS9",
+      "binance_strike": 78431.82,
+      "inferred_chainlink_strike": 78423.01,
+      "offset_usd": 8.81,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770097500": {
+      "dataset": "OOS9",
+      "binance_strike": 78362.35,
+      "inferred_chainlink_strike": 78346.18,
+      "offset_usd": 16.17,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770098400": {
+      "dataset": "OOS9",
+      "binance_strike": 78240.45,
+      "inferred_chainlink_strike": 78221.35,
+      "offset_usd": 19.1,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770099300": {
+      "dataset": "OOS9",
+      "binance_strike": 78069.73,
+      "inferred_chainlink_strike": 78041.73,
+      "offset_usd": 28.0,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770100200": {
+      "dataset": "OOS9",
+      "binance_strike": 78566.21,
+      "inferred_chainlink_strike": 78594.39,
+      "offset_usd": -28.18,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770101100": {
+      "dataset": "OOS9",
+      "binance_strike": 78464.61,
+      "inferred_chainlink_strike": 78457.27,
+      "offset_usd": 7.34,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770102000": {
+      "dataset": "OOS9",
+      "binance_strike": 78594.01,
+      "inferred_chainlink_strike": 78604.31,
+      "offset_usd": -10.3,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770102900": {
+      "dataset": "OOS9",
+      "binance_strike": 78750.01,
+      "inferred_chainlink_strike": 78758.85,
+      "offset_usd": -8.84,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770103800": {
+      "dataset": "OOS9",
+      "binance_strike": 78670.92,
+      "inferred_chainlink_strike": 78675.33,
+      "offset_usd": -4.41,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770105600": {
+      "dataset": "OOS9",
+      "binance_strike": 78794.67,
+      "inferred_chainlink_strike": 78796.14,
+      "offset_usd": -1.47,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770106500": {
+      "dataset": "OOS9",
+      "binance_strike": 78488.67,
+      "inferred_chainlink_strike": 78481.33,
+      "offset_usd": 7.34,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770107400": {
+      "dataset": "OOS9",
+      "binance_strike": 78882.21,
+      "inferred_chainlink_strike": 78889.59,
+      "offset_usd": -7.38,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770108300": {
+      "dataset": "OOS9",
+      "binance_strike": 79005.32,
+      "inferred_chainlink_strike": 79042.87,
+      "offset_usd": -37.55,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770109200": {
+      "dataset": "OOS9",
+      "binance_strike": 78747.96,
+      "inferred_chainlink_strike": 78736.16,
+      "offset_usd": 11.8,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770110100": {
+      "dataset": "OOS9",
+      "binance_strike": 78180.79,
+      "inferred_chainlink_strike": 78161.7,
+      "offset_usd": 19.09,
+      "resolution": "DOWN",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770111000": {
+      "dataset": "OOS9",
+      "binance_strike": 77960.51,
+      "inferred_chainlink_strike": 77938.52,
+      "offset_usd": 21.99,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770111900": {
+      "dataset": "OOS9",
+      "binance_strike": 78312.14,
+      "inferred_chainlink_strike": 78304.81,
+      "offset_usd": 7.33,
+      "resolution": "UP",
+      "binance_agrees": true
+    },
+    "btc-updown-15m-1770112800": {
+      "dataset": "OOS9",
+      "binance_strike": 78400.01,
+      "inferred_chainlink_strike": 78398.54,
+      "offset_usd": 1.47,
+      "resolution": "UP",
+      "binance_agrees": true
+    }
+  }
+}

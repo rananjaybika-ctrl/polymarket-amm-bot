@@ -74,6 +74,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.api.binance_client import BinanceClient
 from src.api.websocket_client import WebSocketClient, BookUpdate
+from src.api.chainlink_rtds import ChainlinkRTDS
 from src.services.market_finder import MarketFinder
 
 
@@ -428,6 +429,10 @@ class SpreadCaptureObserver:
         # WebSocket clients
         self.binance: Optional[BinanceClient] = None
         self.poly_ws: Optional[WebSocketClient] = None
+        self.chainlink: Optional[ChainlinkRTDS] = None
+
+        # Chainlink strike tracking
+        self._chainlink_strike: float = 0.0  # Captured at market epoch
 
         # Market tracking
         self.current_market = None
@@ -506,6 +511,12 @@ class SpreadCaptureObserver:
             except RuntimeError:
                 pass  # No event loop running
 
+        if self.chainlink:
+            try:
+                asyncio.create_task(self.chainlink.disconnect())
+            except RuntimeError:
+                pass
+
         if self.binance:
             try:
                 asyncio.create_task(self.binance.disconnect())
@@ -524,13 +535,46 @@ class SpreadCaptureObserver:
         logger.info("Observer stopped")
 
     def _on_book_update(self, update: BookUpdate):
-        """Handle Polymarket orderbook update."""
+        """Handle Polymarket orderbook update (full snapshot)."""
         # Only accept updates for current market's tokens
         if update.token_id == self.up_token_id:
             self.up_book = update
         elif update.token_id == self.down_token_id:
             self.down_book = update
         # Ignore updates for old tokens (after market rotation)
+
+    def _on_price_change(self, update):
+        """Handle Polymarket price change (incremental update).
+
+        Updates best bid/ask in cached BookUpdate from price_change events.
+        These fire on every order place/cancel, much more frequent than
+        full book snapshots (which only fire on trades).
+        """
+        from src.models.orderbook import Order
+
+        if update.token_id == self.up_token_id:
+            book = self.up_book
+        elif update.token_id == self.down_token_id:
+            book = self.down_book
+        else:
+            return
+
+        if book is None:
+            return
+
+        # Update best bid if changed
+        if update.best_bid is not None:
+            if book.bids and len(book.bids) > 0:
+                book.bids[0] = Order(price=update.best_bid, size=book.bids[0].size)
+            else:
+                book.bids = [Order(price=update.best_bid, size=0)]
+
+        # Update best ask if changed
+        if update.best_ask is not None:
+            if book.asks and len(book.asks) > 0:
+                book.asks[0] = Order(price=update.best_ask, size=book.asks[0].size)
+            else:
+                book.asks = [Order(price=update.best_ask, size=0)]
 
     def _is_garbage_orderbook(self, up_bid: float, up_ask: float, down_bid: float, down_ask: float) -> bool:
         """
@@ -716,6 +760,8 @@ class SpreadCaptureObserver:
                 'down_ask_size_1', 'down_ask_size_2', 'down_ask_size_3', 'down_ask_size_4', 'down_ask_size_5',
                 # Computed imbalance metrics
                 'up_imbalance', 'down_imbalance',
+                # Chainlink RTDS (true resolution price source)
+                'chainlink_btc_price', 'chainlink_strike',
             ]
             self.csv_writer.writerow(headers)
             self.csv_file.flush()
@@ -1005,6 +1051,14 @@ class SpreadCaptureObserver:
             round(down_depth['imbalance'], 4),
         ])
 
+        # Append Chainlink RTDS price and strike
+        cl_price = self.chainlink.price if self.chainlink and self.chainlink.price > 0 else ''
+        cl_strike = self._chainlink_strike if self._chainlink_strike > 0 else ''
+        row.extend([
+            round(cl_price, 2) if cl_price else '',
+            round(cl_strike, 2) if cl_strike else '',
+        ])
+
         try:
             self.csv_writer.writerow(row)
             self.sample_count += 1
@@ -1192,6 +1246,14 @@ class SpreadCaptureObserver:
         self.up_book = None
         self.down_book = None
 
+        # Capture Chainlink strike at market transition
+        if self.chainlink and self.chainlink.price > 0 and self.chainlink.is_fresh:
+            self._chainlink_strike = self.chainlink.price
+            print(f"  Chainlink strike: ${self._chainlink_strike:,.2f}", flush=True)
+        else:
+            self._chainlink_strike = 0.0
+            print(f"  Chainlink strike: UNAVAILABLE (will use Binance fallback)", flush=True)
+
         # CRITICAL: Polymarket WebSocket doesn't properly switch subscriptions
         # Must reconnect to get fresh subscription for new tokens
         if self.poly_ws:
@@ -1241,7 +1303,11 @@ class SpreadCaptureObserver:
         if self.binance and self.binance.current_price > 0:
             velocity = self.binance.calculate_velocity(window_seconds=10)
             zone_name = get_velocity_zone(velocity)
-            print(f"Binance: ${self.binance.current_price:.2f} | Velocity: {velocity:.4f} bps/s | Zone: {zone_name}")
+            cl_str = ""
+            if self.chainlink and self.chainlink.price > 0:
+                diff = self.chainlink.price - self.binance.current_price
+                cl_str = f" | Chainlink: ${self.chainlink.price:,.2f} (diff: ${diff:+.0f})"
+            print(f"Binance: ${self.binance.current_price:.2f} | Velocity: {velocity:.4f} bps/s | Zone: {zone_name}{cl_str}")
 
         if self.up_book and self.down_book:
             pair_cost = (self.up_book.best_ask or 0) + (self.down_book.best_ask or 0)
@@ -1317,10 +1383,31 @@ class SpreadCaptureObserver:
             await asyncio.sleep(0.1)
         print(f"  Binance connected: ${self.binance.current_price:.2f}")
 
+        # Initialize Chainlink RTDS (true Polymarket resolution price)
+        print("Connecting to Chainlink RTDS (BTC/USD)...")
+        self.chainlink = ChainlinkRTDS()
+        try:
+            await self.chainlink.connect()
+            # Wait for first price (up to 5s)
+            for _ in range(50):
+                if self.chainlink.price > 0:
+                    break
+                await asyncio.sleep(0.1)
+            if self.chainlink.price > 0:
+                diff = self.chainlink.price - self.binance.current_price
+                print(f"  Chainlink connected: ${self.chainlink.price:,.2f} "
+                      f"(Binance diff: ${diff:+.2f})")
+            else:
+                print("  Chainlink RTDS: no price yet (will populate on next update)")
+        except Exception as e:
+            print(f"  [WARN] Chainlink RTDS failed: {e} (observer will continue without it)")
+            self.chainlink = None
+
         # Initialize Polymarket WebSocket
         print("Connecting to Polymarket WebSocket...")
         self.poly_ws = WebSocketClient(auto_reconnect=True)
         self.poly_ws.on_book_update(self._on_book_update)
+        self.poly_ws.on_price_change(self._on_price_change)
         try:
             await self.poly_ws.connect()
         except Exception as e:

@@ -1026,8 +1026,216 @@ if spike_ts - last_signal_ts[spike_dir] >= cooldown_ms:
 
 ---
 
-**Last updated:** Feb 6, 2026
-**Mistakes documented:** 50
+---
+
+### 51. SIMULATION LOOP ONLY CHECKED POSITIONS ON SPIKE ROWS - WASTED 6-8 HOURS
+**What happened:** Created `aggressive_m_v2_grid_search.py` with a simulation loop that iterated through SPIKE ROWS only. Positions were checked for MAKER fills only when hitting a spike timestamp, missing all intermediate observer rows where the ask could have dropped to our bid level.
+
+**Root cause:**
+- Loop structure: `for _, spike_row in market_spikes.iterrows():`
+- Positions checked ONLY at spike timestamps
+- Between spikes (hundreds of rows), positions never processed
+- MAKER fills require checking EVERY row to see if ask touches our bid
+- Result: 0 trades across all 864 configs (0% fill rate)
+
+**Cost:**
+- 6-8 hours of user's sleep/time wasted on useless run
+- 864 configs × ~30s = 7+ hours, ALL ZEROS
+- Same mistake pattern as #10 (fill simulation unrealistic) and #33 (wrote from scratch)
+
+**The data PROVED fills should happen:**
+- 54% of signals show expensive_ask drop ≥ 2c within 50 rows
+- 74% show drop ≥ 1c
+- But loop never checked those rows!
+
+**FIX:**
+- Iterate through ALL observer rows: `for obs_idx in range(len(mdf)):`
+- Check positions on EVERY row for fill opportunities
+- Only create new positions when row matches spike timestamp
+
+**PREVENTION:**
+1. When simulating MAKER orders, the loop MUST iterate through ALL price rows
+2. Spike detection identifies WHEN to enter, but fill detection needs ALL rows
+3. Test simulation on small data first and verify non-zero trades before long runs
+4. If checkpoint shows all zeros after 100 configs, STOP AND DEBUG
+
+**Source:** Feb 6, 2026 - User ran overnight, woke up to 0 trades everywhere
+
+---
+
+### 52. HARDCODED RESOLUTION FILE PATH FOR ALL DATASETS
+**What happened:** `aggressive_m_v2_grid_search.py` loaded `market_resolutions.csv` for ALL datasets (IS+OOS2, OOS7, OOS8, OOS9). But `market_resolutions.csv` only contains IS+OOS2 slugs (Jan 16-19). OOS7/8/9 have different slugs (Jan 29 - Feb 3).
+
+**Result:** 0 matched markets → 0 trades for OOS7, OOS8, OOS9. Grid search ran successfully but produced all zeros for 3/4 datasets.
+
+**Root cause:**
+```python
+# Line 550 - HARDCODED for all datasets
+res_path = base_dir / "research/observer/market_resolutions.csv"
+```
+
+**The data existed - just in different files:**
+- IS+OOS2 → `market_resolutions.csv` (486 resolutions)
+- OOS7 → `resolutions_20260129.csv` + `resolutions_20260130.csv` (75 resolutions)
+- OOS8 → `resolutions_20260131.csv` (72 resolutions)
+- OOS9 → `resolutions_oos9_1.csv` + `resolutions_oos9_2.csv` (143 resolutions)
+
+**Cost:**
+- User ran full grid search, got 0 trades on 3/4 datasets
+- Wasted compute time
+- User frustration ("how the FUCK is this possible, we have been using these datasets 100s of times")
+
+**Why this wasn't caught earlier:**
+- Previous backtests used different loading code that worked
+- This script was newly created and copied only partial logic
+- No validation that matched markets > 0 before running
+
+**FIX:**
+1. Added `res_files` to each dataset config in DATASETS dict
+2. Updated `load_dataset()` to load dataset-specific resolution files
+3. Handle different column formats (`slug`/`winner` vs `market_slug`/`resolution`)
+
+**PREVENTION:**
+1. When creating dataset loaders, verify EACH dataset loads correctly before full run
+2. Add assertion: `assert len(markets_with_res) > 0, f"No matched markets for {dataset}"`
+3. Quick test on ALL datasets, not just the first one
+4. Check that resolution slugs match observer slugs (sample comparison)
+
+**Source:** Feb 6, 2026 - FADE grid search returned 0 trades for OOS7/8/9
+
+---
+
+### 53. TRUSTED SUMMARY INSTEAD OF CHECKING LOGS WHEN USER ASKED ABOUT LOST MESSAGE
+**What happened:** User asked "what was my last message prev conversation". I looked at the compaction summary and said "summarize for context befor compact". User pushed back: "after this", "you deleted it then", "check .jsonl logs", "search the word idea" - FOUR times before I actually searched the logs.
+
+**The lost message was:**
+```
+is this idea valid
+using the same that you used, tweak it and revert later or copy the file. and make the below changes
+if we simply place a limit order at best bid 30s or no order pull 10% SL if price touches 85 hold until resolution
+10sh
+```
+
+**Root cause:**
+- Context compaction happened RIGHT AFTER user sent this message
+- The summary didn't include it (timing issue)
+- When user asked about their last message, I TRUSTED THE SUMMARY instead of checking the actual .jsonl logs
+- User had to push back 4-5 times before I actually searched properly
+
+**Cost:**
+- Wasted user's time with back-and-forth
+- User frustration ("why the fuck did i have to do so much back and forth")
+- Lost the user's actual idea/question that needed addressing
+
+**FIX:**
+1. When user asks "what was my last message" after a compact, ALWAYS check .jsonl logs
+2. The summary is generated BEFORE the last message is processed - it can miss recent messages
+3. Don't argue with user ("nothing happened after X") - just search the logs
+4. Use: `grep '"content":"' /path/to/session.jsonl | tail -20` to find recent messages
+
+**Source:** Feb 6, 2026 - User's FADE strategy idea lost after compact
+
+---
+
+### Mistake #54: Writing wrong formula in summary while code is correct
+
+**What happened:**
+- Ran AGGRESSIVE_M_V2 grid search with correct code: `entry_bid = expensive_ask - offset`
+- When summarizing results, wrote: "bid at best_bid + 3c offset"
+- This is COMPLETELY WRONG - opposite direction and wrong variable
+- User caught it immediately
+
+**The actual code:**
+```python
+entry_bid = max(0.01, expensive_ask - config.entry_offset_cents)
+# 3c offset means: bid at expensive_ask - 0.03
+```
+
+**What I wrote (WRONG):**
+```
+bid at best_bid + 3c offset
+```
+
+**Root cause:**
+- Careless writing when summarizing
+- Didn't double-check the formula against the code
+- Mixed up variable names (best_bid vs expensive_ask) and direction (+ vs -)
+
+**FIX:**
+1. When summarizing trading logic, COPY the actual formula from code
+2. Don't paraphrase trading math - quote it exactly
+3. Double-check direction (+/-) and variable names before sending
+
+**Source:** Feb 7, 2026 - AGGRESSIVE_M_V2 grid search summary
+
+---
+
+### 55. WROTE FV MM V2 BACKTEST FROM SCRATCH WITH WRONG FILL MODEL (REPEAT OF #33, #51)
+**What happened:** Created `fair_value_mm_v2_backtest.py` by writing simulation logic entirely from scratch instead of copying from `aggressive_m_v2_grid_search.py`. The new script:
+
+1. **Used TAKER fills at observed ask** (`entry_price = buy_ask`, line 412) — NO 500ms delay
+2. **No capital constraint** — `STARTING_CAPITAL=170` defined but NEVER enforced
+3. **No maker simulation** — should use maker entry (0% fee) like FADE, not taker (1.56% fee)
+4. **Wrong fill model** — real taker fills happen 542ms later at THEN-current ask, not at order-time ask
+
+**This is the THIRD TIME making Mistake #33** (writing from scratch instead of copying validated code).
+
+**The correct execution architecture (from `paper_trading.py:70-92`):**
+```
+TAKER (entry): 500ms exchange + 42ms network = 542ms delay, fill at CURRENT ask
+MAKER (hedge): 0ms delay, strict price-touch (ask <= our bid), 0% fee + rebate
+```
+
+**Cost:**
+- FV MM v2 results ($7.42/hr EWMA_WIN_5c_TW) are **COMPLETELY VOID**
+- Multiple hours building + running an invalid backtest
+- User's time wasted reviewing meaningless results
+- Trust further eroded
+
+**Root cause:**
+- STILL not following CLAUDE.md: "COPY simulation logic from validated files"
+- STILL not following MEMORY.md: execution architecture is immutable
+- Despite hooks, skills, and 54 prior documented mistakes
+
+**FIX — PERMANENT RULES:**
+1. **Execution engine is SACRED** — copy from `aggressive_m_v2_grid_search.py`
+2. **Market logic is FLEXIBLE** — can innovate on signal generation, entry criteria
+3. **Fill simulation MUST match `paper_trading.py`** — taker delay, maker price-touch
+4. If not sure about execution mechanics → **ASK, don't guess**
+
+**Source:** Feb 9-10, 2026 - FV MM v2 backtest audit revealed entirely wrong fill model
+
+---
+
+---
+
+### Mistake #56: Ignored reference scripts when building HF logger — no stale reconnect
+
+**What happened:**
+User explicitly said "we have a data collection wrapper, see if you can learn anything from that script." I reviewed the Polymarket data collection wrapper and adopted some features (duration control, line-buffered CSV, health monitoring, exponential backoff). But I only made the health monitor LOG warnings — I never built the critical feature: force reconnect when feeds go stale.
+
+**Impact:**
+- Logger ran for 5+ days on AWS but only collected ~3 hours of data (~148K ticks)
+- WebSocket connection stayed alive (pings worked) but trade data silently stopped flowing
+- Health monitor printed "WARNING: no ticks for 440840s!" but did nothing about it
+- Lost ~5 days of BTC/ETH/SOL/HYPE tick data that cannot be recovered
+- User explicitly told me to study the reference scripts and I still missed the most important pattern
+
+**Root cause:**
+- Treated "learn from reference scripts" as cosmetic (copy easy features) instead of studying the resilience patterns that make long-running data collection actually work
+- Health monitoring without corrective action is useless — it's like a smoke alarm that only beeps but never calls the fire department
+
+**FIX:**
+1. When told to reference existing scripts, study the FAILURE HANDLING patterns, not just the happy path
+2. Any health monitor MUST have corrective action (reconnect, restart, alert) — not just logging
+3. For long-running processes: test failure scenarios (stale connection, silent disconnect) BEFORE deploying
+
+**Source:** Feb 11, 2026 — HF logger on AWS stale for 5 days, only 148K ticks collected
+
+---
+
+**Last updated:** Feb 11, 2026
+**Mistakes documented:** 56
 **Note:** Use `sudo systemctl stop polymarket-bot` to kill AWS frontend (not kill PID)
 
 **Note:** Multi-cycle findings moved to `research/findings/SINGLE_CYCLE_OPTIMAL_20260131.md` (research finding, not Claude mistake)

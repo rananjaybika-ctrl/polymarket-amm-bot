@@ -9,13 +9,12 @@
 
 ## Executive Summary
 
-This document compares our AGGRESSIVE spike-detection strategy with the sophisticated arbitrage methods described in the Roan article ($40M extracted). The goal is to identify **profitable opportunities across different time horizons** that we could implement.
+This document analyzes arbitrage math concepts from the Roan article and how they apply to our BTC 15m trading.
 
-**Key Finding:** Our strategy and the article's arbitrage operate in **completely different domains**:
-- **Ours:** Exploits BTC→Polymarket price lag (2 seconds, intra-market)
-- **Theirs:** Exploits cross-condition probability mispricing (days, multi-market)
-
-Both can coexist. The article reveals opportunities we're not capturing.
+**Key Concepts:**
+- **Sequential pair building:** UP and DOWN are each cheap at different times - buy both sequentially for pair cost < $1
+- **Bregman/Frank-Wolfe:** Mathematical optimization for finding optimal positions
+- **Gabagool:** Made ~$2M trading BTC 15m markets (NOT $40M - that was total extracted across ALL traders)
 
 ---
 
@@ -219,18 +218,17 @@ Solution: Submit all legs within 30ms to confirm in same block.
 | **Competition** | Low (niche BTC correlation) | High (published math) |
 | **Infrastructure** | Python + WebSocket | Gurobi IP solver + parallel exec |
 
-### 3.2 Why Both Can Coexist
+### 3.2 Sequential Pair Building Opportunity
 
-**Our edge is orthogonal:**
-- We don't compete with arbitrageurs—they're fixing probability violations
-- We're exploiting a temporal lag between BTC and Polymarket
-- Different markets (BTC 15m vs election/sports multi-condition)
-- Different time scales (seconds vs days)
+**Key insight from data:**
+- UP + DOWN may not be < $1 simultaneously
+- But at DIFFERENT TIMES, each side IS cheap
+- Sequential buying can achieve pair cost < $1
 
-**Article's edge requires:**
-- Multi-condition markets (elections, tournaments)
-- Capital to hold until resolution
-- IP solver infrastructure (Gurobi license ~$10K/year)
+**What Gabagool does (BTC 15m markets):**
+- Buys CHEAP side 52.4% of time
+- 70% prediction accuracy via model
+- Accepts adverse selection (~2.6% cost) because prediction overcomes it
 
 ---
 
@@ -319,21 +317,21 @@ if total < 0.98:  # 2% margin for fees
     # Guaranteed profit: (1.00 - 0.95) × 50 = $2.50 minus fees
 ```
 
-**Reality Check:**
-- In our OOS data, UP+DOWN rarely deviates from 1.00 by more than 1%
-- When it does, spread is usually wider → execution risk
-- Not a primary strategy, but worth monitoring
+**Key Insight - Sequential Pair Building:**
+- UP+DOWN together may not be < $1 at any single moment
+- BUT at DIFFERENT TIMES, each side IS cheap
+- Gabagool achieves $0.974 implied pair cost by buying each side when it dips
+- This is the core strategy we want to build
 
-### 4.4 DAYS (New Opportunity - Cross-Market Arbitrage)
+### 4.4 Sequential Pair Building (Primary Opportunity)
 
-**What Article Describes:**
-- Dependent markets misprice relative to each other
-- Example: "BTC > 100K by Feb 15" and "BTC > 100K by Feb 28"
-- If Feb 28 YES is cheaper than Feb 15 YES → arbitrage (Feb 15 implies Feb 28)
+**What Gabagool Does:**
+- Posts grid orders on both sides
+- Buys UP when UP is cheap (e.g., $0.35)
+- Buys DOWN when DOWN is cheap (e.g., $0.42)
+- Combined pair cost: $0.77 → guaranteed $1 payout = $0.23 profit
 
-**Potential Application:**
-
-Monitor BTC milestone markets for logical inconsistencies:
+**Our Implementation:**
 ```
 Market A: "BTC > 100K by Feb 15" → YES $0.40
 Market B: "BTC > 100K by Feb 28" → YES $0.35  ← WRONG! Should be ≥ $0.40
@@ -376,9 +374,9 @@ Our AGGRESSIVE strategy is **validated and profitable**:
 
 ### 5.4 What NOT To Do
 
-1. **Don't chase the $40M arbitrage** - Requires Gurobi, $500K+ capital, different expertise
-2. **Don't abandon spike detection** - Our edge is orthogonal and validated
-3. **Don't add complexity without backtest** - Every enhancement needs OOS validation
+1. **Don't add complexity without backtest** - Every enhancement needs OOS validation
+2. **Don't ignore sequential pair building** - UP and DOWN ARE cheap at different times
+3. **Don't assume markets are always efficient** - Gabagool made $2M on BTC 15m
 
 ---
 
