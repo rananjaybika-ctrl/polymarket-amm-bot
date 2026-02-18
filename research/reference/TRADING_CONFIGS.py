@@ -150,6 +150,11 @@ class TradingConfig:
     # When False: old pair-trading mode (entry+hedge+merge) — NEVER VALIDATED.
     fade_mode: bool = True
 
+    # Entry offset for FADE/PHOENIX maker bids (Feb 18, 2026)
+    # Bid price = expensive_ask - entry_offset (maker, 0% fee)
+    # AGGRESSIVE used 0.03, PHOENIX V3 uses 0.02 (tighter spread, more fills)
+    entry_offset: float = 0.03  # Default matches legacy AGGRESSIVE behavior
+
     # Per-market entry cap (Feb 9, 2026 - CAP3 winner)
     # Limits filled entries per market to prevent cycling into losing markets.
     # CAP3: max 3 entries × 15 shares = $42 max exposure per market.
@@ -368,10 +373,87 @@ CONTRARIAN = TradingConfig(
 
 
 # =============================================================================
+# PHOENIX V3 (Feb 18, 2026) - Hedged Maker-Prediction Strategy
+# Grid search winner: O2_C99_DB1.5_TF1.00_CD10_PH0.00
+# $456.06 total, $5.26/hr, 97.3% WR, 663 trades across 166h (6 datasets)
+# Key improvements over AGGRESSIVE:
+#   - entry_offset=0.02 (tighter spread, more fills)
+#   - shares_per_cycle=25 (larger position size)
+#   - max_entries=99 (unlimited cycling per market)
+#   - skip_utc_hours enabled (skip low-accuracy hours)
+#   - No time-stop (hold to resolution)
+#   - decel_boost=1.5x confirmed but not wired to live yet
+# =============================================================================
+
+PHOENIX = TradingConfig(
+    name="PHOENIX",
+
+    # Core settings (same spike detection as AGGRESSIVE)
+    threshold_method="ou",
+    zscore_method="ewma",
+    lookback_ticks=72,
+    lookback_ms=1200,
+
+    # SPIKE DETECTION - EWMA_1000 (same as AGGRESSIVE)
+    spike_method="EWMA_1000",
+
+    # NO TIME-STOP — hold to resolution (97.3% WR)
+    stop_loss_pct=None,
+    time_stop_seconds=None,
+
+    # Cycling ON — unlimited entries per market
+    use_cycling=True,
+    min_cycle_gap_ms=50,
+
+    # Z-score filter - DISABLED (same as AGGRESSIVE)
+    z_lo=None,
+    z_hi=None,
+
+    # PHOENIX entry parameters
+    skip_high_entry=True,
+    high_entry_threshold=0.80,      # Only enter when expensive_ask >= $0.80
+    min_time_remaining=120.0,       # Entry window: market_start + 120s to market_end - 120s
+
+    # SINGLE-CYCLE with large per-entry size
+    enable_multicycle=False,
+    max_cycles=1,
+    shares_per_cycle=25,            # PHOENIX: 25 shares per entry (was 15 in AGGRESSIVE)
+
+    # Session loss limit - disabled (hold to resolution with 97% WR)
+    max_session_loss=None,
+
+    # HOUR-OF-DAY FILTER — skip UTC hours with low accuracy
+    # UTC 3,4=pre-Tokyo thin liquidity, 8=London open stop-hunt,
+    # 14=London close, 20=US evening dead zone
+    skip_utc_hours=[3, 4, 8, 14, 20],
+
+    # FADE MODE — buy expensive side as maker, hold to resolution
+    fade_mode=True,
+
+    # ENTRY OFFSET — bid at expensive_ask - 0.02 (tighter than AGGRESSIVE's 0.03)
+    entry_offset=0.02,
+
+    # PER-MARKET ENTRY CAP — effectively unlimited (99 entries per market)
+    max_entries_per_market=99,
+
+    # Breakeven exit - DISABLED (no time-stop, hold to resolution)
+    breakeven_min_hold_ms=10000,
+
+    # Expected performance (V3 grid search winner across 6 datasets, 166h)
+    expected_pnl=456.06,
+    expected_hourly_rate=5.26,
+    expected_win_rate=97.3,
+    expected_trades=663,
+    premature_stop_pct=0.0,         # No time-stop, no premature exits
+    premature_pnl_lost=0.0,
+)
+
+
+# =============================================================================
 # ALL CONFIGS
 # =============================================================================
 
-ALL_CONFIGS = [AGGRESSIVE, BALANCED, CONSERVATIVE, CONTRARIAN]
+ALL_CONFIGS = [PHOENIX, AGGRESSIVE, BALANCED, CONSERVATIVE, CONTRARIAN]
 
 
 def get_config(name: str) -> TradingConfig:

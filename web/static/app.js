@@ -332,11 +332,12 @@ function formatConfigTooltip(modeName, status) {
     }
 
     if (modeName === 'aggressive') {
-        lines.push(`Base Size: ${config.base_size || '--'}`);
-        lines.push(`Skip High: $${config.high_entry_threshold || '--'}`);
-        lines.push(`Lookback: ${config.lookback_ms || '--'}ms`);
-        lines.push(`Time Stop: ${config.time_stop_seconds || '--'}s`);
-        lines.push(`Cycling: ${config.use_cycling ? 'Yes' : 'No'}`);
+        lines.push(`Mode: PHOENIX V3`);
+        lines.push(`Entry: Maker bid (ask - 2c)`);
+        lines.push(`Exit: Hold to resolution`);
+        lines.push(`Win Rate: 97.3%`);
+        lines.push(`Shares/Entry: ${config.base_size || '--'}`);
+        lines.push(`Min Ask: $${config.high_entry_threshold || '--'}`);
         lines.push(`Max Entries/Mkt: ${config.max_entries_per_market || 'unlimited'}`);
     } else if (modeName === 'contrarian') {
         lines.push(`Shares: ${config.shares_per_trade || '--'}`);
@@ -546,14 +547,10 @@ function getAggressiveConfig() {
         start_datetime: document.getElementById('aggressive-start').value,
         end_datetime: document.getElementById('aggressive-end').value,
         starting_balance: parseFloat(document.getElementById('aggressive-balance-input').value),
-        // AGGRESSIVE specific parameters - EWMA_1000 + TS30 winner (Feb 3, 2026)
-        lookback_ms: parseInt(document.getElementById('aggressive-lookback').value),
-        time_stop_seconds: parseFloat(document.getElementById('aggressive-time-stop').value),
-        // z_lo/z_hi removed - EWMA config doesn't use z-score filter (Feb 3, 2026)
+        // PHOENIX config (Feb 18, 2026)
+        fade_mode: true,  // ALWAYS ON — buy opposite of spike, hold to resolution
         base_size: parseInt(document.getElementById('aggressive-base-size').value),
         high_entry_threshold: parseFloat(document.getElementById('aggressive-high-entry').value),
-        use_cycling: document.getElementById('aggressive-cycling').checked,
-        max_daily_loss: parseFloat(document.getElementById('aggressive-max-loss').value) || 0,
         max_entries_per_market: parseInt(document.getElementById('aggressive-max-entries').value) || 0
     };
 }

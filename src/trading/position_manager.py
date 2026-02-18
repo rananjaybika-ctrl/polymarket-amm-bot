@@ -19,8 +19,8 @@ if TYPE_CHECKING:
     from src.services.paper_trading import PaperTradingEngine
     from src.services.live_trading import LiveTradingEngine
 
-# Import TRADING_CONFIGS for default values
-from research.reference.TRADING_CONFIGS import AGGRESSIVE as AGGRESSIVE_CONFIG
+# Import TRADING_CONFIGS for default values (PHOENIX V3 replaces AGGRESSIVE)
+from research.reference.TRADING_CONFIGS import PHOENIX as AGGRESSIVE_CONFIG
 
 logger = logging.getLogger(__name__)
 

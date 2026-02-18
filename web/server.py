@@ -84,7 +84,8 @@ from src.services.auto_redeemer import AutoRedeemer
 from src.config import Config
 
 # TRADING_CONFIGS.py is the SINGLE SOURCE OF TRUTH for all trading parameters
-from research.reference.TRADING_CONFIGS import AGGRESSIVE as AGGRESSIVE_CONFIG
+# PHOENIX V3 (Feb 18, 2026) replaces AGGRESSIVE as the active config
+from research.reference.TRADING_CONFIGS import PHOENIX as AGGRESSIVE_CONFIG
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -238,10 +239,10 @@ class AccumulationBotConfig(BaseModel):
 
 
 class AggressiveBotConfig(BaseModel):
-    """Configuration for AGGRESSIVE (Path 1) strategy from web UI.
+    """Configuration for PHOENIX (formerly AGGRESSIVE) strategy from web UI.
 
-    Spike detection with velocity confirmation, OU adaptive threshold,
-    and time-stop exit logic. Uses EnhancedSpikeStrategy.
+    PHOENIX V3: Maker-prediction with FADE mode, hold to resolution.
+    Uses EnhancedSpikeStrategy with entry_offset=0.02, 25 shares/entry.
 
     ALL DEFAULTS sourced from TRADING_CONFIGS.py (single source of truth).
     """
@@ -251,18 +252,19 @@ class AggressiveBotConfig(BaseModel):
     end_datetime: str
     starting_balance: float = 170.0
 
-    # Path 1 parameters - ALL FROM TRADING_CONFIGS.py
+    # Parameters - ALL FROM TRADING_CONFIGS.py (PHOENIX config)
     threshold_method: str = AGGRESSIVE_CONFIG.threshold_method
     zscore_method: str = AGGRESSIVE_CONFIG.zscore_method
     lookback_ms: int = AGGRESSIVE_CONFIG.lookback_ms
-    time_stop_seconds: float = AGGRESSIVE_CONFIG.time_stop_seconds
+    time_stop_seconds: Optional[float] = AGGRESSIVE_CONFIG.time_stop_seconds
     use_cycling: bool = AGGRESSIVE_CONFIG.use_cycling
-    z_lo: float = AGGRESSIVE_CONFIG.z_lo
-    z_hi: float = AGGRESSIVE_CONFIG.z_hi
+    z_lo: Optional[float] = AGGRESSIVE_CONFIG.z_lo
+    z_hi: Optional[float] = AGGRESSIVE_CONFIG.z_hi
     base_size: int = AGGRESSIVE_CONFIG.shares_per_cycle
     high_entry_threshold: float = AGGRESSIVE_CONFIG.high_entry_threshold
-    max_daily_loss: float = AGGRESSIVE_CONFIG.max_session_loss
+    max_daily_loss: Optional[float] = AGGRESSIVE_CONFIG.max_session_loss
     max_entries_per_market: int = getattr(AGGRESSIVE_CONFIG, 'max_entries_per_market', 0) or 0
+    fade_mode: bool = getattr(AGGRESSIVE_CONFIG, 'fade_mode', False)
 
 
 class ContrarianBotConfig(BaseModel):
@@ -368,7 +370,7 @@ class StrategyState:
 
 # Multi-strategy state - supports running multiple strategies simultaneously
 strategies = {
-    "aggressive": StrategyState("aggressive"),          # Path 1: Spike detection + velocity confirmation
+    "aggressive": StrategyState("aggressive"),          # PHOENIX V3: Maker-prediction FADE mode
     "contrarian": StrategyState("contrarian"),          # Path 2: Bet against BTC direction
     "volume_weighted": StrategyState("volume_weighted"), # Gabagool-style grid maker
 }

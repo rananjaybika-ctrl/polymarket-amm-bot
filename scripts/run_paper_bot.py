@@ -100,7 +100,9 @@ from src.services.orderbook_cache import OrderbookManager
 # CRITICAL: Import TRADING_CONFIGS.py as SINGLE SOURCE OF TRUTH
 # All hardcoded values below should come from here!
 # =============================================================================
-from research.reference.TRADING_CONFIGS import AGGRESSIVE as AGGRESSIVE_CONFIG
+# PHOENIX V3 (Feb 18, 2026) replaces AGGRESSIVE as the active config
+# Aliased as AGGRESSIVE_CONFIG for backward compatibility with all references below
+from research.reference.TRADING_CONFIGS import PHOENIX as AGGRESSIVE_CONFIG
 
 
 # Configure logging
@@ -1264,6 +1266,9 @@ class PaperTradingBot:
                 max_entries_per_market=self.max_entries_per_market,
                 # FADE MODE (Feb 9, 2026) - buy opposite of spike, hold to resolution
                 fade_mode=self.fade_mode,
+                # ENTRY OFFSET (Feb 18, 2026 - PHOENIX V3)
+                # Bid price = expensive_ask - entry_offset (maker, 0% fee)
+                entry_offset=getattr(AGGRESSIVE_CONFIG, 'entry_offset', 0.03),
             )
             multicycle_info = ""
             if AGGRESSIVE_CONFIG.enable_multicycle:

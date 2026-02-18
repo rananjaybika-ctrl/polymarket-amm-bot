@@ -204,7 +204,7 @@ class TelegramNotifier:
                 ],
                 # Graceful stop buttons (stop after current market)
                 [
-                    {"text": "\u23F8 AGG", "callback_data": "graceful_stop_aggressive"},
+                    {"text": "\u23F8 PHX", "callback_data": "graceful_stop_aggressive"},
                     {"text": "\u23F8 CTR", "callback_data": "graceful_stop_contrarian"},
                     {"text": "\u23F8 VW", "callback_data": "graceful_stop_volume_weighted"},
                 ],
@@ -400,7 +400,7 @@ class TelegramNotifier:
         self._on_balance = callback
 
     def on_graceful_stop_aggressive(self, callback: Callable[[], Awaitable[None]]) -> None:
-        """Register callback for graceful stop of AGGRESSIVE mode (stops after current market)."""
+        """Register callback for graceful stop of PHOENIX mode (stops after current market)."""
         self._on_graceful_stop_aggressive = callback
 
     def on_graceful_stop_contrarian(self, callback: Callable[[], Awaitable[None]]) -> None:
@@ -478,7 +478,7 @@ class TelegramNotifier:
 /sell_all - Emergency sell all positions
 
 <b>Strategies:</b>
-\u2022 <b>AGGRESSIVE</b> - Spike detection with velocity confirmation
+\u2022 <b>PHOENIX</b> - Maker-prediction FADE mode (97% WR)
 \u2022 <b>CONTRARIAN</b> - Bet against BTC at reversal points
 \u2022 <b>VOLUME_WEIGHTED</b> - Gabagool-style grid maker"""
             await self.send_message(help_text)
@@ -521,7 +521,7 @@ class TelegramNotifier:
 \u2022 <b>Help</b> - Show this message
 \u2022 <b>Balances</b> - Check live & paper balances
 \u2022 <b>Status</b> - Get current bot status
-\u2022 <b>AGG/CTR/VW</b> - Graceful stop strategy
+\u2022 <b>PHX/CTR/VW</b> - Graceful stop strategy
 \u2022 <b>NUKE ALL</b> - Emergency sell all & stop
 
 <b>Text Commands:</b>
@@ -533,7 +533,7 @@ class TelegramNotifier:
 /help - Show this message
 
 <b>Strategies:</b>
-\u2022 <b>AGGRESSIVE</b> - Spike detection with velocity confirmation
+\u2022 <b>PHOENIX</b> - Maker-prediction FADE mode (97% WR)
 \u2022 <b>CONTRARIAN</b> - Bet against BTC at reversal points
 \u2022 <b>VOLUME_WEIGHTED</b> - Gabagool-style grid maker"""
             await self.send_message(help_text)
@@ -573,11 +573,11 @@ class TelegramNotifier:
         # Graceful stop handlers (stop after current market ends)
         elif data == "graceful_stop_aggressive":
             if self._on_graceful_stop_aggressive:
-                await self.send_message("\u23F8 <b>AGGRESSIVE: Will stop after current market...</b>")
+                await self.send_message("\u23F8 <b>PHOENIX: Will stop after current market...</b>")
                 await self._on_graceful_stop_aggressive()
-                await self.send_message("\u2705 AGGRESSIVE mode flagged for graceful stop.")
+                await self.send_message("\u2705 PHOENIX mode flagged for graceful stop.")
             else:
-                await self.send_message("<i>AGGRESSIVE mode not running.</i>")
+                await self.send_message("<i>PHOENIX mode not running.</i>")
 
         elif data == "graceful_stop_contrarian":
             if self._on_graceful_stop_contrarian:

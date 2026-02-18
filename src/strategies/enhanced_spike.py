@@ -860,6 +860,10 @@ class EnhancedSpikeStrategy:
         # Limits filled entries per market to prevent cycling into losing markets.
         # None = unlimited. 3 = max 3 entries per 15-min market.
         max_entries_per_market: Optional[int] = None,
+        # FADE MODE (Feb 9, 2026)
+        # Buy OPPOSITE of spike direction (expensive side), hold to resolution.
+        # NO hedging, NO pair merging, NO time-stop. PnL from directional accuracy (~88%).
+        fade_mode: bool = False,
     ):
         # Handle LEGACY parameter aliases
         if entry_size is not None:
@@ -902,6 +906,10 @@ class EnhancedSpikeStrategy:
         self.max_entries_per_market = max_entries_per_market
         self._market_entry_count = 0  # Entries in current market (reset on new market)
         self._market_cap_skip_count = 0  # Count signals skipped by market cap
+
+        # FADE mode (Feb 9, 2026)
+        # Buy opposite of spike direction, hold to resolution, no hedge/merge
+        self.fade_mode = fade_mode
 
         # Core parameters
         self.base_size = max(MIN_SHARES, base_size)
@@ -1900,7 +1908,8 @@ class EnhancedSpikeStrategy:
 
         # TIME-STOP CHECK (executes regardless of rate limit)
         # Exit if position held too long and not in profit
-        if s.first_fill_side is not None and s.first_fill_time is not None:
+        # FADE MODE: Skip time-stop entirely — hold to resolution
+        if s.first_fill_side is not None and s.first_fill_time is not None and not self.fade_mode:
             elapsed = current_time - s.first_fill_time
             if elapsed >= self.time_stop_seconds:
                 # Determine spike and expensive based on entry side
@@ -2057,6 +2066,69 @@ class EnhancedSpikeStrategy:
 
             expensive_side = "DOWN" if spike_side == "UP" else "UP"
 
+            # =================================================================
+            # FADE MODE: Buy expensive side (opposite of spike), hold to resolution
+            # =================================================================
+            if self.fade_mode and spike_direction is not None:
+                entry_side = expensive_side
+                expensive_ask = down_ask if entry_side == "DOWN" else up_ask
+
+                # FADE FILTER: Expensive side must be >= $0.80 (still the favorite)
+                if expensive_ask is None or expensive_ask < self.high_entry_threshold:
+                    logger.debug(
+                        f"[FADE] SKIP: {entry_side} ask=${expensive_ask} < "
+                        f"${self.high_entry_threshold:.2f} threshold"
+                    )
+                    return []
+
+                # Exclude confirmed DOWN spikes (spike=DOWN AND velocity<0 = real drop)
+                if spike_direction == "DOWN" and velocity_bps < 0:
+                    logger.debug(
+                        f"[FADE] SKIP: confirmed DOWN spike (vel={velocity_bps:.2f}bps)"
+                    )
+                    return []
+
+                # TARGET SHARES CHECK
+                entry_shares = s.down_shares if entry_side == "DOWN" else s.up_shares
+                if entry_shares + self.base_size > self.target_shares:
+                    logger.debug(
+                        f"[FADE] SKIP: {entry_side} would exceed target "
+                        f"({entry_shares} + {self.base_size} > {self.target_shares})"
+                    )
+                    return []
+
+                # MAKER bid: expensive_ask - entry_offset (configurable, PHOENIX=0.02)
+                entry_price = max(0.01, round(expensive_ask - self.entry_offset, 2))
+
+                quotes.append({
+                    'side': entry_side,
+                    'price': entry_price,
+                    'size': self.base_size,
+                    'level': 0,
+                    'is_rebalance': False,
+                    'is_spike_entry': True,
+                    'is_fade_entry': True,
+                    'spike_magnitude': spike_magnitude,
+                    'enhanced_score': enhanced_score,
+                })
+
+                logger.info(
+                    f"[FADE] ENTRY: {entry_side} @ ${entry_price:.3f} "
+                    f"(expensive_ask=${expensive_ask:.3f}, spike={spike_direction}, "
+                    f"mag={spike_magnitude:.4f}%)"
+                )
+
+                s.quotes_generated += len(quotes)
+                return quotes
+
+            # FADE mode ONLY enters on actual spikes — no velocity-based entries
+            if self.fade_mode:
+                return []
+
+            # =================================================================
+            # NON-FADE MODE: Original spike entry logic
+            # =================================================================
+
             # TARGET SHARES CHECK: Don't exceed target on either side
             # NOTE: When changing base_size, ensure target_shares is updated accordingly
             spike_shares = s.up_shares if spike_side == "UP" else s.down_shares
@@ -2127,6 +2199,11 @@ class EnhancedSpikeStrategy:
 
         # PHASE 2: Entry filled - place hedge
         else:
+            # FADE MODE: No hedging — hold to resolution
+            if self.fade_mode:
+                s.quotes_generated += len(quotes)
+                return quotes
+
             expensive_side = "DOWN" if s.first_fill_side == "UP" else "UP"
             expensive_ask = down_ask if expensive_side == "DOWN" else up_ask
             expensive_bid_price = down_bid if expensive_side == "DOWN" else up_bid
@@ -2350,6 +2427,21 @@ class EnhancedSpikeStrategy:
 
         if s.first_fill_side is None:
             self.record_first_fill(side_upper, price, s.last_velocity)
+
+            # FADE MODE: Reset phase after entry fill so next entry can happen.
+            # Position shares are kept (accumulated), but phase state is cleared.
+            # CAP3 limits total entries per market.
+            if self.fade_mode:
+                logger.info(
+                    f"[FADE] Entry filled: {side_upper} {size}@${price:.3f} | "
+                    f"Resetting phase for next signal (entries={self._market_entry_count})"
+                )
+                s.first_fill_side = None
+                s.first_fill_price = 0.0
+                s.first_fill_time = None
+                s.locked_hedge_target = None
+                s.phase = EnhancedSpikePhase.QUOTING
+                return
         else:
             self.maybe_tighten_hedge_target(s.last_velocity)
 
@@ -2357,6 +2449,10 @@ class EnhancedSpikeStrategy:
 
     def _check_completed_pairs(self) -> None:
         """Check and record matched pairs."""
+        # FADE MODE: No pair matching — positions resolve at market end
+        if self.fade_mode:
+            return
+
         s = self.state
         matchable = s.matchable_pairs
 

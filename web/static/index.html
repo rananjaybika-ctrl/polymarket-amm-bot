@@ -23,10 +23,10 @@
 
         <!-- Mode Cards Container -->
         <div class="cards-container">
-            <!-- ========== AGGRESSIVE MODE CARD ========== -->
+            <!-- ========== PHOENIX MODE CARD ========== -->
             <div class="mode-card" id="card-aggressive">
                 <div class="card-header">
-                    <h2>AGGRESSIVE</h2>
+                    <h2>PHOENIX</h2>
                     <div class="status-badge stopped" id="badge-aggressive">
                         <span class="status-dot"></span>
                         <span class="status-text">Stopped</span>
@@ -69,16 +69,16 @@
                         </tbody>
                     </table>
                     <div class="metrics-row">
-                        <div class="metric pairs">
+                        <div class="metric">
+                            <span class="label">Entries</span>
                             <span class="value" id="aggressive-pairs">--</span>
-                            <span class="label">@ <span id="aggressive-avg-pair-cost">--</span></span>
                         </div>
                         <div class="metric">
-                            <span class="label">Locked PNL</span>
-                            <span class="value pnl" id="aggressive-locked-pnl">--</span>
+                            <span class="label">Exposure</span>
+                            <span class="value" id="aggressive-locked-pnl">--</span>
                         </div>
                         <div class="metric">
-                            <span class="label">Range PNL</span>
+                            <span class="label">Est PNL</span>
                             <span class="value pnl" id="aggressive-pnl-range">--</span>
                         </div>
                         <div class="metric">
@@ -124,32 +124,16 @@
                                 <input type="number" id="aggressive-balance-input" value="170" min="1">
                             </div>
                             <div class="config-field">
-                                <label>Lookback (ms)</label>
-                                <input type="number" id="aggressive-lookback" value="1200" min="100" step="100" title="Spike detection lookback in milliseconds">
+                                <label>Shares/Entry</label>
+                                <input type="number" id="aggressive-base-size" value="25" min="5" step="5" title="Shares per MAKER bid (PHOENIX V3: 25 shares/entry)">
                             </div>
                             <div class="config-field">
-                                <label>Time Stop (s)</label>
-                                <input type="number" id="aggressive-time-stop" value="30" min="10" step="10" title="Exit after 30s if not filled (EWMA_1000+TS30 winner from TRADING_CONFIGS.py)">
-                            </div>
-                            <div class="config-field">
-                                <label>Target Shares</label>
-                                <input type="number" id="aggressive-base-size" value="15" min="5" step="5" title="Shares per trade (CAP3: 15 shares × 3 entries = $42 max/market)">
-                            </div>
-                            <div class="config-field">
-                                <label>Skip High $</label>
-                                <input type="number" id="aggressive-high-entry" value="0.80" min="0.70" max="0.95" step="0.05" title="Skip entries >= this price ($0.80 = FADE threshold)">
-                            </div>
-                            <div class="config-field">
-                                <label>Cycling</label>
-                                <input type="checkbox" id="aggressive-cycling" checked title="Keep trading after equal hedge is achieved, merge pairs, then continue">
-                            </div>
-                            <div class="config-field">
-                                <label>Max Loss $</label>
-                                <input type="number" id="aggressive-max-loss" value="50" step="1" min="0" title="Session loss limit ($50 circuit breaker)">
+                                <label>Min Ask $</label>
+                                <input type="number" id="aggressive-high-entry" value="0.80" min="0.70" max="0.95" step="0.05" title="FADE filter: only enter when expensive side ask >= this price (opposite side must still be the favorite)">
                             </div>
                             <div class="config-field">
                                 <label>Max Entries/Mkt</label>
-                                <input type="number" id="aggressive-max-entries" value="3" step="1" min="0" title="Max entries per 15-min market (0=unlimited, 3=CAP3 winner from backtests)">
+                                <input type="number" id="aggressive-max-entries" value="99" step="1" min="0" title="Max entries per 15-min market (0=unlimited, 99=PHOENIX V3 unlimited cycling)">
                             </div>
                         </div>
                     </div>
