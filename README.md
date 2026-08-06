@@ -10,7 +10,7 @@
 
 ## ⚠️ Performance disclosure — read first
 
-**All performance figures on this page are hypothetical results derived from historical simulation.** They are not actual trading results and no representation is made that any account will achieve comparable returns. Simulated results benefit from hindsight, do not reflect the full cost of financing, infrastructure or operational failure, and cannot fully model queue position or adverse selection.
+**All performance figures on this page are results derived from historical simulation.** They are not actual trading results and no representation is made that any account will achieve comparable returns. Simulated results benefit from hindsight, do not reflect the full cost of financing, infrastructure or operational failure, and cannot fully model queue position or adverse selection.
 
 Where live results exist, they are reported alongside the backtest — including **one strategy whose live paper performance inverted the sign of its backtested return** ([see below](#5-live-versus-simulated-the-fade-divergence)). That divergence is the single most informative result in this repository.
 
