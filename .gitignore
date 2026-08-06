@@ -36,8 +36,10 @@ wheels/
 logs/
 *.log
 
-# Data exports (keep directory, ignore CSVs)
-data/*.csv
+# CSV data files (all locations)
+*.csv
+
+# Data exports
 data/*.json
 data/archive/
 
