@@ -180,7 +180,7 @@ Python · WebSockets · Polymarket CLOB API · Polygon L2 · Binance spot feeds 
 
 ## 9. Development approach
 
-Built through AI-assisted development. All strategy design, signal specification, hypothesis formation, execution-model assumptions and research direction are the author's; implementation was delegated to an AI pair-programming layer (Claude). The author's contribution is the domain judgement — what to test, what a valid fill model looks like, and when a result is too good to be true.
+Built through AI-assisted development. All strategy design, signal specification, hypothesis formation, execution-model assumptions and research direction are the author's; implementation was delegated to an AI pair-programming layer (Claude). The author's contribution is the domain judgement — what to test, what a valid fill model looks like.
 
 ## 10. Why it was retired
 
