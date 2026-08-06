@@ -1,6 +1,6 @@
 # Polymarket AMM Bot
 
-> **DECOMMISSIONED / LEGACY** -- This project is no longer actively maintained.
+> **LEGACY** -- This project is no longer actively maintained.
 
 Automated market-making bot for Polymarket's BTC binary options markets. Designed to exploit pricing inefficiencies using real-time crypto price feeds, statistical signal detection, and whale order flow analysis.
 
