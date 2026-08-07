@@ -14,7 +14,7 @@
 
 Where live results exist, they are reported alongside the backtest — including **one strategy whose live paper performance inverted the sign of its backtested return** ([see below](#5-live-versus-simulated-the-fade-divergence)). That divergence is the single most informative result in this repository.
 
-The author holds no professional trading licence. Nothing here is investment advice.
+Nothing here is investment advice.
 
 ---
 
